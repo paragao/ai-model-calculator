@@ -14,6 +14,7 @@ N_EXPERTS = 128  # Total number of experts in MoE layers
 # Parallelism configuration
 PP = 1  # Pipeline parallelism degree (layers split across pipeline stages)
 TP = 1  # Tensor parallelism degree (model split within layers)
+CP = 1  # Context parallelism degree (sequence/context split across GPUs)
 EP = 8  # Expert parallelism degree (experts distributed across GPUs)
 
 # Training configuration

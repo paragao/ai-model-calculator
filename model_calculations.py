@@ -861,7 +861,7 @@ all_results = {
 for hw in HARDWARE:
     total_gpus = hw["gpus"]
     gpu_mem = hw["mem_gb"]
-    dp = total_gpus // (TP * PP * EP)
+    dp = total_gpus // (TP * PP * CP)
 
     all_results["hardware"].append(hw["name"])
 
@@ -962,7 +962,7 @@ batch_results = {}
 
 for hw in HARDWARE:
     total_gpus = hw["gpus"]
-    dp = total_gpus // (TP * PP * EP)
+    dp = total_gpus // (TP * PP * CP)
 
     print(f"\n{'#' * 140}")
     print(f"# {hw['name']}: DP={dp} (analyzing {len(MICROS)} micro × {len(GRAD_ACCUM_VALUES)} accum = {len(MICROS) * len(GRAD_ACCUM_VALUES)} combinations)")
@@ -1368,7 +1368,7 @@ for variant in VARIANTS:
     oom_list = []
 
     for hw in HARDWARE:
-        dp = hw["gpus"] // (TP * PP * EP)
+        dp = hw["gpus"] // (TP * PP * CP)
         layers_per_gpu = variant["layers"] // PP
 
         config_result = generate_platform_configs(
@@ -1460,7 +1460,7 @@ def analyze_communication_overhead(variant, hw, dp_values, layers_per_gpu, exper
         - comm_metrics: list of dicts with DP-specific metrics
     """
     gpu_mem = hw["mem_gb"]
-    dp_full = hw["gpus"] // (TP * PP * EP)
+    dp_full = hw["gpus"] // (TP * PP * CP)
 
     # Calculate model memory
     model_mem_gb = calculate_model_memory_gb(
@@ -1709,7 +1709,7 @@ comm_results = {
 for hw in HARDWARE:
     total_gpus = hw["gpus"]
     inter_node_bw = hw["inter_node_bw_gb"]
-    dp = total_gpus // (TP * PP * EP)
+    dp = total_gpus // (TP * PP * CP)
 
     # Generate DP values to analyze: multiple DP options from low to high
     # Start from minimum of 64 or dp//8, then double until reaching full DP
