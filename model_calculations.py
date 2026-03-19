@@ -2094,6 +2094,11 @@ for hw in HARDWARE:
 
     zero1_results["hardware"][hw["name"]] = hw_results
 
+    # Check if any variants fit with ZeRO-1 on this hardware
+    any_viable = any(result["viable"] for result in hw_results.values())
+    if not any_viable:
+        print(f"  ⚠️  No variants fit with ZeRO-1 on this hardware ({hw['mem_gb']} GB/GPU insufficient) - ZeRO-2 required")
+
 # Generate and display recommendations
 print(f"\n{'=' * 140}")
 print("💡 ZeRO-1 COMMUNICATION RECOMMENDATIONS")
