@@ -6,6 +6,8 @@ from hardware_config import HARDWARE
 from project_config import *
 from advanced_config import *
 
+# Global variable for color control (can be set via command-line args)
+USE_COLOR = True
 
 def calculate_model_memory_gb(
     variant,
@@ -485,10 +487,6 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         "oom_diagnostics": None,
         "model_mem_gb": model_mem_gb,
     }
-
-
-# Global variable for color control (can be set via command-line args)
-USE_COLOR = True
 
 
 def color_text(text, color_name):
@@ -1022,12 +1020,337 @@ if batch_recommendations:
         print(f"  {rec}")
 else:
     print("  ✅ All hardware has optimal batch configurations!")
+
+# ============================================================================
+# PHASE 3 HELPER FUNCTIONS
+# ============================================================================
+
+def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
+    """
+    Generate platform configurations for a variant/hardware combination.
+
+    Tries ZeRO-1 first (best efficiency), falls back to ZeRO-2 if needed.
+    Generates configs for both 1x and 2x target batch sizes.
+
+    Args:
+        variant: Variant dict with model architecture
+        hw: Hardware dict with GPU specs
+        dp: Data parallelism degree
+        layers_per_gpu: Number of layers per GPU
+        experts_per_gpu: Number of experts per GPU
+
+    Returns:
+        dict with:
+        - platforms: list of platform config dicts
+        - oom: bool indicating if variant doesn't fit
+        - oom_reason: str explaining why OOM occurred
+    """
+    total_gpus = hw["gpus"]
+    peak_tflops = hw["peak_tflops_bf16"]
+    gpu_mem = hw["mem_gb"]
+
+    # Try ZeRO-1 first (better efficiency)
+    viable_z1 = calculate_viable_micro_batch_sizes(
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1
+    )
+
+    # Try ZeRO-2
+    viable_z2 = calculate_viable_micro_batch_sizes(
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=2
+    )
+
+    # Determine best ZeRO strategy and micro batch size
+    if viable_z1:
+        zero_config = ZERO_STRATEGY[0]  # ZeRO-1
+        micro = max(viable_z1)  # Use largest viable
+    elif viable_z2:
+        zero_config = ZERO_STRATEGY[1]  # ZeRO-2
+        micro = max(viable_z2)  # Use largest viable
+    else:
+        # OOM - cannot fit on this hardware
+        return {
+            "platforms": [],
+            "oom": True,
+            "oom_reason": f"Insufficient memory even with ZeRO-2 (requires >{gpu_mem}GB)"
+        }
+
+    # Generate configurations for 1x and 2x target batch size
+    platforms = []
+    for batch_multiplier in [1, 2]:
+        tok_batch = TOKENS_PER_BATCH * batch_multiplier
+
+        # Calculate required accumulation steps: tok_batch = dp * micro * accum * SEQ_LEN
+        accum = int(tok_batch / (dp * micro * SEQ_LEN))
+
+        # Calculate training steps
+        steps = int(TOTAL_TOKENS / tok_batch)
+
+        # Create platform name
+        batch_label = (
+            f"{tok_batch / 1e6:.0f}M"
+            if batch_multiplier == 2
+            else f"{tok_batch / 1e6:.1f}M"
+        )
+        platform_name = f"{hw['name']} ({batch_label})"
+
+        platforms.append({
+            "name": platform_name,
+            "gpus": total_gpus,
+            "zero": zero_config["zero"],
+            "eff": zero_config["eff"],
+            "micro": micro,
+            "accum": accum,
+            "tok_batch": tok_batch,
+            "steps": steps,
+            "peak_tflops": peak_tflops,
+        })
+
+    return {
+        "platforms": platforms,
+        "oom": False,
+        "oom_reason": None
+    }
+
+
+def format_training_time_with_color(months_low, months_high, rel_speed):
+    """
+    Format training time range with color coding based on relative speed.
+
+    Args:
+        months_low: Lower bound of time estimate (months)
+        months_high: Upper bound of time estimate (months)
+        rel_speed: Relative speed multiplier vs baseline
+
+    Returns:
+        Colored string showing time range
+    """
+    time_str = f"{months_low:>4.1f}-{months_high:.1f}mo"
+
+    # Color based on relative speed
+    if rel_speed >= 2.0:
+        return color_text(time_str, "green")  # Fast
+    elif rel_speed >= 1.5:
+        return color_text(time_str, "cyan")   # Good
+    elif rel_speed >= 1.0:
+        return color_text(time_str, "yellow") # Moderate
+    else:
+        return color_text(time_str, "red")    # Slow
+
+
+def calculate_training_metrics(platform, active_params_b, base_time_months):
+    """
+    Calculate training time metrics for a platform configuration.
+
+    Args:
+        platform: Platform dict with gpus, peak_tflops, eff
+        active_params_b: Active parameters in billions
+        base_time_months: Baseline time for relative speed calculation
+
+    Returns:
+        dict with:
+        - est_months: Estimated training time in months
+        - rel_speed: Relative speed vs baseline (1.0x = baseline)
+        - months_low: Lower bound with optimistic multiplier
+        - months_high: Upper bound with pessimistic multiplier
+        - efficiency_rating: Star rating (0-3)
+    """
+    # Calculate absolute training time using FLOPs
+    est_months = calculate_training_time_months(
+        TOTAL_TOKENS,
+        active_params_b,
+        platform["gpus"],
+        platform["peak_tflops"],
+        MFU,
+        platform["eff"]
+    )
+
+    # Calculate relative speed compared to baseline
+    rel_speed = base_time_months / est_months
+
+    # Apply uncertainty range
+    months_low = est_months * TIME_ESTIMATE_LOW_MULTIPLIER
+    months_high = est_months * TIME_ESTIMATE_HIGH_MULTIPLIER
+
+    # Assign efficiency rating (0=best, 3=worst)
+    if rel_speed >= 2.0:
+        efficiency_rating = 0  # ⭐⭐⭐
+    elif rel_speed >= 1.5:
+        efficiency_rating = 1  # ⭐⭐
+    elif rel_speed >= 1.0:
+        efficiency_rating = 2  # ⭐
+    else:
+        efficiency_rating = 3  # (no stars)
+
+    return {
+        "est_months": est_months,
+        "rel_speed": rel_speed,
+        "months_low": months_low,
+        "months_high": months_high,
+        "efficiency_rating": efficiency_rating
+    }
+
+
+def generate_training_recommendations(training_results):
+    """
+    Analyze training results and generate actionable recommendations.
+
+    Args:
+        training_results: dict with variant results and OOM cases
+
+    Returns:
+        list of recommendation strings
+    """
+    recommendations = []
+
+    if not training_results.get("variants"):
+        return ["⚠️  No training configurations were viable"]
+
+    # Find fastest overall configuration
+    fastest_config = None
+    fastest_time = float('inf')
+    fastest_variant = None
+
+    for variant_name, platforms in training_results["variants"].items():
+        for platform in platforms:
+            if platform["est_months"] < fastest_time:
+                fastest_time = platform["est_months"]
+                fastest_config = platform
+                fastest_variant = variant_name
+
+    if fastest_config:
+        recommendations.append(
+            f"🏆 Fastest configuration: Variant {fastest_variant} on {fastest_config['name']} "
+            f"({fastest_config['months_low']:.1f}-{fastest_config['months_high']:.1f} months, "
+            f"{fastest_config['rel_speed']:.1f}x speed)"
+        )
+
+    # Find most cost-effective (best time per GPU)
+    best_efficiency = None
+    best_efficiency_ratio = float('inf')
+    best_efficiency_variant = None
+
+    for variant_name, platforms in training_results["variants"].items():
+        for platform in platforms:
+            efficiency_ratio = platform["est_months"] / (platform["gpus"] / 1000)  # months per 1000 GPUs
+            if efficiency_ratio < best_efficiency_ratio:
+                best_efficiency_ratio = efficiency_ratio
+                best_efficiency = platform
+                best_efficiency_variant = variant_name
+
+    if best_efficiency and best_efficiency != fastest_config:
+        recommendations.append(
+            f"💰 Most cost-effective: Variant {best_efficiency_variant} on {best_efficiency['name']} "
+            f"({best_efficiency['est_months'] / (best_efficiency['gpus'] / 1000):.2f} months per 1000 GPUs)"
+        )
+
+    # Analyze ZeRO strategy impact
+    zero1_configs = []
+    zero2_configs = []
+
+    for variant_name, platforms in training_results["variants"].items():
+        for platform in platforms:
+            if platform["zero"] == 1:
+                zero1_configs.append((variant_name, platform))
+            elif platform["zero"] == 2:
+                zero2_configs.append((variant_name, platform))
+
+    if zero1_configs and zero2_configs:
+        avg_z1_eff = sum(p["eff"] for _, p in zero1_configs) / len(zero1_configs)
+        avg_z2_eff = sum(p["eff"] for _, p in zero2_configs) / len(zero2_configs)
+        overhead_pct = ((avg_z1_eff - avg_z2_eff) / avg_z1_eff) * 100
+
+        recommendations.append(
+            f"⚡ ZeRO strategy impact: ZeRO-2 adds ~{overhead_pct:.0f}% overhead vs ZeRO-1 "
+            f"({len(zero2_configs)} configs require ZeRO-2)"
+        )
+
+    # Check for OOM cases and suggest alternatives
+    if training_results.get("oom_cases"):
+        oom_variants = list(training_results["oom_cases"].keys())
+        if oom_variants:
+            recommendations.append(
+                f"⚠️  Variants {', '.join(oom_variants)} have OOM issues on some hardware "
+                f"→ Consider H200 (141GB) vs H100 (80GB) or reduce model size"
+            )
+
+    # Analyze batch size impact (1x vs 2x)
+    batch_size_impacts = []
+    for variant_name, platforms in training_results["variants"].items():
+        # Group by hardware (first part of name before parentheses)
+        hw_groups = {}
+        for p in platforms:
+            hw_name = p["name"].split("(")[0].strip()
+            if hw_name not in hw_groups:
+                hw_groups[hw_name] = []
+            hw_groups[hw_name].append(p)
+
+        # Compare 1x vs 2x for each hardware
+        for hw_name, hw_platforms in hw_groups.items():
+            if len(hw_platforms) >= 2:
+                p1x = hw_platforms[0]  # First is 1x
+                p2x = hw_platforms[1]  # Second is 2x
+                time_diff_pct = ((p2x["est_months"] - p1x["est_months"]) / p1x["est_months"]) * 100
+                batch_size_impacts.append((variant_name, hw_name, time_diff_pct))
+
+    if batch_size_impacts:
+        avg_impact = sum(abs(t[2]) for t in batch_size_impacts) / len(batch_size_impacts)
+        if avg_impact > 5:  # More than 5% difference
+            recommendations.append(
+                f"📊 Batch size impact: 2x batch size changes training time by ~{avg_impact:.1f}% on average"
+            )
+
+    return recommendations
+
+
+def export_training_results_csv(training_results, filename):
+    """
+    Export training time analysis results to CSV file.
+
+    Args:
+        training_results: dict with variant results
+        filename: Output CSV filename
+    """
+    import csv
+
+    with open(filename, 'w', newline='') as f:
+        fieldnames = [
+            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum',
+            'tok_batch', 'steps', 'est_months', 'rel_speed', 'months_low',
+            'months_high', 'efficiency_rating'
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for variant_name, platforms in training_results.get("variants", {}).items():
+            for platform in platforms:
+                writer.writerow({
+                    'variant': variant_name,
+                    'platform': platform['name'],
+                    'gpus': platform['gpus'],
+                    'zero': platform['zero'],
+                    'micro': platform['micro'],
+                    'accum': platform['accum'],
+                    'tok_batch': platform['tok_batch'],
+                    'steps': platform['steps'],
+                    'est_months': platform.get('est_months', 0),
+                    'rel_speed': platform.get('rel_speed', 0),
+                    'months_low': platform.get('months_low', 0),
+                    'months_high': platform.get('months_high', 0),
+                    'efficiency_rating': platform.get('efficiency_rating', 3)
+                })
+
 # ============================================================================
 # PHASE 3: Training time estimates
 # ============================================================================
 print(f"\n\n{'=' * 140}")
 print("TRAINING TIME COMPARISON: ALL PLATFORMS AND VARIANTS")
 print("=" * 140)
+
+# Collect results for recommendations
+training_results = {
+    "variants": {},  # variant_name -> list of platform results
+    "oom_cases": {},  # variant_name -> list of OOM hardware names
+}
 
 # Loop through all variants
 for variant in VARIANTS:
@@ -1040,112 +1363,79 @@ for variant in VARIANTS:
     )
     print(f"{'#' * 140}")
 
-    # Dynamically generate platform configurations from HARDWARE, ZERO_STRATEGY, and other variables
-    platforms = []
-    skipped_configs = []
+    # Generate platform configurations for this variant
+    all_platforms = []
+    oom_list = []
 
     for hw in HARDWARE:
-        total_gpus = hw["gpus"]
-        peak_tflops = hw["peak_tflops_bf16"]
-        gpu_mem = hw["mem_gb"]
-        dp = total_gpus // (TP * PP * EP)
-
-        # Calculate model memory and layers per GPU
+        dp = hw["gpus"] // (TP * PP * EP)
         layers_per_gpu = variant["layers"] // PP
 
-        # Try ZeRO-1 first (better efficiency)
-        viable_z1 = calculate_viable_micro_batch_sizes(
-            variant, gpu_mem, dp, layers_per_gpu, EXPERTS_PER_GPU, zero_strategy=1
+        config_result = generate_platform_configs(
+            variant, hw, dp, layers_per_gpu, EXPERTS_PER_GPU
         )
 
-        # Try ZeRO-2
-        viable_z2 = calculate_viable_micro_batch_sizes(
-            variant, gpu_mem, dp, layers_per_gpu, EXPERTS_PER_GPU, zero_strategy=2
-        )
-
-        # Determine best ZeRO strategy and micro batch size
-        if viable_z1:
-            zero_config = ZERO_STRATEGY[0]  # ZeRO-1
-            micro = max(viable_z1)  # Use largest viable
-        elif viable_z2:
-            zero_config = ZERO_STRATEGY[1]  # ZeRO-2
-            micro = max(viable_z2)  # Use largest viable
+        if config_result["oom"]:
+            oom_list.append(hw["name"])
         else:
-            # OOM - skip this hardware for this variant
-            skipped_configs.append(f"{hw['name']}")
-            continue
+            all_platforms.extend(config_result["platforms"])
 
-        # Generate configurations for 1x and 2x target batch size
-        for batch_multiplier in [1, 2]:
-            tok_batch = TOKENS_PER_BATCH * batch_multiplier
-
-            # Calculate required accumulation steps: tok_batch = dp * micro * accum * SEQ_LEN
-            accum = int(tok_batch / (dp * micro * SEQ_LEN))
-
-            # Calculate training steps
-            steps = int(TOTAL_TOKENS / tok_batch)
-
-            # Create platform name
-            batch_label = (
-                f"{tok_batch / 1e6:.0f}M"
-                if batch_multiplier == 2
-                else f"{tok_batch / 1e6:.1f}M"
-            )
-            platform_name = f"{hw['name']} ({batch_label})"
-
-            platforms.append(
-                {
-                    "name": platform_name,
-                    "gpus": total_gpus,
-                    "zero": zero_config["zero"],
-                    "eff": zero_config["eff"],
-                    "micro": micro,
-                    "accum": accum,
-                    "tok_batch": tok_batch,
-                    "steps": steps,
-                    "peak_tflops": peak_tflops,
-                }
-            )
-
-    # Calculate training times using FLOPs-based approach
-    base = platforms[0]
-    print(
-        f"\n  {'Platform':<25} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'Tok/batch':>10} {'Steps':>8} {'Rel Speed':>10} {'Est. Time':>12}"
-    )
-    print(
-        f"  {'-' * 25} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 12}"
-    )
-
-    # Calculate baseline time for relative speed comparison
-    base_time_months = calculate_training_time_months(
-        TOTAL_TOKENS,
-        active_params_b,
-        base["gpus"],
-        base["peak_tflops"],
-        MFU,
-        base["eff"],
-    )
-
-    for p in platforms:
-        # Calculate absolute training time using FLOPs
-        est_months = calculate_training_time_months(
-            TOTAL_TOKENS, active_params_b, p["gpus"], p["peak_tflops"], MFU, p["eff"]
+    # Calculate and display training times if platforms are available
+    if all_platforms:
+        # Calculate baseline time for relative speed comparison
+        base = all_platforms[0]
+        base_time_months = calculate_training_time_months(
+            TOTAL_TOKENS,
+            active_params_b,
+            base["gpus"],
+            base["peak_tflops"],
+            MFU,
+            base["eff"],
         )
 
-        # Calculate relative speed compared to baseline
-        rel_speed = base_time_months / est_months
-
-        # Apply uncertainty range
-        months_low = est_months * TIME_ESTIMATE_LOW_MULTIPLIER
-        months_high = est_months * TIME_ESTIMATE_HIGH_MULTIPLIER
-
+        # Print table header
         print(
-            f"  {p['name']:<25} {p['gpus']:>6} {'Z' + str(p['zero']):>5} {p['micro']:>6} {p['accum']:>6} {p['tok_batch'] / 1e6:>8.1f}M {p['steps']:>8,} {rel_speed:>9.1f}x {months_low:>4.1f}-{months_high:.1f}mo"
+            f"\n  {'Platform':<25} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'Tok/batch':>10} {'Steps':>8} {'Rel Speed':>10} {'Est. Time':>12}"
+        )
+        print(
+            f"  {'-' * 25} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 12}"
         )
 
-    # Show skipped configurations if any
-    if skipped_configs:
-        print(f"\n  Note: Skipped hardware (OOM for this variant): {', '.join(skipped_configs)}")
+        # Calculate and display metrics for each platform
+        platform_results = []
+        for p in all_platforms:
+            metrics = calculate_training_metrics(p, active_params_b, base_time_months)
+            p.update(metrics)
+            platform_results.append(p)
+
+            # Format time string with color coding
+            time_str = format_training_time_with_color(
+                metrics["months_low"], metrics["months_high"], metrics["rel_speed"]
+            )
+
+            print(
+                f"  {p['name']:<25} {p['gpus']:>6} {'Z' + str(p['zero']):>5} "
+                f"{p['micro']:>6} {p['accum']:>6} {p['tok_batch'] / 1e6:>8.1f}M "
+                f"{p['steps']:>8,} {metrics['rel_speed']:>9.1f}x {time_str}"
+            )
+
+        training_results["variants"][variant_name] = platform_results
+
+    # Store and display OOM cases
+    if oom_list:
+        training_results["oom_cases"][variant_name] = oom_list
+        print(f"\n  Note: Skipped hardware (OOM): {', '.join(oom_list)}")
+
+# Generate and display recommendations
+print(f"\n{'=' * 140}")
+print("💡 TRAINING TIME RECOMMENDATIONS")
+print(f"{'=' * 140}")
+training_recommendations = generate_training_recommendations(training_results)
+if training_recommendations:
+    for rec in training_recommendations:
+        print(f"  {rec}")
+else:
+    print("  ✅ All training configurations look good!")
 
 # ============================================================================
 # PHASE 4: ZeRO-2 overhead at DP=512
