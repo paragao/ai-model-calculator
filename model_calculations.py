@@ -1,7 +1,4 @@
 #!/usr/bin/python3
-# ============================================================================
-# PHASE 1: Memory analysis scenario
-# ============================================================================
 
 # Import configurations
 from variants_config import VARIANTS
@@ -688,6 +685,171 @@ def export_results_json(results, filename):
     print(f"\n✅ Exported results to {filename}")
 
 
+def assess_training_steps(steps, tokens_per_batch):
+    """
+    Assess whether the number of training steps is reasonable.
+
+    Args:
+        steps: Number of training steps
+        tokens_per_batch: Tokens per batch
+
+    Returns:
+        tuple: (assessment_string, priority_level)
+            priority_level: 0=optimal, 1=good, 2=borderline, 3=poor
+    """
+    # Check if matches target batch sizes
+    if abs(tokens_per_batch - TOKENS_PER_BATCH) / TOKENS_PER_BATCH < MARGIN:
+        return ("=== MATCHES TARGET ===", 0)
+    elif abs(tokens_per_batch - TOKENS_PER_BATCH * 2) / (TOKENS_PER_BATCH * 2) < MARGIN:
+        return ("=== MATCHES 2X TARGET ===", 0)
+
+    # Check step ranges
+    if LOWER_BOUND_OPTIM_RANGE < steps < UPPER_BOUND_OPTIM_RANGE:
+        return ("reasonable", 1)
+    elif LOWER_BOUND_LOW_RANGE < steps < UPPER_BOUND_LOW_RANGE:
+        return ("borderline (low steps)", 2)
+    elif LOWER_BOUND_HIGH_RANGE < steps < UPPER_BOUND_HIGH_RANGE:
+        return ("borderline (high steps)", 2)
+    elif steps >= MAX_STEPS:
+        return ("too many steps", 3)
+    elif steps < MIN_STEPS:
+        return ("too few steps", 3)
+    else:
+        return ("unknown", 2)
+
+
+def analyze_batch_configuration(hw, micro, accum, dp):
+    """
+    Analyze a single batch configuration.
+
+    Args:
+        hw: Hardware configuration dict
+        micro: Micro batch size
+        accum: Gradient accumulation steps
+        dp: Data parallelism degree
+
+    Returns:
+        dict with:
+        - micro: Micro batch size
+        - accum: Gradient accumulation steps
+        - tokens_per_batch: Total tokens per batch
+        - steps: Training steps needed
+        - assessment: Assessment string
+        - priority: Priority level (0-3, lower is better)
+        - hardware: Hardware name
+    """
+    tokens_per_batch = dp * micro * accum * SEQ_LEN
+    steps = TOTAL_TOKENS / tokens_per_batch
+    assessment, priority = assess_training_steps(steps, tokens_per_batch)
+
+    return {
+        "hardware": hw["name"],
+        "micro": micro,
+        "accum": accum,
+        "tokens_per_batch": tokens_per_batch,
+        "steps": steps,
+        "assessment": assessment,
+        "priority": priority,
+    }
+
+
+def format_batch_assessment_with_color(assessment, priority):
+    """
+    Format batch assessment with color coding.
+
+    Args:
+        assessment: Assessment string
+        priority: Priority level (0-3)
+
+    Returns:
+        Colored assessment string
+    """
+    if priority == 0:  # Optimal (matches target)
+        return color_text(assessment, 'cyan')
+    elif priority == 1:  # Good (reasonable)
+        return color_text(assessment, 'green')
+    elif priority == 2:  # Borderline
+        return color_text(assessment, 'yellow')
+    else:  # Poor (too many/few steps)
+        return color_text(assessment, 'red')
+
+
+def generate_batch_recommendations(batch_results):
+    """
+    Generate recommendations for batch size configurations.
+
+    Args:
+        batch_results: Dict with hardware -> list of batch configs
+
+    Returns:
+        List of recommendation strings
+    """
+    recommendations = []
+
+    for hw_name, configs in batch_results.items():
+        # Find optimal configurations
+        optimal_configs = [c for c in configs if c["priority"] == 0]
+        good_configs = [c for c in configs if c["priority"] <= 1]
+
+        if not optimal_configs and not good_configs:
+            recommendations.append(
+                f"⚠️  {hw_name}: No optimal batch configurations found - all result in poor step counts"
+            )
+        elif optimal_configs:
+            # Show range of optimal configs
+            micro_values = sorted(set(c["micro"] for c in optimal_configs))
+            accum_values = sorted(set(c["accum"] for c in optimal_configs))
+
+            if len(optimal_configs) == 1:
+                c = optimal_configs[0]
+                recommendations.append(
+                    f"✅ {hw_name}: Optimal config is micro={c['micro']}, accum={c['accum']} "
+                    f"({c['tokens_per_batch']/1e6:.1f}M tokens/batch)"
+                )
+            else:
+                recommendations.append(
+                    f"✅ {hw_name}: {len(optimal_configs)} optimal configs available "
+                    f"(micro: {micro_values}, accum: {accum_values})"
+                )
+
+    return recommendations
+
+
+def export_batch_results_csv(batch_results, filename):
+    """
+    Export batch analysis results to CSV.
+
+    Args:
+        batch_results: Dict with hardware -> list of batch configs
+        filename: Output CSV filename
+    """
+    import csv
+
+    with open(filename, 'w', newline='') as f:
+        fieldnames = ['hardware', 'micro_batch', 'grad_accum', 'tokens_per_batch_M',
+                      'training_steps', 'assessment', 'priority']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for hw_name, configs in batch_results.items():
+            for config in configs:
+                row = {
+                    'hardware': hw_name,
+                    'micro_batch': config['micro'],
+                    'grad_accum': config['accum'],
+                    'tokens_per_batch_M': config['tokens_per_batch'] / 1e6,
+                    'training_steps': int(config['steps']),
+                    'assessment': config['assessment'],
+                    'priority': config['priority']
+                }
+                writer.writerow(row)
+
+    print(f"\n✅ Exported batch analysis to {filename}")
+
+
+# ============================================================================
+# PHASE 1: Memory analysis scenario
+# ============================================================================
 print("=" * 140)
 print("SCENARIOS: MEMORY ANALYSIS")
 print("=" * 140)
@@ -789,42 +951,77 @@ if recommendations:
         print(f"  {rec}")
 else:
     print("  ✅ All configurations look good!")
+
 # ============================================================================
-# PHASE 2: Batch size analysis for DP=512
+# PHASE 2: Batch size analysis
 # ============================================================================
 print(f"\n\n{'=' * 140}")
 print("BATCH SIZE ANALYSIS (DP=TOTAL_GPUS/(PP*TP*EP))")
 print("=" * 140)
+
+# Collect batch results for recommendations
+batch_results = {}
+
 for hw in HARDWARE:
     total_gpus = hw["gpus"]
     dp = total_gpus // (TP * PP * EP)
-    print(f"\n--- All micro/accum combinations ---")
+
+    print(f"\n{'#' * 140}")
+    print(f"# {hw['name']}: DP={dp} (analyzing {len(MICROS)} micro × {len(GRAD_ACCUM_VALUES)} accum = {len(MICROS) * len(GRAD_ACCUM_VALUES)} combinations)")
+    print(f"{'#' * 140}")
+
     print(
-        f"  {'micro':>6} {'accum':>6} {'Tok/batch':>12} {'Steps':>10} {'Assessment':>35}"
+        f"\n  {'micro':>6} {'accum':>6} {'Tok/batch':>12} {'Steps':>10} {'Priority':>10} {'Assessment':>35}"
     )
+    print(
+        f"  {'-' * 6} {'-' * 6} {'-' * 12} {'-' * 10} {'-' * 10} {'-' * 35}"
+    )
+
+    hw_configs = []
+
     for micro in MICROS:
         for accum in GRAD_ACCUM_VALUES:
-            tok = dp * micro * accum * SEQ_LEN
-            steps = TOTAL_TOKENS / tok
-            assess = ""
-            if abs(tok - TOKENS_PER_BATCH) / TOKENS_PER_BATCH < MARGIN:
-                assess = "=== MATCHES TARGET ==="
-            elif abs(tok - TOKENS_PER_BATCH * 2) / (TOKENS_PER_BATCH * 2) < MARGIN:
-                assess = "=== MATCHES 134.2M TARGET ==="
-            elif LOWER_BOUND_OPTIM_RANGE < steps < UPPER_BOUND_OPTIM_RANGE:
-                assess = "reasonable"
-            elif LOWER_BOUND_LOW_RANGE < steps < UPPER_BOUND_LOW_RANGE:
-                assess = "borderline (low steps)"
-            elif LOWER_BOUND_HIGH_RANGE < steps < UPPER_BOUND_HIGH_RANGE:
-                assess = "borderline (high steps)"
-            elif steps >= MAX_STEPS:
-                assess = "too many steps"
-            elif steps < MIN_STEPS:
-                assess = "too few steps"
-            if tok < MAX_TOKENS_PER_BATCH:
-                print(
-                    f"  {micro:>6} {accum:>6} {tok / 1e6:>10.1f}M {steps:>10,.0f} {assess:>35}"
+            # Analyze this configuration
+            config = analyze_batch_configuration(hw, micro, accum, dp)
+
+            # Only display if tokens per batch is reasonable
+            if config["tokens_per_batch"] < MAX_TOKENS_PER_BATCH:
+                hw_configs.append(config)
+
+                # Format assessment with color
+                colored_assessment = format_batch_assessment_with_color(
+                    config["assessment"], config["priority"]
                 )
+
+                # Priority indicator
+                priority_symbols = ["⭐⭐⭐", "⭐⭐ ", "⭐  ", "   "]
+                priority_str = priority_symbols[config["priority"]]
+
+                print(
+                    f"  {config['micro']:>6} {config['accum']:>6} "
+                    f"{config['tokens_per_batch'] / 1e6:>10.1f}M {config['steps']:>10,.0f} "
+                    f"{priority_str:>10} {colored_assessment:>35}"
+                )
+
+    # Store results for this hardware
+    batch_results[hw["name"]] = hw_configs
+
+    # Summary for this hardware
+    optimal_count = len([c for c in hw_configs if c["priority"] == 0])
+    good_count = len([c for c in hw_configs if c["priority"] <= 1])
+
+    print(f"\n  Summary: {optimal_count} optimal, {good_count} good out of {len(hw_configs)} feasible configurations")
+
+# Generate and display batch recommendations
+print(f"\n{'=' * 140}")
+print("💡 BATCH SIZE RECOMMENDATIONS")
+print(f"{'=' * 140}")
+batch_recommendations = generate_batch_recommendations(batch_results)
+if batch_recommendations:
+    for rec in batch_recommendations:
+        print(f"  {rec}")
+else:
+    print("  ✅ All hardware has optimal batch configurations!")
 # ============================================================================
 # PHASE 3: Training time estimates
 # ============================================================================
