@@ -1080,7 +1080,7 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         tok_batch = TOKENS_PER_BATCH * batch_multiplier
 
         # Calculate required accumulation steps: tok_batch = dp * micro * accum * SEQ_LEN
-        accum = int(tok_batch / (dp * micro * SEQ_LEN))
+        accum = max(1, round(tok_batch / (dp * micro * SEQ_LEN)))
 
         # Calculate training steps
         steps = int(TOTAL_TOKENS / tok_batch)
