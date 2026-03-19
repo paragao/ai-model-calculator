@@ -692,11 +692,18 @@ print("=" * 140)
 print("SCENARIOS: MEMORY ANALYSIS")
 print("=" * 140)
 
+# Collect all results for analysis and export
+all_results = {
+    "hardware": [],
+    "variants": {v["name"]: [] for v in VARIANTS}
+}
+
 for hw in HARDWARE:
     total_gpus = hw["gpus"]
     gpu_mem = hw["mem_gb"]
-    dp_effective = total_gpus // (TP * PP)
-    dp = dp_effective // EP
+    dp = total_gpus // (TP * PP * EP)
+
+    all_results["hardware"].append(hw["name"])
 
     print(f"\n{'#' * 140}")
     print(f"# {hw['name']} ({hw['nodes']} nodes, {gpu_mem} GB/GPU)")
@@ -704,111 +711,84 @@ for hw in HARDWARE:
     print(f"{'#' * 140}")
 
     print(
-        f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'TOTAL':>8} {'Headroom':>9} {'ZeRO':>6} {'micro':>6}"
+        f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
     )
     print(
-        f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6}"
+        f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6} {'-' * 6}"
     )
 
-    # Track viable micros for summary
-    variant_viable_micros = {}
-
     for v in VARIANTS:
-        d = v["d"]
-        layers = v["layers"]
-        layers_per_gpu = layers // PP
+        layers_per_gpu = v["layers"] // PP
 
-        # Calculate model memory using shared function
-        model_mem_gb = calculate_model_memory_gb(
-            v,
-            layers_per_gpu,
-            EXPERTS_PER_GPU,
-            PARAM_BYTES,
-            VOCAB,
-            LAYER_NORM,
-            FFN_WEIGHT_MATRICES,
-            NUM_EMBEDDINGS_TABLES,
-        )
+        # Use the new analyze_variant_memory function
+        result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
 
-        # Try ZeRO-1 first (better efficiency)
-        viable_z1 = calculate_viable_micro_batch_sizes(
-            v, gpu_mem, dp, layers_per_gpu, EXPERTS_PER_GPU, zero_strategy=1
-        )
+        # Store result for later analysis and export
+        all_results["variants"][v["name"]].append(result)
 
-        # Try ZeRO-2
-        viable_z2 = calculate_viable_micro_batch_sizes(
-            v, gpu_mem, dp, layers_per_gpu, EXPERTS_PER_GPU, zero_strategy=2
-        )
+        # Format and display row
+        if result["best_zero"] > 0:
+            # Success case
+            mb = result["memory_breakdown"]
+            em = result["efficiency_metrics"]
 
-        # Determine best ZeRO strategy and micro batch size
-        if viable_z1:
-            # ZeRO-1 fits - use it with largest viable micro
-            best_zero = 1
-            micro = max(viable_z1)
-            viable_micros = viable_z1
-        elif viable_z2:
-            # ZeRO-2 fits - use it with largest viable micro
-            best_zero = 2
-            micro = max(viable_z2)
-            viable_micros = viable_z2
-        else:
-            # Neither fits - OOM
-            best_zero = -1
-            micro = 1  # Dummy value for display
-            viable_micros = []
+            # Format values with color
+            headroom = em["wasted_headroom"]
+            headroom_str = format_memory_value_with_color(headroom, headroom)
+            util_pct = f"{em['utilization_pct']:>5.0f}%"
 
-        # Store viable micros for summary
-        variant_viable_micros[v["name"]] = (viable_micros, best_zero)
+            z_label = f"Z{result['best_zero']}"
+            micro_display = result["best_micro"]
 
-        # Calculate memory breakdown for display with chosen strategy and micro
-        if best_zero > 0:
-            memory_breakdown = calculate_memory_for_micro(
-                micro=micro,
-                model_mem_gb=model_mem_gb,
-                variant=v,
-                dp=dp,
-                layers_per_gpu=layers_per_gpu,
-                zero_strategy=best_zero,
-                seq_len=SEQ_LEN,
-                topk=TOPK,
-                param_bytes=PARAM_BYTES,
-                empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
-                selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
-                fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
-                nccl_mem_buf=NCCL_MEM_BUF,
-                optim_bytes=OPTIM_BYTES,
+            print(
+                f"  {v['name']:<10} {mb['model']:>7.1f}G {mb['grad']:>7.1f}G {mb['optim']:>7.1f}G "
+                f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {mb['total']:>7.1f}G "
+                f"{headroom_str} {util_pct:>6} {z_label:>6} {micro_display:>6}"
             )
-
-            grad_show = memory_breakdown["grad"]
-            optim_show = memory_breakdown["optim"]
-            act_total = memory_breakdown["activation"]
-            buf_total = memory_breakdown["buffer"]
-            total_best = memory_breakdown["total"]
-            headroom = gpu_mem - total_best
-            z_label = f"Z{best_zero}"
-            micro_display = micro
         else:
             # OOM case
-            grad_show = 0
-            optim_show = 0
-            act_total = 0
-            buf_total = 0
-            total_best = 999.9  # Dummy large value
-            headroom = gpu_mem - total_best
-            z_label = "OOM"
+            oom_diag = result["oom_diagnostics"]
+            model_mem = result["model_mem_gb"]
+
+            # Show required vs available
+            required = oom_diag["required_memory"]
+            shortage = oom_diag["shortage"]
+
+            z_label = color_text("OOM", "red")
             micro_display = "N/A"
 
-        print(
-            f"  {v['name']:<10} {model_mem_gb:>7.1f}G {grad_show:>7.1f}G {optim_show:>7.1f}G {act_total:>7.1f}G {buf_total:>7.1f}G {total_best:>7.1f}G {headroom:>8.1f}G {z_label:>6} {micro_display:>6}"
-        )
+            print(
+                f"  {v['name']:<10} {model_mem:>7.1f}G {'---':>7} {'---':>7} {'---':>7} {'---':>7} "
+                f"{color_text(f'{required:>7.1f}G', 'red')} {color_text(f'{-shortage:>8.1f}G', 'red')} "
+                f"{'OOM':>6} {z_label:>6} {micro_display:>6}"
+            )
 
     # Print summary of viable micro batch sizes
     print(f"\n  Viable micro batch sizes per variant:")
-    for v_name, (micros, zero) in variant_viable_micros.items():
-        if micros:
-            print(f"  {v_name}: {micros} (ZeRO-{zero})")
+    for v_name in [v["name"] for v in VARIANTS]:
+        result = all_results["variants"][v_name][-1]  # Latest result for this hardware
+        if result["best_zero"] > 0:
+            z1 = result["viable_micros_z1"]
+            z2 = result["viable_micros_z2"]
+            best_zero = result["best_zero"]
+
+            if z1:
+                print(f"  {v_name}: {z1} (ZeRO-1)")
+            else:
+                print(f"  {v_name}: {z2} (ZeRO-2)")
         else:
-            print(f"  {v_name}: None (OOM)")
+            print(f"  {v_name}: {color_text('None (OOM)', 'red')}")
+
+# Generate and display recommendations
+print(f"\n{'=' * 140}")
+print("💡 RECOMMENDATIONS")
+print(f"{'=' * 140}")
+recommendations = generate_recommendations(all_results)
+if recommendations:
+    for rec in recommendations:
+        print(f"  {rec}")
+else:
+    print("  ✅ All configurations look good!")
 # ============================================================================
 # PHASE 2: Batch size analysis for DP=512
 # ============================================================================
