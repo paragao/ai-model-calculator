@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nsys-analyzer Diff Report</title>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #1a1a2e;
+            --accent: #4C72B0;
+            --border: #e0e0e0;
+            --card-bg: #f8f9fa;
+            --table-even: #fafafa;
+            --improved-bg: #d4edda;
+            --improved-fg: #155724;
+            --regressed-bg: #f8d7da;
+            --regressed-fg: #721c24;
+            --neutral-fg: #888;
+            --delta-bar-improved: #28a745;
+            --delta-bar-regressed: #dc3545;
+        }
+        :root.dark {
+            --bg: #1a1a2e;
+            --fg: #e0e0e0;
+            --accent: #64B5CD;
+            --border: #333;
+            --card-bg: #252545;
+            --table-even: #222244;
+            --improved-bg: #1e3d1e;
+            --improved-fg: #7ddf7d;
+            --regressed-bg: #3d1e1e;
+            --regressed-fg: #f5a0a0;
+            --neutral-fg: #888;
+            --delta-bar-improved: #28a745;
+            --delta-bar-regressed: #dc3545;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: var(--fg);
+            background: var(--bg);
+            line-height: 1.6;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1 { font-size: 1.8rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.3rem; margin: 2rem 0 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+
+        .labels {
+            display: flex;
+            gap: 2rem;
+            margin-bottom: 1.5rem;
+        }
+        .label-box {
+            flex: 1;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.8rem 1rem;
+            font-family: "SF Mono", Monaco, monospace;
+            font-size: 0.85rem;
+        }
+        .label-box.a { border-left: 4px solid var(--accent); }
+        .label-box.b { border-left: 4px solid #DD8452; }
+        .label-tag {
+            font-weight: 700;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.2rem;
+        }
+        .label-box.a .label-tag { color: var(--accent); }
+        .label-box.b .label-tag { color: #DD8452; }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.5rem 0 1rem;
+            font-size: 0.9rem;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem 0.8rem;
+            text-align: right;
+        }
+        th { background: var(--card-bg); font-weight: 600; text-align: left; }
+        td:first-child { text-align: left; font-weight: 500; }
+        tr:nth-child(even) { background: var(--table-even); }
+
+        .improved {
+            color: var(--improved-fg);
+            background: var(--improved-bg);
+            font-weight: 600;
+        }
+        .regressed {
+            color: var(--regressed-fg);
+            background: var(--regressed-bg);
+            font-weight: 600;
+        }
+        .neutral { color: var(--neutral-fg); }
+
+        /* Delta bar visualization */
+        .delta-cell {
+            position: relative;
+            min-width: 120px;
+        }
+        .delta-bar {
+            position: absolute;
+            top: 2px;
+            bottom: 2px;
+            opacity: 0.15;
+            border-radius: 2px;
+        }
+        .delta-bar.positive { left: 50%; background: var(--delta-bar-improved); }
+        .delta-bar.negative { right: 50%; background: var(--delta-bar-regressed); }
+        .delta-text { position: relative; z-index: 1; }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: #888;
+        }
+        .theme-toggle {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            transition: background 0.2s;
+        }
+        .theme-toggle:hover { opacity: 0.8; }
+    </style>
+</head>
+<body>
+
+<button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark/light mode" id="theme-btn">
+    <span id="theme-icon"></span>
+</button>
+
+<h1>nsys-analyzer Diff Report</h1>
+
+<div class="labels">
+    <div class="label-box a">
+        <div class="label-tag">Baseline (A)</div>
+        30b 64×GPU TP1PP1VP1
+    </div>
+    <div class="label-box b">
+        <div class="label-tag">Comparison (B)</div>
+        30b 64×GPU TP1PP1VP1
+    </div>
+</div>
+
+<h2>Key Metrics</h2>
+<table>
+    <tr>
+        <th>Metric</th>
+        <th>A</th>
+        <th>B</th>
+        <th>Delta</th>
+        <th>Change %</th>
+        <th>Verdict</th>
+    </tr>
+    
+    <tr>
+        <td>Step time</td>
+        <td>17.87s</td>
+        <td>16.94s</td>
+        <td class="improved">-0.93s</td>
+        <td class="improved">-5.2%</td>
+        <td class="improved">
+            BETTER
+        </td>
+    </tr>
+    
+    <tr>
+        <td>Throughput</td>
+        <td>938933.17tok/s</td>
+        <td>990366.70tok/s</td>
+        <td class="improved">+51433.53tok/s</td>
+        <td class="improved">+5.5%</td>
+        <td class="improved">
+            BETTER
+        </td>
+    </tr>
+    
+    <tr>
+        <td>MFU</td>
+        <td>27.39%</td>
+        <td>28.89%</td>
+        <td class="improved">+1.50%</td>
+        <td class="improved">+5.5%</td>
+        <td class="improved">
+            BETTER
+        </td>
+    </tr>
+    
+    <tr>
+        <td>Pipeline bubble</td>
+        <td>31.04%</td>
+        <td>23.80%</td>
+        <td class="improved">-7.23%</td>
+        <td class="improved">-23.3%</td>
+        <td class="improved">
+            BETTER
+        </td>
+    </tr>
+    
+    <tr>
+        <td>Compute ratio</td>
+        <td>58.10%</td>
+        <td>38.53%</td>
+        <td class="regressed">-19.57%</td>
+        <td class="regressed">-33.7%</td>
+        <td class="regressed">
+            WORSE
+        </td>
+    </tr>
+    
+    <tr>
+        <td>Comm ratio</td>
+        <td>41.90%</td>
+        <td>61.47%</td>
+        <td class="regressed">+19.57%</td>
+        <td class="regressed">+46.7%</td>
+        <td class="regressed">
+            WORSE
+        </td>
+    </tr>
+    
+</table>
+
+
+<h2>Per-PP-Stage Comparison</h2>
+
+<h3>PP0</h3>
+<table>
+    <tr>
+        <th>Metric</th>
+        <th>A</th>
+        <th>B</th>
+        <th>Delta</th>
+        <th>Change %</th>
+    </tr>
+    
+    <tr>
+        <td>Compute</td>
+        <td>41.09s</td>
+        <td>34.06s</td>
+        <td class="improved">-7.03s</td>
+        <td class="improved">-17.1%</td>
+    </tr>
+    
+    <tr>
+        <td>Comm</td>
+        <td>29.63s</td>
+        <td>54.33s</td>
+        <td class="regressed">+24.70s</td>
+        <td class="regressed">+83.3%</td>
+    </tr>
+    
+    <tr>
+        <td>PP SendRecv</td>
+        <td>0.00s</td>
+        <td>0.00s</td>
+        <td class="neutral">+0.00s</td>
+        <td class="neutral">+0.0%</td>
+    </tr>
+    
+    <tr>
+        <td>Idle %</td>
+        <td>31.04%</td>
+        <td>23.80%</td>
+        <td class="improved">-7.23%</td>
+        <td class="improved">-23.3%</td>
+    </tr>
+    
+    <tr>
+        <td>Eff. Compute</td>
+        <td>59.06%</td>
+        <td>46.61%</td>
+        <td class="regressed">-12.45%</td>
+        <td class="regressed">-21.1%</td>
+    </tr>
+    
+</table>
+
+
+
+
+<h2>Overlap Comparison</h2>
+<table>
+    <tr>
+        <th>Metric</th>
+        <th>A</th>
+        <th>B</th>
+        <th>Delta</th>
+        <th>Change %</th>
+    </tr>
+    
+    <tr>
+        <td>PP0/PP1 Comm</td>
+        <td>29.63s</td>
+        <td>54.33s</td>
+        <td class="regressed">+24.70s</td>
+        <td class="regressed">+83.3%</td>
+    </tr>
+    
+    <tr>
+        <td>PP0/PP1 Hidden</td>
+        <td>3.88%</td>
+        <td>28.10%</td>
+        <td class="improved">+24.22%</td>
+        <td class="improved">+624.0%</td>
+    </tr>
+    
+    <tr>
+        <td>PP2/PP3 Comm</td>
+        <td>0.00s</td>
+        <td>0.00s</td>
+        <td class="neutral">+0.00s</td>
+        <td class="neutral">+0.0%</td>
+    </tr>
+    
+    <tr>
+        <td>PP2/PP3 Hidden</td>
+        <td>0.00%</td>
+        <td>0.00%</td>
+        <td class="neutral">+0.00%</td>
+        <td class="neutral">+0.0%</td>
+    </tr>
+    
+</table>
+
+
+<footer>
+    Generated by <strong>nsys-analyzer</strong> v0.1.0 | Diff mode
+</footer>
+
+<script>
+function toggleTheme() {
+    var html = document.documentElement;
+    html.classList.toggle('dark');
+    var isDark = html.classList.contains('dark');
+    localStorage.setItem('nsys-theme', isDark ? 'dark' : 'light');
+    updateIcon();
+}
+function updateIcon() {
+    var isDark = document.documentElement.classList.contains('dark');
+    document.getElementById('theme-icon').textContent = isDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+}
+(function() {
+    var saved = localStorage.getItem('nsys-theme');
+    if (saved === 'dark') {
+        document.documentElement.classList.add('dark');
+    } else if (saved === 'light') {
+        document.documentElement.classList.remove('dark');
+    }
+    updateIcon();
+})();
+</script>
+
+</body>
+</html>

@@ -67,3 +67,7 @@ MAX_STEPS = 1_200_000                # Maximum acceptable training steps
 
 # Batch size constraints
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
+
+# Hardware memory specifications (GB)
+H200_MEM_GB = 141  # H200 GPU memory capacity
+H100_MEM_GB = 80   # H100 GPU memory capacity

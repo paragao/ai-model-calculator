@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  calculator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-training-calculator:latest
+    container_name: llm-calculator
+    volumes:
+      # Mount results directory for output files (optional)
+      - ./results:/app/results
+      # Uncomment to use custom configuration files
+      # - ./custom_variants.py:/app/variants_config.py:ro
+      # - ./custom_hardware.py:/app/hardware_config.py:ro
+      # - ./custom_project.py:/app/project_config.py:ro
+      # - ./custom_advanced.py:/app/advanced_config.py:ro
+    environment:
+      # Set to False to disable color output
+      - USE_COLOR=True
+      - PYTHONUNBUFFERED=1
+    # Uncomment to override the default command
+    # command: python3 model_calculations.py

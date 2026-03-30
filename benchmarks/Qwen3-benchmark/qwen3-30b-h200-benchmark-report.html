@@ -1,0 +1,1678 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen3-30B-A3B Pre-training Benchmark Report</title>
+<style>
+/* AWS-branded theme -- shared CSS partial for nsys-analyzer HTML reports */
+
+
+:root {
+    --aws-orange: #FF9900;
+    --aws-orange-dark: #EC7211;
+    --aws-squid-ink: #232F3E;
+    --aws-dark: #16191F;
+
+    --accent: var(--aws-orange);
+    --accent-dark: var(--aws-orange-dark);
+    --header-bg: var(--aws-squid-ink);
+    --bg: #FFFFFF;
+    --fg: var(--aws-dark);
+    --border: #E1E4E8;
+    --card-bg: #F2F3F3;
+    --table-header-bg: var(--aws-squid-ink);
+    --table-header-fg: #FFFFFF;
+    --table-even: #F9FAFB;
+    --table-hover: #FFF7EB;
+    --good: #28a745;
+    --bad: #dc3545;
+    --warn: #ffc107;
+}
+:root.dark {
+    --accent: var(--aws-orange);
+    --accent-dark: var(--aws-orange-dark);
+    --header-bg: #1a1a1a;
+    --bg: #141414;
+    --fg: #e0e0e0;
+    --border: #333;
+    --card-bg: #1e1e1e;
+    --table-header-bg: #232323;
+    --table-header-fg: #e0e0e0;
+    --table-even: #1c1c1c;
+    --table-hover: #2a2318;
+    --good: #7ddf7d;
+    --bad: #f5a0a0;
+    --warn: #ffe066;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: "Amazon Ember", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.7;
+    font-size: 15px;
+}
+
+/* --- Typography --- */
+h1 {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--header-bg);
+    margin-bottom: 0.5rem;
+}
+h2 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--header-bg);
+    padding-bottom: 0.3rem;
+    border-bottom: 3px solid var(--accent);
+    margin: 2rem 0 0.8rem;
+}
+h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--header-bg);
+    margin: 1.5rem 0 0.5rem;
+}
+h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 1rem 0 0.4rem;
+    color: var(--accent-dark);
+}
+:root.dark h1, :root.dark h2, :root.dark h3 { color: #e8e8e8; }
+:root.dark h2 { border-bottom-color: var(--accent); }
+p { margin: 0.5rem 0 0.8rem; }
+strong { font-weight: 600; }
+hr {
+    border: none;
+    border-top: 2px solid var(--border);
+    margin: 2rem 0;
+}
+
+/* --- Tables --- */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.5rem 0 1rem;
+    font-size: 0.88rem;
+}
+thead th {
+    background: var(--table-header-bg);
+    color: var(--table-header-fg);
+    padding: 0.55rem 0.8rem;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.82rem;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+}
+tbody td {
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+tbody tr:nth-child(even) { background: var(--table-even); }
+tbody tr:hover { background: var(--table-hover); }
+tbody tr.highlight {
+    background: #FFF3E0;
+    font-weight: 600;
+}
+:root.dark tbody tr.highlight {
+    background: #302818;
+}
+td.num {
+    text-align: right;
+    font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 0.82rem;
+}
+td code, th code {
+    background: rgba(0,0,0,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.8rem;
+}
+:root.dark td code, :root.dark th code {
+    background: rgba(255,255,255,0.08);
+}
+
+/* --- Inline code --- */
+code {
+    font-family: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: rgba(0,0,0,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.85em;
+}
+:root.dark code { background: rgba(255,255,255,0.1); }
+
+/* --- Code blocks --- */
+pre {
+    background: #1B2631;
+    color: #E8EAED;
+    padding: 1rem 1.2rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.5rem 0 1rem;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    border-left: 4px solid var(--accent);
+}
+pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+    font-size: inherit;
+    border-radius: 0;
+}
+
+/* --- Lists --- */
+ol, ul { margin: 0.5rem 0 0.8rem; padding-left: 1.5rem; }
+li { margin-bottom: 0.4rem; }
+
+/* --- Callout boxes (GitHub-style admonitions) --- */
+.callout {
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    margin: 1rem 0;
+    border-left: 4px solid;
+}
+.callout-title {
+    font-weight: 700;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 0.3rem;
+}
+.callout-note {
+    background: #E8F4FD;
+    border-left-color: #2196F3;
+}
+.callout-note .callout-title { color: #1565C0; }
+.callout-warning {
+    background: #FFF8E1;
+    border-left-color: #FFC107;
+}
+.callout-warning .callout-title { color: #F57F17; }
+.callout-important {
+    background: #FFF3E0;
+    border-left-color: var(--accent);
+}
+.callout-important .callout-title { color: var(--accent-dark); }
+.callout-tip {
+    background: #E8F5E9;
+    border-left-color: #4CAF50;
+}
+.callout-tip .callout-title { color: #2E7D32; }
+
+:root.dark .callout-note { background: #1a2228; }
+:root.dark .callout-warning { background: #28251a; }
+:root.dark .callout-important { background: #28221a; }
+:root.dark .callout-tip { background: #1a281a; }
+
+/* --- Utility classes --- */
+.good { color: var(--good); font-weight: 600; }
+.bad { color: var(--bad); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+
+.config-badge, .meta-badge {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 1rem;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.85rem;
+    margin-bottom: 1rem;
+}
+
+/* --- Theme toggle button --- */
+.theme-toggle {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    cursor: pointer;
+    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    transition: background 0.2s;
+}
+.theme-toggle:hover { opacity: 0.8; }
+
+/* --- Footer --- */
+footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: #888;
+}
+
+/* --- Print --- */
+@media print {
+    nav.sidebar { display: none !important; }
+    main { margin-left: 0 !important; padding: 0 !important; }
+    .theme-toggle { display: none; }
+    pre { border-left-color: #999; }
+    h2 { border-bottom-color: #999; }
+    tbody tr:hover { background: inherit; }
+    .callout { break-inside: avoid; }
+}
+
+/* --- Sidebar --- */
+nav.sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: 270px;
+    height: 100vh;
+    background: var(--aws-squid-ink);
+    color: #FFFFFF;
+    overflow-y: auto;
+    padding: 24px 0;
+    z-index: 100;
+    border-right: 3px solid var(--accent);
+}
+nav.sidebar .logo {
+    padding: 0 20px 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    margin-bottom: 12px;
+}
+nav.sidebar .logo .aws-tag {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--aws-squid-ink);
+    font-weight: 700;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+nav.sidebar .logo h2 {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: #FFFFFF;
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+nav.sidebar ul { list-style: none; padding: 0; }
+nav.sidebar ul li a {
+    display: block;
+    padding: 6px 20px;
+    color: rgba(255,255,255,0.72);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 400;
+    transition: all 0.15s ease;
+    border-left: 3px solid transparent;
+}
+nav.sidebar ul li a:hover {
+    color: #FFFFFF;
+    background: rgba(255,255,255,0.06);
+}
+nav.sidebar ul li a.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: rgba(255,153,0,0.08);
+    font-weight: 600;
+}
+nav.sidebar ul li.sub a {
+    padding-left: 36px;
+    font-size: 12px;
+}
+
+/* --- Main content with sidebar --- */
+main.with-sidebar {
+    margin-left: 270px;
+    padding: 40px 48px 80px;
+    max-width: calc(960px + 96px + 270px);
+}
+main:not(.with-sidebar) {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 40px 48px 80px;
+}
+
+/* --- Report header card --- */
+.report-header {
+    border: 1px solid var(--border);
+    border-left: 5px solid var(--accent);
+    border-radius: 4px;
+    padding: 28px 32px;
+    margin-bottom: 2rem;
+    background: var(--card-bg);
+}
+.report-header h1 {
+    font-size: 1.5rem;
+    line-height: 1.3;
+    margin-bottom: 16px;
+}
+.report-header .meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 6px 24px;
+}
+.report-header .meta-item {
+    font-size: 0.85rem;
+    color: var(--fg);
+}
+.report-header .meta-item strong {
+    color: var(--header-bg);
+}
+:root.dark .report-header .meta-item strong {
+    color: var(--accent);
+}
+
+/* --- Pygments syntax highlighting (injected) --- */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.highlight .hll { background-color: #ffffcc }
+.highlight { background: #1B2631; color: #E8EAED }
+.highlight .c { color: #6A737D; font-style: italic } /* Comment */
+.highlight .err { color: #FF5370 } /* Error */
+.highlight .esc { color: #E8EAED } /* Escape */
+.highlight .g { color: #E8EAED } /* Generic */
+.highlight .k { color: #82B1FF } /* Keyword */
+.highlight .l { color: #F78C6C } /* Literal */
+.highlight .n { color: #E8EAED } /* Name */
+.highlight .o { color: #89DDFF } /* Operator */
+.highlight .x { color: #E8EAED } /* Other */
+.highlight .p { color: #89DDFF } /* Punctuation */
+.highlight .ch { color: #6A737D; font-style: italic } /* Comment.Hashbang */
+.highlight .cm { color: #6A737D; font-style: italic } /* Comment.Multiline */
+.highlight .cp { color: #6A737D } /* Comment.Preproc */
+.highlight .cpf { color: #6A737D; font-style: italic } /* Comment.PreprocFile */
+.highlight .c1 { color: #6A737D; font-style: italic } /* Comment.Single */
+.highlight .cs { color: #6A737D; font-style: italic } /* Comment.Special */
+.highlight .gd { color: #FFA198; background-color: #402A2A } /* Generic.Deleted */
+.highlight .ge { color: #E8EAED } /* Generic.Emph */
+.highlight .ges { color: #E8EAED } /* Generic.EmphStrong */
+.highlight .gr { color: #E8EAED } /* Generic.Error */
+.highlight .gh { color: #82B1FF; font-weight: bold } /* Generic.Heading */
+.highlight .gi { color: #C3E88D; background-color: #2A4030 } /* Generic.Inserted */
+.highlight .go { color: #E8EAED } /* Generic.Output */
+.highlight .gp { color: #6A737D } /* Generic.Prompt */
+.highlight .gs { color: #E8EAED } /* Generic.Strong */
+.highlight .gu { color: #82B1FF } /* Generic.Subheading */
+.highlight .gt { color: #E8EAED } /* Generic.Traceback */
+.highlight .kc { color: #82B1FF } /* Keyword.Constant */
+.highlight .kd { color: #82B1FF } /* Keyword.Declaration */
+.highlight .kn { color: #82B1FF } /* Keyword.Namespace */
+.highlight .kp { color: #82B1FF } /* Keyword.Pseudo */
+.highlight .kr { color: #82B1FF } /* Keyword.Reserved */
+.highlight .kt { color: #FFCB6B } /* Keyword.Type */
+.highlight .ld { color: #F78C6C } /* Literal.Date */
+.highlight .m { color: #F78C6C } /* Literal.Number */
+.highlight .s { color: #C3E88D } /* Literal.String */
+.highlight .na { color: #E8EAED } /* Name.Attribute */
+.highlight .nb { color: #FFCB6B } /* Name.Builtin */
+.highlight .nc { color: #FFCB6B } /* Name.Class */
+.highlight .no { color: #E8EAED } /* Name.Constant */
+.highlight .nd { color: #E8EAED } /* Name.Decorator */
+.highlight .ni { color: #E8EAED } /* Name.Entity */
+.highlight .ne { color: #E8EAED } /* Name.Exception */
+.highlight .nf { color: #FFCB6B } /* Name.Function */
+.highlight .nl { color: #E8EAED } /* Name.Label */
+.highlight .nn { color: #E8EAED } /* Name.Namespace */
+.highlight .nx { color: #E8EAED } /* Name.Other */
+.highlight .py { color: #E8EAED } /* Name.Property */
+.highlight .nt { color: #E8EAED } /* Name.Tag */
+.highlight .nv { color: #F78C6C } /* Name.Variable */
+.highlight .ow { color: #89DDFF } /* Operator.Word */
+.highlight .pm { color: #89DDFF } /* Punctuation.Marker */
+.highlight .w { color: #E8EAED } /* Text.Whitespace */
+.highlight .mb { color: #F78C6C } /* Literal.Number.Bin */
+.highlight .mf { color: #F78C6C } /* Literal.Number.Float */
+.highlight .mh { color: #F78C6C } /* Literal.Number.Hex */
+.highlight .mi { color: #F78C6C } /* Literal.Number.Integer */
+.highlight .mo { color: #F78C6C } /* Literal.Number.Oct */
+.highlight .sa { color: #C3E88D } /* Literal.String.Affix */
+.highlight .sb { color: #C3E88D } /* Literal.String.Backtick */
+.highlight .sc { color: #C3E88D } /* Literal.String.Char */
+.highlight .dl { color: #C3E88D } /* Literal.String.Delimiter */
+.highlight .sd { color: #C3E88D } /* Literal.String.Doc */
+.highlight .s2 { color: #C3E88D } /* Literal.String.Double */
+.highlight .se { color: #C3E88D } /* Literal.String.Escape */
+.highlight .sh { color: #C3E88D } /* Literal.String.Heredoc */
+.highlight .si { color: #C3E88D } /* Literal.String.Interpol */
+.highlight .sx { color: #C3E88D } /* Literal.String.Other */
+.highlight .sr { color: #C3E88D } /* Literal.String.Regex */
+.highlight .s1 { color: #C3E88D } /* Literal.String.Single */
+.highlight .ss { color: #C3E88D } /* Literal.String.Symbol */
+.highlight .bp { color: #FFCB6B } /* Name.Builtin.Pseudo */
+.highlight .fm { color: #FFCB6B } /* Name.Function.Magic */
+.highlight .vc { color: #F78C6C } /* Name.Variable.Class */
+.highlight .vg { color: #F78C6C } /* Name.Variable.Global */
+.highlight .vi { color: #F78C6C } /* Name.Variable.Instance */
+.highlight .vm { color: #F78C6C } /* Name.Variable.Magic */
+.highlight .il { color: #F78C6C } /* Literal.Number.Integer.Long */
+
+/* --- Responsive --- */
+@media (max-width: 900px) {
+    nav.sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 3px solid var(--accent);
+    }
+    main.with-sidebar { margin-left: 0; padding: 24px 20px 60px; }
+    .report-header h1 { font-size: 1.2rem; }
+}
+</style>
+</head>
+<body>
+
+
+<!-- Sidebar Navigation -->
+<nav class="sidebar" id="sidebar">
+    <div class="logo">
+        <span class="aws-tag">BENCHMARK REPORT</span>
+        <h2>Qwen3-30B-A3B Pre-training Benchmark Report</h2>
+    </div>
+    <ul>
+    
+        <li><a href="#1-executive-summary">1. Executive Summary</a></li>
+        
+        <li class="sub"><a href="#key-results">Key Results</a></li>
+        
+        <li class="sub"><a href="#what-worked">What Worked</a></li>
+        
+        <li class="sub"><a href="#what-did-not-work">What Did Not Work</a></li>
+        
+        <li class="sub"><a href="#bottleneck-analysis">Bottleneck Analysis</a></li>
+        
+    
+        <li><a href="#2-environment-and-setup">2. Environment and Setup</a></li>
+        
+        <li class="sub"><a href="#21-cluster-architecture">2.1 Cluster Architecture</a></li>
+        
+        <li class="sub"><a href="#22-software-stack">2.2 Software Stack</a></li>
+        
+        <li class="sub"><a href="#23-model-architecture-qwen3-30b-a3b">2.3 Model Architecture: Qwen3-30B-A3B</a></li>
+        
+        <li class="sub"><a href="#24-aws-efa-networking-patches">2.4 AWS EFA Networking Patches</a></li>
+        
+    
+        <li><a href="#3-optimization-journey">3. Optimization Journey</a></li>
+        
+        <li class="sub"><a href="#31-starting-point-the-h100-baseline-profile">3.1 Starting Point: The H100 Baseline Profile</a></li>
+        
+        <li class="sub"><a href="#32-optimization-1-micro-batch-size-1-to-2-86">3.2 Optimization 1: Micro-Batch Size 1 to 2 (+86%)</a></li>
+        
+        <li class="sub"><a href="#33-optimization-2-pipeline-parallelism-2-to-1-145-additional">3.3 Optimization 2: Pipeline Parallelism 2 to 1 (+14.5% additional)</a></li>
+        
+        <li class="sub"><a href="#34-diminishing-returns-further-optimization-attempts">3.4 Diminishing Returns: Further Optimization Attempts</a></li>
+        
+    
+        <li><a href="#4-baseline-vs-best-configuration-detailed-comparison">4. Baseline vs Best Configuration: Detailed Comparison</a></li>
+        
+        <li class="sub"><a href="#41-configuration-side-by-side">4.1 Configuration Side-by-Side</a></li>
+        
+        <li class="sub"><a href="#42-memory-breakdown">4.2 Memory Breakdown</a></li>
+        
+        <li class="sub"><a href="#43-performance-breakdown">4.3 Performance Breakdown</a></li>
+        
+        <li class="sub"><a href="#44-why-performance-improved-mechanistic-explanation">4.4 Why Performance Improved: Mechanistic Explanation</a></li>
+        
+    
+        <li><a href="#5-nsys-profile-analysis">5. nsys Profile Analysis</a></li>
+        
+        <li class="sub"><a href="#51-communication-vs-compute">5.1 Communication vs Compute</a></li>
+        
+        <li class="sub"><a href="#52-nccl-communication-breakdown">5.2 NCCL Communication Breakdown</a></li>
+        
+        <li class="sub"><a href="#53-top-compute-kernels">5.3 Top Compute Kernels</a></li>
+        
+        <li class="sub"><a href="#54-implications-for-further-optimization">5.4 Implications for Further Optimization</a></li>
+        
+    
+        <li><a href="#6-appendix">6. Appendix</a></li>
+        
+        <li class="sub"><a href="#61-complete-experiment-log">6.1 Complete Experiment Log</a></li>
+        
+        <li class="sub"><a href="#62-launch-command-best-configuration">6.2 Launch Command: Best Configuration</a></li>
+        
+        <li class="sub"><a href="#63-launch-command-baseline-configuration">6.3 Launch Command: Baseline Configuration</a></li>
+        
+        <li class="sub"><a href="#64-key-file-locations-on-cluster">6.4 Key File Locations (on cluster)</a></li>
+        
+        <li class="sub"><a href="#65-nsys-profile-locations">6.5 nsys Profile Locations</a></li>
+        
+        <li class="sub"><a href="#66-potential-future-optimizations">6.6 Potential Future Optimizations</a></li>
+        
+    
+    </ul>
+</nav>
+
+
+<button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark/light mode">
+    <span id="theme-icon"></span>
+</button>
+
+<!-- Main Content -->
+<main class="with-sidebar">
+
+    <!-- Header Card -->
+    <div class="report-header">
+        <h1>Qwen3-30B-A3B Pre-training Benchmark Report<br>Performance Optimization on H200 GPUs</h1>
+        
+        <div class="meta">
+            
+            <div class="meta-item"><strong>Date:</strong> March 24, 2026</div>
+            
+            <div class="meta-item"><strong>Cluster:</strong> 8x p5en.48xlarge (64x NVIDIA H200 SXM 141GB HBM3e)</div>
+            
+            <div class="meta-item"><strong>Model:</strong> Qwen3-30B-A3B MoE (BF16)</div>
+            
+            <div class="meta-item"><strong>Software:</strong> NeMo 25.11.01, Megatron-Bridge, NCCL 2.29.3</div>
+            
+        </div>
+        
+    </div>
+
+    <h1 id="qwen3-30b-a3b-pre-training-benchmark-report-performance-optimization-on-h200-gpus">Qwen3-30B-A3B Pre-training Benchmark Report: Performance Optimization on H200 GPUs</h1>
+<hr />
+<h2 id="1-executive-summary">1. Executive Summary</h2>
+<p>This report documents the performance optimization of Qwen3-30B-A3B Mixture-of-Experts (MoE) pre-training on an 8-node Amazon EC2 p5en.48xlarge cluster equipped with 64 NVIDIA H200 SXM GPUs (141GB HBM3e each). Starting from the NVIDIA dgxc-benchmarking H100 baseline profile, we achieved a <strong>2.13x throughput improvement</strong> -- from <strong>148 to 315 MODEL TFLOPS/GPU</strong> in BF16 precision.</p>
+<h3 id="key-results">Key Results</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Configuration</th>
+<th>TFLOPS/GPU</th>
+<th>Iter Time (ms)</th>
+<th>Peak Memory (GB)</th>
+<th>vs Baseline</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>H100 Baseline (PP=2, MBS=1, CUDA graphs)</td>
+<td>148</td>
+<td>20,400</td>
+<td>38 / 141</td>
+<td>--</td>
+</tr>
+<tr>
+<td>+ MBS=2 (PP=2, CUDA graphs)</td>
+<td>275</td>
+<td>10,930</td>
+<td>64 / 141</td>
+<td>+86%</td>
+</tr>
+<tr class="highlight">
+<td>+ PP=1, no CUDA graphs</td>
+<td><strong>315</strong></td>
+<td>9,570</td>
+<td>119 / 141</td>
+<td><strong>+113%</strong></td>
+</tr>
+<tr>
+<td>+ GBS=4096</td>
+<td>317</td>
+<td>19,050*</td>
+<td>119 / 141</td>
+<td>+114%</td>
+</tr>
+</tbody>
+</table></div>
+<p>*GBS=4096 processes 2x tokens per iteration, so per-token throughput is comparable at 317 vs 315 TFLOPS/GPU.</p>
+<h3 id="what-worked">What Worked</h3>
+<ol>
+<li>
+<p><strong>Micro-batch size 1 to 2</strong> (+86%): The H100 profile uses MBS=1 because 80GB HBM3 constrains activation memory. The H200's 141GB HBM3e provides sufficient headroom to double the micro-batch size, dramatically improving GPU arithmetic intensity.</p>
+</li>
+<li>
+<p><strong>Pipeline parallelism 2 to 1</strong> (+14.5% additional): Eliminating the 2-stage pipeline removes all pipeline bubble overhead. With ZeRO-3 (optimizer+gradient+parameter sharding) active, doubling data parallelism from 32 to 64 keeps per-GPU optimizer memory constant. The trade-off is that CUDA graph capture no longer fits in memory, but removing graphs has no negative impact -- the kernel launch overhead is negligible relative to the large MoE layer compute.</p>
+</li>
+</ol>
+<h3 id="what-did-not-work">What Did Not Work</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Experiment</th>
+<th>Result</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MBS=4 (any PP setting)</td>
+<td>OOM</td>
+<td>128 experts create excessive activation memory</td>
+</tr>
+<tr>
+<td>CUDA graphs + PP=1</td>
+<td>OOM</td>
+<td>48-layer graph capture uses 14.77GB private pool, exceeding 141GB</td>
+</tr>
+<tr>
+<td>CUDA graphs (attn scope) + PP=2 MBS=2</td>
+<td>OOM</td>
+<td>Attention graph capture pushes past 141GB at 121GB allocated</td>
+</tr>
+<tr>
+<td>CUDA graphs (moe_router only) + PP=1</td>
+<td>208 TFLOPS (-34%)</td>
+<td>Partial graph capture introduces sync overhead, major regression</td>
+</tr>
+<tr>
+<td>NCCL_NVLS_ENABLE=1</td>
+<td>OOM</td>
+<td>NVLink SHARP allocates 512MB+ multicast buffers, no headroom</td>
+</tr>
+<tr>
+<td>GBS=4096</td>
+<td>317 TFLOPS (+0.6%)</td>
+<td>Marginal gain from amortizing gradient all-reduce</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="bottleneck-analysis">Bottleneck Analysis</h3>
+<p>nsys profiling reveals the workload is <strong>50.8% communication-bound</strong>. MoE Expert Parallel all-to-all (token dispatch/combine) alone accounts for 38% of GPU time. This is inherent to the 128-expert architecture with EP=8 and represents the primary barrier to further BF16 optimization.</p>
+<hr />
+<h2 id="2-environment-and-setup">2. Environment and Setup</h2>
+<h3 id="21-cluster-architecture">2.1 Cluster Architecture</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Specification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Instance type</td>
+<td>Amazon EC2 p5en.48xlarge</td>
+</tr>
+<tr>
+<td>Nodes</td>
+<td>8 (of 16 total in shared capacity reservation)</td>
+</tr>
+<tr>
+<td>GPUs per node</td>
+<td>8x NVIDIA H200 SXM 141GB HBM3e</td>
+</tr>
+<tr>
+<td>Total GPUs</td>
+<td>64</td>
+</tr>
+<tr>
+<td>Intra-node interconnect</td>
+<td>NVLink / NVSwitch (900 GB/s bidirectional per GPU)</td>
+</tr>
+<tr>
+<td>Inter-node network</td>
+<td>Elastic Fabric Adapter (EFA), 4x 400Gbps per node (3.2 Tbps aggregate)</td>
+</tr>
+<tr>
+<td>Shared filesystem</td>
+<td>Amazon FSx for Lustre (<code>/fsx/</code>)</td>
+</tr>
+<tr>
+<td>Operating system</td>
+<td>Ubuntu 24.04 (head node), container-based compute</td>
+</tr>
+<tr>
+<td>Slurm</td>
+<td>Workload manager with Pyxis/Enroot container support</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="22-software-stack">2.2 Software Stack</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Container</td>
+<td><code>nvidia+nemo+25.11.01</code> (EFA-upgraded, 36GB squashfs)</td>
+</tr>
+<tr>
+<td>NeMo Framework</td>
+<td>25.11.01</td>
+</tr>
+<tr>
+<td>Megatron-Core</td>
+<td>Bundled with NeMo 25.11.01</td>
+</tr>
+<tr>
+<td>Megatron-Bridge</td>
+<td>Commit 4df8c97 (from NVIDIA dgxc-benchmarking)</td>
+</tr>
+<tr>
+<td>PyTorch</td>
+<td>2.x (bundled)</td>
+</tr>
+<tr>
+<td>NCCL</td>
+<td>2.29.3</td>
+</tr>
+<tr>
+<td>CUDA</td>
+<td>12.x (bundled)</td>
+</tr>
+<tr>
+<td>AWS OFI NCCL plugin</td>
+<td>From EFA installer (bundled in upgraded container)</td>
+</tr>
+<tr>
+<td>Benchmark framework</td>
+<td>NVIDIA dgxc-benchmarking v25.12.02</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="23-model-architecture-qwen3-30b-a3b">2.3 Model Architecture: Qwen3-30B-A3B</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total parameters</td>
+<td>233.46 billion</td>
+</tr>
+<tr>
+<td>Active parameters per token</td>
+<td>~3 billion</td>
+</tr>
+<tr>
+<td>Architecture</td>
+<td>Mixture-of-Experts (MoE) Transformer</td>
+</tr>
+<tr>
+<td>Number of layers</td>
+<td>48</td>
+</tr>
+<tr>
+<td>Hidden size</td>
+<td>2048</td>
+</tr>
+<tr>
+<td>Attention heads</td>
+<td>32 (GQA with 4 KV groups)</td>
+</tr>
+<tr>
+<td>Dense FFN hidden size</td>
+<td>6144</td>
+</tr>
+<tr>
+<td>MoE FFN hidden size (per expert)</td>
+<td>768</td>
+</tr>
+<tr>
+<td>Number of experts</td>
+<td>128</td>
+</tr>
+<tr>
+<td>Top-K routing</td>
+<td>8</td>
+</tr>
+<tr>
+<td>Sequence length</td>
+<td>4096</td>
+</tr>
+<tr>
+<td>Vocabulary size</td>
+<td>~152K (Qwen3 tokenizer)</td>
+</tr>
+<tr>
+<td>Precision</td>
+<td>BF16</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="24-aws-efa-networking-patches">2.4 AWS EFA Networking Patches</h3>
+<p>Running the NeMo container on AWS EFA-equipped instances requires several modifications. The stock NeMo 25.11.01 container has a <strong>NCCL plugin naming mismatch</strong>: NCCL 2.29+ searches for <code>libnccl-net-aws-ofi.so</code>, but the EFA installer names it <code>libnccl-net-ofi.so</code>. We used a pre-built EFA-upgraded container (<code>nvidia+nemo+25.11.01-efa-nccl29.sqsh</code>) that resolves this by including the correctly-named plugin.</p>
+<p>Beyond the container fix, the Megatron-Bridge <code>executors.py</code> file requires a patch to inject EFA-specific environment variables into every Slurm job. The patch adds:</p>
+<div class="highlight"><pre><span></span><code><span class="gd">--- a/scripts/performance/utils/executors.py</span>
+<span class="gi">+++ b/scripts/performance/utils/executors.py</span>
+<span class="w"> </span>PERF_ENV_VARS = {
+<span class="w"> </span>    &quot;TORCH_NCCL_AVOID_RECORD_STREAMS&quot;: &quot;1&quot;,
+<span class="w"> </span>    &quot;TRANSFORMERS_OFFLINE&quot;: &quot;1&quot;,
+<span class="w"> </span>    &quot;TOKENIZERS_PARALLELISM&quot;: &quot;False&quot;,
+<span class="w"> </span>    &quot;NCCL_NVLS_ENABLE&quot;: &quot;0&quot;,
+<span class="gi">+    &quot;PYTORCH_CUDA_ALLOC_CONF&quot;: &quot;expandable_segments:True&quot;,</span>
+<span class="gi">+    &quot;NCCL_GRAPH_REGISTER&quot;: &quot;0&quot;,</span>
+<span class="w"> </span>    &quot;NVTE_NORM_FWD_USE_CUDNN&quot;: &quot;1&quot;,
+<span class="w"> </span>    &quot;NVTE_NORM_BWD_USE_CUDNN&quot;: &quot;1&quot;,
+<span class="w"> </span>    &quot;TORCH_NCCL_HIGH_PRIORITY&quot;: &quot;1&quot;,
+<span class="w"> </span>    &quot;HF_HUB_OFFLINE&quot;: &quot;1&quot;,
+<span class="gi">+    # EFA networking</span>
+<span class="gi">+    &quot;FI_PROVIDER&quot;: &quot;efa&quot;,</span>
+<span class="gi">+    &quot;NCCL_SOCKET_IFNAME&quot;: &quot;^docker,lo,veth&quot;,</span>
+<span class="gi">+    &quot;NCCL_BUFFSIZE&quot;: &quot;8388608&quot;,</span>
+<span class="gi">+    &quot;NCCL_P2P_NET_CHUNKSIZE&quot;: &quot;8388608&quot;,</span>
+<span class="gi">+    &quot;NCCL_TUNER_PLUGIN&quot;: &quot;/opt/amazon/ofi-nccl/lib/libnccl-ofi-tuner.so&quot;,</span>
+<span class="w"> </span>}
+</code></pre></div>
+
+<p><strong>Explanation of each variable:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Value</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FI_PROVIDER</code></td>
+<td><code>efa</code></td>
+<td>Forces libfabric to use the EFA provider for NCCL inter-node communication</td>
+</tr>
+<tr>
+<td><code>NCCL_SOCKET_IFNAME</code></td>
+<td><code>^docker,lo,veth</code></td>
+<td>Excludes virtual network interfaces from NCCL socket communication</td>
+</tr>
+<tr>
+<td><code>NCCL_BUFFSIZE</code></td>
+<td><code>8388608</code> (8MB)</td>
+<td>Increases NCCL buffer size for higher throughput on EFA</td>
+</tr>
+<tr>
+<td><code>NCCL_P2P_NET_CHUNKSIZE</code></td>
+<td><code>8388608</code> (8MB)</td>
+<td>Sets P2P chunk size for EFA transfers</td>
+</tr>
+<tr>
+<td><code>NCCL_TUNER_PLUGIN</code></td>
+<td><code>/opt/amazon/ofi-nccl/lib/libnccl-ofi-tuner.so</code></td>
+<td>Loads the AWS OFI NCCL tuner plugin for algorithm selection</td>
+</tr>
+<tr>
+<td><code>PYTORCH_CUDA_ALLOC_CONF</code></td>
+<td><code>expandable_segments:True</code></td>
+<td>Enables PyTorch's expandable memory segments, critical for BF16 workloads to avoid fragmentation-induced OOM</td>
+</tr>
+<tr>
+<td><code>NCCL_GRAPH_REGISTER</code></td>
+<td><code>0</code></td>
+<td>Required when CUDA graphs and expandable_segments are both enabled; prevents NCCL from attempting to register graph memory regions that conflict with expandable segments</td>
+</tr>
+<tr>
+<td><code>NCCL_NVLS_ENABLE</code></td>
+<td><code>0</code></td>
+<td>Disables NVLink SHARP to conserve GPU memory (NVLS allocates large multicast buffers)</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="3-optimization-journey">3. Optimization Journey</h2>
+<h3 id="31-starting-point-the-h100-baseline-profile">3.1 Starting Point: The H100 Baseline Profile</h3>
+<p>The NVIDIA dgxc-benchmarking repository provides pre-tuned parallelism profiles for each GPU type. The H100 profile for Qwen3-30B-A3B at 64 GPUs uses:</p>
+<ul>
+<li><strong>TP=1, PP=2, CP=1, VP=12, EP=8, ETP=1</strong></li>
+<li><strong>MBS=1, GBS=2048</strong></li>
+<li><strong>CUDA graphs</strong>: <code>transformer_engine</code> implementation, scope: <code>moe_router, moe_preprocess</code></li>
+<li><strong>ZeRO-3</strong>: <code>data_parallel_sharding_strategy=optim_grads_params</code>, <code>use_distributed_optimizer=True</code></li>
+<li><strong>MoE A2A overlap</strong>: enabled with <code>delay_wgrad_compute=True</code></li>
+<li><strong>Dispatcher</strong>: DeepEP backend</li>
+</ul>
+<p>This profile is designed for H100 SXM GPUs with <strong>80GB HBM3</strong>. The key constraint is memory: MBS=1 and PP=2 are necessary to fit the 128-expert MoE model within 80GB. CUDA graphs for MoE router and preprocess kernels reduce kernel launch overhead.</p>
+<p><strong>Baseline result on H200</strong>: 148 MODEL TFLOPS/GPU, 20.4s per iteration, 38GB peak memory.</p>
+<div class="callout callout-important"><div class="callout-title">important</div><p>The H200 uses only 38 of 141GB -- <strong>73% of GPU memory is unused</strong>. This immediately signals that the H100 profile is heavily under-utilizing the H200's capacity.</p></div>
+<h3 id="32-optimization-1-micro-batch-size-1-to-2-86">3.2 Optimization 1: Micro-Batch Size 1 to 2 (+86%)</h3>
+<p><strong>Change</strong>: <code>MBS=1</code> to <code>MBS=2</code>, all other parameters unchanged.</p>
+<p><strong>Result</strong>: 275 MODEL TFLOPS/GPU, 10.93s per iteration, 64GB peak memory.</p>
+<p><strong>Why it works</strong>: With MBS=1, each GPU processes one sample (4096 tokens) per micro-batch forward/backward pass. The GPU's tensor cores are severely underutilized because the batch dimension is too small to saturate the compute units, especially for the many small expert FFN GEMMs (768 hidden size per expert). Doubling to MBS=2 doubles the matrix dimensions in the batch axis, improving GEMM efficiency.</p>
+<p>The memory impact is significant but manageable: peak memory increased from 38GB to 64GB (26GB increase), well within the 141GB capacity. The 26GB increase comes from doubled activation memory during the forward pass -- each of the 48 layers stores activations for 2 samples instead of 1.</p>
+<p><strong>Why MBS=4 fails</strong>: We tested MBS=4 with PP=2/VP=4 and PP=2/VP=2. Both OOM'd at 130-141GB. The 128-expert MoE architecture is uniquely memory-hungry: each layer's forward pass dispatches tokens to 8 of 128 experts, and the per-expert activations accumulate across the top-8 routing. MBS=4 roughly doubles the MBS=2 activation footprint again (~128GB for activations alone), exceeding capacity.</p>
+<h3 id="33-optimization-2-pipeline-parallelism-2-to-1-145-additional">3.3 Optimization 2: Pipeline Parallelism 2 to 1 (+14.5% additional)</h3>
+<p><strong>Change</strong>: <code>PP=2, VP=12</code> to <code>PP=1, VP=None</code>, CUDA graphs disabled (<code>cuda_graph_impl=none</code>).</p>
+<p><strong>Result</strong>: 315 MODEL TFLOPS/GPU, 9.57s per iteration, 119GB peak memory.</p>
+<p><strong>Why it works -- pipeline bubble elimination</strong>: With PP=2 and VP=12 (interleaved 1F1B schedule), the pipeline has bubble overhead at the start and end of each iteration. The bubble fraction for interleaved 1F1B is approximately <code>(PP - 1) / (num_microbatches * VP)</code>. With PP=2, VP=12, and num_microbatches = GBS/(DP<em>MBS) = 2048/(32</em>2) = 32: bubble fraction ~= 1/(32*12) = 0.26%. While the bubble fraction appears small, the practical overhead is larger because each pipeline stage processes only 24 of 48 layers, creating stage imbalances and additional communication for pipeline send/recv.</p>
+<p>With PP=1, every GPU holds all 48 layers and processes complete forward/backward passes without any pipeline coordination. This eliminates:</p>
+<ul>
+<li>Pipeline send/recv communication between stages</li>
+<li>Pipeline bubble idle time</li>
+<li>Stage imbalance overhead from uneven layer distribution</li>
+<li>Virtual pipeline interleaving overhead (VP=12 means 12 virtual chunks with 2 layers each)</li>
+</ul>
+<p><strong>Memory math -- why PP=1 fits</strong>: When PP changes from 2 to 1, data parallelism (DP) changes from 32 to 64 because <code>DP = total_GPUs / (TP * PP * CP) = 64 / (1 * 1 * 1) = 64</code>.</p>
+<ul>
+<li><strong>Model weights</strong>: With PP=2, each GPU holds 24 layers (~2.58B params). With PP=1, each GPU holds 48 layers (~5.16B params). Weight memory doubles from ~5GB to ~10GB in BF16.</li>
+<li><strong>Optimizer state</strong>: ZeRO-3 shards optimizer states across all DP ranks. With DP doubling from 32 to 64, per-GPU optimizer memory is halved. Net effect: roughly constant.</li>
+<li><strong>Activations</strong>: With PP=1 and MBS=2, only 1 micro-batch is in-flight at a time (simple data-parallel training). With PP=2/VP=12, the interleaved schedule keeps up to 24 micro-batches partially in-flight. However, activation memory per micro-batch is smaller with PP=2 (24 layers vs 48). The net result is that PP=1 uses moderately more activation memory.</li>
+<li><strong>Total</strong>: Peak memory increased from 64GB (PP=2, MBS=2) to 119GB (PP=1, MBS=2). The 55GB increase is accommodated by the 141GB HBM3e capacity with 22GB headroom remaining.</li>
+</ul>
+<p><strong>Why CUDA graphs cannot be used with PP=1</strong>: CUDA graph capture for the <code>moe_router</code> and <code>moe_preprocess</code> scopes across all 48 layers (vs 24 with PP=2) requires 14.77GB of private pool memory. With 119GB already allocated for model/optimizer/activations, adding 14.77GB exceeds the 141GB limit. Job 3181 confirmed this: it completed iteration 1 at 119GB, then OOM'd during graph capture.</p>
+<p><strong>Code fix required</strong>: The <code>helpers.py</code> file needed a patch to auto-disable virtual pipeline parallelism when PP=1. Without this fix, the launch script would attempt to pass VP=12 with PP=1, causing Megatron to error with "pipeline-model-parallel size should be greater than 1 with interleaved schedule". The fix adds:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># In set_user_overrides(), after pipeline_model_parallel_size is set:</span>
+<span class="k">if</span> <span class="n">recipe</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">pipeline_model_parallel_size</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">:</span>
+    <span class="n">recipe</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">virtual_pipeline_model_parallel_size</span> <span class="o">=</span> <span class="kc">None</span>
+</code></pre></div>
+
+<h3 id="34-diminishing-returns-further-optimization-attempts">3.4 Diminishing Returns: Further Optimization Attempts</h3>
+<p>With the best config at 315 TFLOPS/GPU using 119 of 141GB, the remaining optimization space is narrow. We systematically tested several additional configurations:</p>
+<p><strong>CUDA graphs with reduced scope (moe_router only)</strong>: We hypothesized that capturing only the <code>moe_router</code> scope (excluding <code>moe_preprocess</code>) would reduce graph memory enough to fit with PP=1. Graph capture succeeded, but steady-state throughput dropped to <strong>208 TFLOPS/GPU</strong> -- a 34% regression. The likely cause is that partial CUDA graph capture introduces synchronization barriers between graphed and non-graphed regions, and the <code>moe_router</code> alone is too small a portion of the compute to benefit from graph replay. The overhead of entering/exiting graph execution dominates.</p>
+<p><strong>NCCL NVLink SHARP (NVLS)</strong>: NVLink SHARP enables hardware-accelerated intra-node reductions using NVSwitch multicast. However, NVLS requires NCCL to allocate dedicated multicast buffers in GPU memory. At 119GB already used, the attempted allocation of 512MB+ buffer chunks immediately triggered OOM before the first iteration.</p>
+<p><strong>GBS=4096</strong>: Increasing the global batch size from 2048 to 4096 doubles the number of gradient accumulation steps from 16 to 32 (with DP=64, MBS=2). This amortizes the gradient all-reduce communication over twice as many compute steps. The result was <strong>317 TFLOPS/GPU</strong> -- a 0.6% improvement. The gain is real but marginal because the gradient all-reduce (ReduceScatter) is only 2.3% of total GPU time (see Section 5). The dominant communication cost is MoE A2A, which scales with the number of micro-batches, not with gradient synchronization frequency.</p>
+<hr />
+<h2 id="4-baseline-vs-best-configuration-detailed-comparison">4. Baseline vs Best Configuration: Detailed Comparison</h2>
+<h3 id="41-configuration-side-by-side">4.1 Configuration Side-by-Side</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>H100 Baseline</th>
+<th>Best (H200-Optimized)</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr class="highlight">
+<td>Pipeline Parallelism (PP)</td>
+<td>2</td>
+<td><strong>1</strong></td>
+<td>Eliminated pipeline stages</td>
+</tr>
+<tr class="highlight">
+<td>Virtual Pipeline (VP)</td>
+<td>12</td>
+<td><strong>None</strong></td>
+<td>Removed (requires PP &gt; 1)</td>
+</tr>
+<tr>
+<td>Tensor Parallelism (TP)</td>
+<td>1</td>
+<td>1</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Context Parallelism (CP)</td>
+<td>1</td>
+<td>1</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Expert Parallelism (EP)</td>
+<td>8</td>
+<td>8</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Expert Tensor Parallelism (ETP)</td>
+<td>1</td>
+<td>1</td>
+<td>Unchanged</td>
+</tr>
+<tr class="highlight">
+<td>Data Parallelism (DP)</td>
+<td>32</td>
+<td><strong>64</strong></td>
+<td>Doubled (freed by PP reduction)</td>
+</tr>
+<tr class="highlight">
+<td>Micro-Batch Size (MBS)</td>
+<td>1</td>
+<td><strong>2</strong></td>
+<td>Doubled for H200 memory</td>
+</tr>
+<tr>
+<td>Global Batch Size (GBS)</td>
+<td>2048</td>
+<td>2048</td>
+<td>Unchanged</td>
+</tr>
+<tr class="highlight">
+<td>Gradient Accumulation Steps</td>
+<td>32</td>
+<td><strong>16</strong></td>
+<td>Halved (DP doubled, MBS doubled)</td>
+</tr>
+<tr class="highlight">
+<td>CUDA Graph Implementation</td>
+<td>transformer_engine</td>
+<td><strong>none</strong></td>
+<td>Disabled (no memory for graphs)</td>
+</tr>
+<tr class="highlight">
+<td>CUDA Graph Scope</td>
+<td>moe_router, moe_preprocess</td>
+<td><strong>N/A</strong></td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>ZeRO-3 (Distributed Optimizer)</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>MoE A2A Overlap</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>MoE Dispatcher</td>
+<td>DeepEP</td>
+<td>DeepEP</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Recompute</td>
+<td>None</td>
+<td>None</td>
+<td>Unchanged</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="42-memory-breakdown">4.2 Memory Breakdown</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Baseline (PP=2, MBS=1)</th>
+<th>Best (PP=1, MBS=2)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parameters per GPU</td>
+<td>2.58B (24 layers)</td>
+<td>5.16B (48 layers)</td>
+</tr>
+<tr>
+<td><code>mem-max-allocated</code> (Rank 0)</td>
+<td>38.3 GB</td>
+<td>119.2 GB</td>
+</tr>
+<tr>
+<td><code>mem-max-reserved</code> (Rank 0)</td>
+<td>41.8 GB</td>
+<td>124.3 GB</td>
+</tr>
+<tr>
+<td>Post-iteration <code>mem-allocated</code></td>
+<td>19.5 GB</td>
+<td>33.0 GB</td>
+</tr>
+<tr class="highlight">
+<td>Memory utilization</td>
+<td>27% of 141GB</td>
+<td><strong>85% of 141GB</strong></td>
+</tr>
+<tr>
+<td>Headroom</td>
+<td>103 GB</td>
+<td>22 GB</td>
+</tr>
+</tbody>
+</table></div>
+<p>The post-iteration allocated memory (model weights + optimizer state in steady state) grew from 19.5GB to 33.0GB -- a 13.5GB increase explained by holding all 48 layers instead of 24, partially offset by ZeRO-3 sharding across 2x more DP ranks.</p>
+<p>The peak allocated memory (during forward/backward) grew from 38.3GB to 119.2GB -- an 80.9GB increase. This comes from: (a) doubled activation memory from MBS=2 vs MBS=1, (b) all 48 layers' activations stored simultaneously instead of 24, and (c) ZeRO-3 all-gather materializing full parameters for all layers.</p>
+<h3 id="43-performance-breakdown">4.3 Performance Breakdown</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Baseline</th>
+<th>Best</th>
+<th>Improvement</th>
+</tr>
+</thead>
+<tbody>
+<tr class="highlight">
+<td>MODEL TFLOPS/GPU</td>
+<td>148</td>
+<td>315</td>
+<td><strong>+113%</strong></td>
+</tr>
+<tr class="highlight">
+<td>Iteration time (steady state)</td>
+<td>20,400 ms</td>
+<td>9,570 ms</td>
+<td><strong>2.13x faster</strong></td>
+</tr>
+<tr class="highlight">
+<td>Tokens per second (cluster)</td>
+<td>41,100</td>
+<td>87,600</td>
+<td><strong>2.13x</strong></td>
+</tr>
+<tr class="highlight">
+<td>Tokens per second per GPU</td>
+<td>643</td>
+<td>1,369</td>
+<td><strong>2.13x</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><em>Tokens/sec calculated as: GBS * seq_length / iter_time = 2048 * 4096 / iter_time_seconds</em></p>
+<h3 id="44-why-performance-improved-mechanistic-explanation">4.4 Why Performance Improved: Mechanistic Explanation</h3>
+<p>The 2.13x improvement decomposes into two multiplicative factors:</p>
+<p><strong>Factor 1 -- MBS doubling (1.86x)</strong>: The primary gain comes from improved arithmetic intensity. With MBS=1, the GEMMs in each expert FFN have shape <code>[tokens_per_expert, 768] x [768, hidden]</code> where <code>tokens_per_expert</code> is small (4096 tokens routed across 128 experts with top-8 means ~256 tokens per expert per sample). With MBS=2, this doubles to ~512 tokens per expert, significantly improving GEMM efficiency on the H200's tensor cores. The attention GEMMs similarly benefit from the larger batch dimension.</p>
+<p>Additionally, with PP=2 and VP=12, the interleaved 1F1B schedule processes 32 micro-batches through 12 virtual pipeline chunks. Each virtual chunk contains only 2 layers, meaning the GPU rapidly alternates between tiny compute kernels and pipeline communication. MBS=2 doubles the compute per kernel invocation, improving the compute-to-overhead ratio.</p>
+<p><strong>Factor 2 -- PP elimination (1.15x)</strong>: Removing the 2-stage pipeline provides a compounding benefit:</p>
+<ol>
+<li><strong>Zero pipeline bubbles</strong>: No idle time waiting for pipeline warmup/cooldown.</li>
+<li><strong>No pipeline send/recv</strong>: Eliminates inter-stage point-to-point communication entirely.</li>
+<li><strong>Simpler scheduling</strong>: Replaces VP=12 interleaved 1F1B (which processes 12 virtual chunks of 2 layers each, cycling through forward and backward passes) with straightforward data-parallel training (48 layers, forward then backward).</li>
+<li><strong>Better memory access patterns</strong>: All 48 layers are processed sequentially without context switching between virtual pipeline chunks, improving GPU cache utilization.</li>
+</ol>
+<hr />
+<h2 id="5-nsys-profile-analysis">5. nsys Profile Analysis</h2>
+<p>Nsys profiling was collected on the best configuration (Job 3185: PP=1, MBS=2, GBS=2048, no CUDA graphs) for steps 45-50 across all 64 ranks. The analysis below is from Rank 0 (node 0, GPU 0).</p>
+<h3 id="51-communication-vs-compute">5.1 Communication vs Compute</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Time (s)</th>
+<th>% of GPU Time</th>
+</tr>
+</thead>
+<tbody>
+<tr class="highlight">
+<td><strong>NCCL Communication (total)</strong></td>
+<td><strong>48.5</strong></td>
+<td><strong>50.8%</strong></td>
+</tr>
+<tr>
+<td>Compute Kernels (total)</td>
+<td>47.1</td>
+<td>49.2%</td>
+</tr>
+<tr class="highlight">
+<td><strong>Grand Total</strong></td>
+<td><strong>95.6</strong></td>
+<td><strong>100%</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>The workload is effectively split 50/50 between communication and compute. This is characteristic of MoE models with high expert counts: the all-to-all communication required to route tokens to experts across GPUs is proportional to the number of forward and backward passes.</p>
+<h3 id="52-nccl-communication-breakdown">5.2 NCCL Communication Breakdown</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>NCCL Operation</th>
+<th>Time (s)</th>
+<th>% of GPU</th>
+<th>Instances</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="highlight">
+<td><strong>SendRecv</strong></td>
+<td><strong>36.3</strong></td>
+<td><strong>37.9%</strong></td>
+<td>23,040</td>
+<td>MoE Expert Parallel all-to-all (token dispatch + combine)</td>
+</tr>
+<tr>
+<td>AllGather (RING_LL)</td>
+<td>10.0</td>
+<td>10.4%</td>
+<td>4,030</td>
+<td>ZeRO-3 parameter all-gather (forward pass)</td>
+</tr>
+<tr>
+<td>ReduceScatter (RING_LL)</td>
+<td>2.2</td>
+<td>2.3%</td>
+<td>175</td>
+<td>ZeRO-3 gradient reduce-scatter (backward pass)</td>
+</tr>
+<tr>
+<td>AllReduce (TREE_LL)</td>
+<td>0.04</td>
+<td>0.0%</td>
+<td>25</td>
+<td>Auxiliary loss reduction</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>MoE A2A dominates</strong>: The SendRecv operations (37.9%) are the token dispatch and combine all-to-all collectives in the Expert Parallel dimension. With EP=8, each of the 48 layers performs a dispatch (forward) and combine (forward), plus the corresponding backward operations. Over 5 profiled iterations with 16 micro-batches each, this generates 23,040 SendRecv kernel invocations.</p>
+<p><strong>ZeRO-3 AllGather is significant</strong>: At 10.4%, the parameter all-gather (materializing full model parameters from sharded optimizer state) is the second-largest communication cost. With DP=64, each parameter shard must be gathered across all 64 ranks before use.</p>
+<p><strong>Gradient ReduceScatter is small</strong>: At 2.3%, the gradient reduction is well-amortized -- it happens once per parameter bucket per iteration, overlapped with backward compute where possible.</p>
+<h3 id="53-top-compute-kernels">5.3 Top Compute Kernels</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>Time (s)</th>
+<th>% of GPU</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>cuDNN SDPA bprop</td>
+<td>5.3</td>
+<td>5.5%</td>
+<td>Flash Attention backward pass</td>
+</tr>
+<tr>
+<td>cuDNN SDPA fprop</td>
+<td>2.0</td>
+<td>2.1%</td>
+<td>Flash Attention forward pass</td>
+</tr>
+<tr>
+<td>nvjet GEMMs (various)</td>
+<td>~25</td>
+<td>~26%</td>
+<td>Expert FFN + attention projection matmuls</td>
+</tr>
+<tr>
+<td>sort_chunks_by_map</td>
+<td>2.1</td>
+<td>2.2%</td>
+<td>MoE token routing sort</td>
+</tr>
+<tr>
+<td>triton fused kernels</td>
+<td>1.3</td>
+<td>1.3%</td>
+<td>MoE gating (SiLU + sigmoid fusion)</td>
+</tr>
+<tr>
+<td>RMSNorm (fwd + bwd)</td>
+<td>1.3</td>
+<td>1.4%</td>
+<td>Layer normalization</td>
+</tr>
+<tr>
+<td>permute/unpermute</td>
+<td>1.7</td>
+<td>1.7%</td>
+<td>MoE token permutation</td>
+</tr>
+<tr>
+<td>RoPE (fwd + bwd)</td>
+<td>0.7</td>
+<td>0.7%</td>
+<td>Rotary position embeddings</td>
+</tr>
+<tr>
+<td>Cross-entropy</td>
+<td>0.2</td>
+<td>0.2%</td>
+<td>Loss computation</td>
+</tr>
+</tbody>
+</table></div>
+<p>The GEMMs (labeled <code>nvjet_tst_*</code>) comprise the bulk of compute, spanning expert FFN projections, attention QKV/output projections, and dense FFN layers. The cuDNN Flash Attention operations are efficient but represent only 7.6% of total time due to the model's relatively small attention hidden size (2048) and short sequence length (4096).</p>
+<h3 id="54-implications-for-further-optimization">5.4 Implications for Further Optimization</h3>
+<p>The nsys analysis reveals three conclusions:</p>
+<ol>
+<li>
+<p><strong>MoE A2A is the bottleneck</strong>: At 38% of GPU time, reducing this communication would yield the largest gains. Options include: using the HybridEP dispatcher (NVLink-aware routing), reducing EP (requires more memory per GPU), or moving to FP8 (reduces token payload size by 2x).</p>
+</li>
+<li>
+<p><strong>ZeRO-3 AllGather overhead is non-trivial</strong>: At 10.4%, the parameter all-gather is partially overlapped with compute but remains visible. This is the cost of sharding parameters across 64 DP ranks.</p>
+</li>
+<li>
+<p><strong>Compute is well-optimized</strong>: The GEMM kernels are running on tensor cores via cuBLAS/NVJet, and attention uses cuDNN Flash Attention. There is limited room to improve the compute side without changing precision (BF16 to FP8 would double tensor core throughput).</p>
+</li>
+</ol>
+<hr />
+<h2 id="6-appendix">6. Appendix</h2>
+<h3 id="61-complete-experiment-log">6.1 Complete Experiment Log</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Job ID</th>
+<th>PP</th>
+<th>VP</th>
+<th>MBS</th>
+<th>GBS</th>
+<th>CUDA Graphs</th>
+<th>Special</th>
+<th>TFLOPS/GPU</th>
+<th>Iter (ms)</th>
+<th>Peak Mem (GB)</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3141</td>
+<td>2</td>
+<td>12</td>
+<td>1</td>
+<td>2048</td>
+<td>moe_router, moe_preprocess</td>
+<td>Baseline</td>
+<td>148</td>
+<td>20,400</td>
+<td>38</td>
+<td>Success</td>
+</tr>
+<tr>
+<td>3148</td>
+<td>2</td>
+<td>12</td>
+<td>2</td>
+<td>2048</td>
+<td>moe_router, moe_preprocess</td>
+<td>MBS=2</td>
+<td>275</td>
+<td>10,930</td>
+<td>64</td>
+<td>Success</td>
+</tr>
+<tr>
+<td>3149</td>
+<td>2</td>
+<td>12</td>
+<td>2</td>
+<td>2048</td>
+<td>+attn scope</td>
+<td>MBS=2+attn graphs</td>
+<td>--</td>
+<td>--</td>
+<td>121 (OOM)</td>
+<td>OOM during graph capture</td>
+</tr>
+<tr>
+<td>3152</td>
+<td>2</td>
+<td>4</td>
+<td>4</td>
+<td>2048</td>
+<td>moe_router, moe_preprocess</td>
+<td>MBS=4, VP=4</td>
+<td>--</td>
+<td>--</td>
+<td>141 (OOM)</td>
+<td>OOM</td>
+</tr>
+<tr>
+<td>3154</td>
+<td>2</td>
+<td>2</td>
+<td>4</td>
+<td>2048</td>
+<td>moe_router, moe_preprocess</td>
+<td>MBS=4, VP=2</td>
+<td>--</td>
+<td>--</td>
+<td>130 (OOM)</td>
+<td>OOM</td>
+</tr>
+<tr>
+<td>3179</td>
+<td>1</td>
+<td>--</td>
+<td>4</td>
+<td>2048</td>
+<td>none</td>
+<td>PP=1, MBS=4</td>
+<td>--</td>
+<td>--</td>
+<td>130 (OOM)</td>
+<td>OOM (ZeRO all-gather spike)</td>
+</tr>
+<tr>
+<td>3181</td>
+<td>1</td>
+<td>--</td>
+<td>2</td>
+<td>2048</td>
+<td>moe_router, moe_preprocess</td>
+<td>PP=1+graphs</td>
+<td>--</td>
+<td>--</td>
+<td>119+14.77 (OOM)</td>
+<td>OOM during graph capture</td>
+</tr>
+<tr class="highlight">
+<td><strong>3185</strong></td>
+<td><strong>1</strong></td>
+<td><strong>--</strong></td>
+<td><strong>2</strong></td>
+<td><strong>2048</strong></td>
+<td><strong>none</strong></td>
+<td><strong>PP=1, nsys profiling</strong></td>
+<td><strong>315</strong></td>
+<td><strong>9,570</strong></td>
+<td><strong>119</strong></td>
+<td><strong>Success (best)</strong></td>
+</tr>
+<tr>
+<td>3187</td>
+<td>1</td>
+<td>--</td>
+<td>2</td>
+<td>2048</td>
+<td>none</td>
+<td>NCCL_NVLS_ENABLE=1</td>
+<td>--</td>
+<td>--</td>
+<td>119+ (OOM)</td>
+<td>OOM (NVLS buffer alloc)</td>
+</tr>
+<tr>
+<td>3188</td>
+<td>1</td>
+<td>--</td>
+<td>2</td>
+<td>2048</td>
+<td>moe_router only</td>
+<td>Reduced graph scope</td>
+<td>208</td>
+<td>14,500</td>
+<td>125</td>
+<td>Success (regression)</td>
+</tr>
+<tr>
+<td>3190</td>
+<td>1</td>
+<td>--</td>
+<td>2</td>
+<td>4096</td>
+<td>none</td>
+<td>GBS=4096</td>
+<td>317</td>
+<td>19,050</td>
+<td>119</td>
+<td>Success</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="62-launch-command-best-configuration">6.2 Launch Command: Best Configuration</h3>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span>/opt/slurm/bin:<span class="nv">$PATH</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">LLMB_INSTALL</span><span class="o">=</span>/fsx/paragao/testing-pr
+<span class="nb">export</span><span class="w"> </span><span class="nv">HF_TOKEN</span><span class="o">=</span>&lt;your_hf_token&gt;
+<span class="nb">export</span><span class="w"> </span><span class="nv">SBATCH_ACCOUNT</span><span class="o">=</span>smml
+<span class="nb">export</span><span class="w"> </span><span class="nv">SBATCH_PARTITION</span><span class="o">=</span>p5en
+<span class="nb">export</span><span class="w"> </span><span class="nv">NEMORUN_HOME</span><span class="o">=</span><span class="nv">$LLMB_INSTALL</span>/workloads/pretrain_qwen3
+<span class="nb">source</span><span class="w"> </span><span class="nv">$LLMB_INSTALL</span>/venvs/venv_3872b31f7bed/bin/activate
+<span class="nb">cd</span><span class="w"> </span><span class="nv">$LLMB_INSTALL</span>/llmb_repo/qwen3/pretrain/
+
+<span class="nv">MBS</span><span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="nv">PP</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">VP</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">CUDA_GRAPH</span><span class="o">=</span><span class="s2">&quot;--cuda_graph_impl=none&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">JOB_TOTAL_GPUS</span><span class="o">=</span><span class="m">64</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">GPU_TYPE</span><span class="o">=</span>h100<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">MODEL_SIZE</span><span class="o">=</span>30b<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">DTYPE</span><span class="o">=</span>bf16<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>./launch.sh
+</code></pre></div>
+
+<p><strong>Notes</strong>:
+- <code>GPU_TYPE=h100</code> is used because no H200-specific profile exists; the H100 profile is compatible.
+- <code>VP=1</code> triggers the <code>&gt; 1</code> guard in <code>launch.sh</code>, preventing <code>-vp 1</code> from being passed. The <code>helpers.py</code> patch then auto-sets VP=None when PP=1.
+- To enable nsys profiling, add: <code>ENABLE_PROFILE=true PROFILE_START_STEP=45 PROFILE_STOP_STEP=50</code></p>
+<h3 id="63-launch-command-baseline-configuration">6.3 Launch Command: Baseline Configuration</h3>
+<div class="highlight"><pre><span></span><code><span class="nv">MBS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">PP</span><span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="nv">VP</span><span class="o">=</span><span class="m">12</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">JOB_TOTAL_GPUS</span><span class="o">=</span><span class="m">64</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">GPU_TYPE</span><span class="o">=</span>h100<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">MODEL_SIZE</span><span class="o">=</span>30b<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">DTYPE</span><span class="o">=</span>bf16<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>./launch.sh
+</code></pre></div>
+
+<h3 id="64-key-file-locations-on-cluster">6.4 Key File Locations (on cluster)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/fsx/paragao/testing-pr/</code></td>
+<td>LLMB install root</td>
+</tr>
+<tr>
+<td><code>/fsx/paragao/testing-pr/images/nvidia+nemo+25.11.01-efa-nccl29.sqsh</code></td>
+<td>EFA-upgraded container (36GB)</td>
+</tr>
+<tr>
+<td><code>/fsx/paragao/testing-pr/llmb_repo/qwen3/pretrain/launch.sh</code></td>
+<td>Launch script</td>
+</tr>
+<tr>
+<td><code>/fsx/paragao/testing-pr/workloads/pretrain_qwen3/Megatron-Bridge/</code></td>
+<td>Megatron-Bridge (patched)</td>
+</tr>
+<tr>
+<td><code>.../scripts/performance/utils/executors.py</code></td>
+<td>EFA environment variable patch</td>
+</tr>
+<tr>
+<td><code>.../scripts/performance/utils/helpers.py</code></td>
+<td>VP auto-disable patch (line 248-249)</td>
+</tr>
+<tr>
+<td><code>.../scripts/performance/configs/qwen3/workload_base_configs.py</code></td>
+<td>Parallelism presets</td>
+</tr>
+<tr>
+<td><code>/fsx/paragao/testing-pr/workloads/pretrain_qwen3/experiments/</code></td>
+<td>All experiment outputs</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="65-nsys-profile-locations">6.5 nsys Profile Locations</h3>
+<p>Profiles from the best run (Job 3185, steps 45-50, all 64 ranks):</p>
+<div class="highlight"><pre><span></span><code>/fsx/paragao/testing-pr/workloads/pretrain_qwen3/experiments/
+  pretrain_qwen3_30b_a3b_bf16_gpus64_tp1_pp1_cp1_vp12_ep8_mbs2_gbs2048/
+    pretrain_qwen3_30b_a3b_bf16_gpus64_tp1_pp1_cp1_vp12_ep8_mbs2_gbs2048_1774307163/
+      pretrain_qwen3_30b_a3b_bf16_gpus64_tp1_pp1_cp1_vp12_ep8_mbs2_gbs2048/
+        nsys_profile/
+          profile_{pid}_{jobid}_node{N}_rank{R}.nsys-rep  (64 files, ~137MB each)
+</code></pre></div>
+
+<p>To analyze: <code>nsys stats --report cuda_gpu_kern_sum --format csv &lt;profile.nsys-rep&gt;</code></p>
+<h3 id="66-potential-future-optimizations">6.6 Potential Future Optimizations</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Optimization</th>
+<th>Expected Impact</th>
+<th>Feasibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP8 precision</td>
+<td>30-50% gain (2x tensor core throughput, 2x less comm volume)</td>
+<td>High -- requires FP8-compatible model recipe</td>
+</tr>
+<tr>
+<td>HybridEP dispatcher</td>
+<td>5-15% gain (NVLink-aware A2A routing)</td>
+<td>Medium -- not tuned for H200, may need NVLINK_DOMAIN_SIZE=8</td>
+</tr>
+<tr>
+<td>Longer sequence length</td>
+<td>5-10% gain (better compute/comm ratio)</td>
+<td>Medium -- increases activation memory</td>
+</tr>
+<tr>
+<td>16-node scaling (128 GPUs)</td>
+<td>Enables EP=16, potentially different parallelism</td>
+<td>Medium -- shared capacity nodes may be unreliable</td>
+</tr>
+<tr>
+<td>MoE token dropping</td>
+<td>5-10% gain (reduces A2A volume)</td>
+<td>Low -- changes model convergence behavior</td>
+</tr>
+</tbody>
+</table></div>
+
+</main>
+
+<!-- JavaScript: scroll-spy + theme toggle -->
+<script>
+// Scroll-spy for sidebar
+(function() {
+    var links = document.querySelectorAll('nav.sidebar a[href^="#"]');
+    if (!links.length) return;
+    var sections = [];
+    links.forEach(function(link) {
+        var id = link.getAttribute('href').slice(1);
+        var el = document.getElementById(id);
+        if (el) sections.push({ id: id, el: el, link: link });
+    });
+    function updateActive() {
+        var current = '';
+        for (var i = sections.length - 1; i >= 0; i--) {
+            if (sections[i].el.getBoundingClientRect().top <= 80) {
+                current = sections[i].id;
+                break;
+            }
+        }
+        links.forEach(function(l) { l.classList.remove('active'); });
+        if (current) {
+            var a = document.querySelector('nav.sidebar a[href="#' + current + '"]');
+            if (a) a.classList.add('active');
+        }
+    }
+    window.addEventListener('scroll', updateActive, { passive: true });
+    updateActive();
+})();
+
+// Theme toggle
+function toggleTheme() {
+    document.documentElement.classList.toggle('dark');
+    var isDark = document.documentElement.classList.contains('dark');
+    localStorage.setItem('nsys-theme', isDark ? 'dark' : 'light');
+    updateIcon();
+}
+function updateIcon() {
+    var isDark = document.documentElement.classList.contains('dark');
+    document.getElementById('theme-icon').textContent = isDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+}
+(function() {
+    var saved = localStorage.getItem('nsys-theme');
+    if (saved === 'dark') document.documentElement.classList.add('dark');
+    else if (saved === 'light') document.documentElement.classList.remove('dark');
+    updateIcon();
+})();
+</script>
+
+</body>
+</html>

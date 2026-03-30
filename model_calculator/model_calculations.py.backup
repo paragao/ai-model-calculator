@@ -6,10 +6,79 @@ from hardware_config import HARDWARE
 from project_config import *
 from advanced_config import *
 
-# Global variable for color control (can be set via command-line args)
-USE_COLOR = True
+# Import validation
+from validation import validate_configuration
 
-def calculate_model_memory_gb(
+# Import core calculation functions
+from core_calculations import (
+    calculate_model_memory_gb,
+    calculate_training_time_months,
+    calculate_viable_micro_batch_sizes
+)
+
+# Import formatting utilities
+from formatting_utils import (
+    USE_COLOR,
+    color_text,
+    format_memory_value_with_color,
+    format_batch_assessment_with_color,
+    format_training_time_with_color,
+    format_communication_time_with_color,
+    format_zero1_time_with_color,
+    format_alltoall_time_with_color
+)
+
+# Import Phase 1: Memory Analysis
+from phase1_memory import (
+    analyze_variant_memory,
+    generate_recommendations,
+    export_results_csv,
+    export_results_json
+)
+
+# Import Phase 2: Batch Configuration
+from phase2_batch import (
+    analyze_batch_configuration,
+    generate_batch_recommendations,
+    export_batch_results_csv
+)
+
+# Import Phase 3: Training Time
+from phase3_training import (
+    generate_platform_configs,
+    calculate_training_metrics,
+    generate_training_recommendations,
+    export_training_results_csv
+)
+
+# Import Phase 4: ZeRO-2 Communication
+from phase4_zero2_comm import (
+    analyze_communication_overhead,
+    generate_communication_recommendations,
+    export_communication_results_csv
+)
+
+# Import Phase 4.1: ZeRO-1 Communication
+from phase4_1_zero1_comm import (
+    analyze_zero1_communication_overhead,
+    generate_zero1_recommendations,
+    export_zero1_results_csv
+)
+
+# Import Phase 5: All-to-All Communication
+from phase5_alltoall_comm import (
+    analyze_alltoall_communication,
+    generate_alltoall_recommendations,
+    export_alltoall_results_csv
+)
+
+# Validate configuration
+validate_configuration()
+
+# Note: All function definitions have been moved to phase-specific modules.
+# This file now contains only the execution flow for all 5 analysis phases.
+
+PLACEHOLDER_TO_DELETE_calculate_model_memory_gb(
     variant,
     layers_per_gpu,
     experts_per_gpu,
@@ -369,7 +438,7 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     # Suggestion 4: Switch to better hardware
     if hw["mem_gb"] < 100:
         suggestions.append(
-            f"Switch to H200 (141GB vs {hw['mem_gb']}GB)"
+            f"Switch to H200 ({H200_MEM_GB}GB vs {hw['mem_gb']}GB)"
         )
 
     # Suggestion 5: Reduce micro batch or use gradient checkpointing
@@ -1270,7 +1339,7 @@ def generate_training_recommendations(training_results):
         if oom_variants:
             recommendations.append(
                 f"⚠️  Variants {', '.join(oom_variants)} have OOM issues on some hardware "
-                f"→ Consider H200 (141GB) vs H100 (80GB) or reduce model size"
+                f"→ Consider H200 ({H200_MEM_GB}GB) vs H100 ({H100_MEM_GB}GB) or reduce model size"
             )
 
     # Analyze batch size impact (1x vs 2x)
