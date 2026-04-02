@@ -10,13 +10,13 @@ from project_config import *
 from advanced_config import *
 
 # Import core calculation functions
-from core_calculations import (
+from .core_calculations import (
     calculate_viable_micro_batch_sizes,
     calculate_training_time_months
 )
 
 # Import formatting utilities
-from formatting_utils import color_text
+from .formatting_utils import color_text
 
 
 def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):

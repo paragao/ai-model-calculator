@@ -8,7 +8,7 @@ from variants_config import VARIANTS
 from hardware_config import HARDWARE
 from project_config import *
 from advanced_config import *
-from phase1_memory import analyze_variant_memory
+from utils.phase1_memory import analyze_variant_memory
 
 # Find Qwen3-30B-A3B variant
 qwen3_variant = next((v for v in VARIANTS if v["name"] == "Qwen3-30B-A3B"), None)

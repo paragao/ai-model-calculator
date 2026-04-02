@@ -7,15 +7,15 @@ from project_config import *
 from advanced_config import *
 
 # Import validation
-from validation import validate_configuration
+from utils.validation import validate_configuration
 
 # Import core calculation functions
-from core_calculations import (
+from utils.core_calculations import (
     calculate_training_time_months
 )
 
 # Import formatting utilities
-from formatting_utils import (
+from utils.formatting_utils import (
     USE_COLOR,
     color_text,
     format_memory_value_with_color,
@@ -27,7 +27,7 @@ from formatting_utils import (
 )
 
 # Import Phase 1: Memory Analysis
-from phase1_memory import (
+from utils.phase1_memory import (
     analyze_variant_memory,
     generate_recommendations,
     export_results_csv,
@@ -35,14 +35,14 @@ from phase1_memory import (
 )
 
 # Import Phase 2: Batch Configuration
-from phase2_batch import (
+from utils.phase2_batch import (
     analyze_batch_configuration,
     generate_batch_recommendations,
     export_batch_results_csv
 )
 
 # Import Phase 3: Training Time
-from phase3_training import (
+from utils.phase3_training import (
     generate_platform_configs,
     calculate_training_metrics,
     generate_training_recommendations,
@@ -50,21 +50,21 @@ from phase3_training import (
 )
 
 # Import Phase 4: ZeRO-2 Communication
-from phase4_zero2_comm import (
+from utils.phase4_zero2_comm import (
     analyze_communication_overhead,
     generate_communication_recommendations,
     export_communication_results_csv
 )
 
 # Import Phase 4.1: ZeRO-1 Communication
-from phase4_1_zero1_comm import (
+from utils.phase4_1_zero1_comm import (
     analyze_zero1_communication_overhead,
     generate_zero1_recommendations,
     export_zero1_results_csv
 )
 
 # Import Phase 5: All-to-All Communication
-from phase5_alltoall_comm import (
+from utils.phase5_alltoall_comm import (
     analyze_alltoall_communication,
     generate_alltoall_recommendations,
     export_alltoall_results_csv

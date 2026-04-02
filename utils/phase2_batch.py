@@ -10,7 +10,7 @@ from project_config import *
 from advanced_config import *
 
 # Import formatting utilities
-from formatting_utils import color_text
+from .formatting_utils import color_text
 
 
 def assess_training_steps(steps, tokens_per_batch):

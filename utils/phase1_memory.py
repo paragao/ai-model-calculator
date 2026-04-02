@@ -10,14 +10,14 @@ from project_config import *
 from advanced_config import *
 
 # Import core calculation functions
-from core_calculations import (
+from .core_calculations import (
     calculate_model_memory_gb,
     calculate_memory_for_micro,
     calculate_viable_micro_batch_sizes
 )
 
 # Import formatting utilities
-from formatting_utils import color_text
+from .formatting_utils import color_text
 
 
 def calculate_efficiency_metrics(memory_breakdown, gpu_mem):
