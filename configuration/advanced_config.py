@@ -12,7 +12,7 @@ Most users should leave these at their default values.
 """
 
 # Import PRECISION from project config to determine PARAM_BYTES
-from project_config import PRECISION
+from .project_config import PRECISION
 
 # Target batch size configuration
 TOKENS_PER_BATCH = 67.1e6  # Chinchilla-optimal batch size for ~160B parameter models

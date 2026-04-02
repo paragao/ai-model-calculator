@@ -6,8 +6,8 @@ across different micro batch sizes.
 """
 
 # Import configurations
-from project_config import *
-from advanced_config import *
+from configuration.project_config import *
+from configuration.advanced_config import *
 
 # Import formatting utilities
 from .formatting_utils import color_text

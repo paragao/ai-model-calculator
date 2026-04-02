@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 
 # Import configurations
-from variants_config import VARIANTS
-from hardware_config import HARDWARE
-from project_config import *
-from advanced_config import *
+from configuration.variants_config import VARIANTS
+from configuration.hardware_config import HARDWARE
+from configuration.project_config import *
+from configuration.advanced_config import *
 
 # Import validation
 from utils.validation import validate_configuration

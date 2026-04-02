@@ -6,8 +6,8 @@ used by multiple phases of the analysis pipeline.
 """
 
 # Import configurations
-from project_config import *
-from advanced_config import *
+from configuration.project_config import *
+from configuration.advanced_config import *
 
 
 def calculate_model_memory_gb(

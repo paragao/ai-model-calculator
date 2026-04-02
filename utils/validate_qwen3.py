@@ -10,10 +10,10 @@ from pathlib import Path
 # Add parent directory to path to import config files
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from variants_config import VARIANTS
-from hardware_config import HARDWARE
-from project_config import *
-from advanced_config import *
+from configuration.variants_config import VARIANTS
+from configuration.hardware_config import HARDWARE
+from configuration.project_config import *
+from configuration.advanced_config import *
 from utils.phase1_memory import analyze_variant_memory
 
 # Find Qwen3-30B-A3B variant

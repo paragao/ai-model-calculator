@@ -6,8 +6,8 @@ across different hardware, comparing ZeRO strategies and batch sizes.
 """
 
 # Import configurations
-from project_config import *
-from advanced_config import *
+from configuration.project_config import *
+from configuration.advanced_config import *
 
 # Import core calculation functions
 from .core_calculations import (
