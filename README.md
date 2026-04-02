@@ -45,14 +45,14 @@ No external dependencies required - uses only Python standard library!
 
 ## Features
 
-✅ **Memory Optimization** - Automatic selection between ZeRO-1 and ZeRO-2 based on memory constraints
-✅ **Multiple Hardware Platforms** - Analyze across H100, H200, and custom hardware configurations
-✅ **Model Variants** - Compare different model architectures and parameter counts
-✅ **Batch Size Optimization** - Find optimal micro-batch and accumulation settings
-✅ **Training Time Estimates** - Calculate training duration with MFU considerations
-✅ **Communication Analysis** - Identify bottlenecks in distributed training
-✅ **Color-Coded Output** - Easy-to-read results with performance indicators
-✅ **Export Options** - Save results to CSV/JSON for further analysis
+- ✅ **Memory Optimization** - Automatic selection between ZeRO-1 and ZeRO-2 based on memory constraints
+- ✅ **Multiple Hardware Platforms** - Analyze across H100, H200, and custom hardware configurations
+- ✅ **Model Variants** - Compare different model architectures and parameter counts
+- ✅ **Batch Size Optimization** - Find optimal micro-batch and accumulation settings
+- ✅ **Training Time Estimates** - Calculate training duration with MFU considerations
+- ✅ **Communication Analysis** - Identify bottlenecks in distributed training
+- ✅ **Color-Coded Output** - Easy-to-read results with performance indicators
+- ✅ **Export Options** - Save results to CSV/JSON for further analysis
 
 ## Architecture
 
