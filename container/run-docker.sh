@@ -34,7 +34,9 @@ fi
 
 # Build the image
 echo -e "\n${BLUE}Building Docker image...${NC}"
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+# Build from parent directory with Dockerfile in container/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+docker build -f "${SCRIPT_DIR}/Dockerfile" -t ${IMAGE_NAME}:${IMAGE_TAG} "${SCRIPT_DIR}/.."
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Docker image built successfully${NC}"

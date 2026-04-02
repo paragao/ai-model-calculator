@@ -21,16 +21,16 @@ The easiest way to run the calculator is using Docker:
 
 ```bash
 # Build the Docker image
-docker build -t llm-training-calculator:latest .
+docker build -f container/Dockerfile -t llm-training-calculator:latest .
 
 # Run the calculator
 docker run --rm llm-training-calculator:latest
 
 # Or use the convenience script
-./run-docker.sh
+./container/run-docker.sh
 ```
 
-**See [README-DOCKER.md](README-DOCKER.md) for detailed Docker usage instructions.**
+**See [container/README-DOCKER.md](container/README-DOCKER.md) for detailed Docker usage instructions.**
 
 ### Running Directly with Python
 
@@ -187,7 +187,7 @@ from phase3_training import calculate_training_metrics
 
 Want to share this tool with others?
 
-📦 **See [DISTRIBUTION-GUIDE.md](DISTRIBUTION-GUIDE.md) for comprehensive instructions on:**
+📦 **See [container/DISTRIBUTION-GUIDE.md](container/DISTRIBUTION-GUIDE.md) for comprehensive instructions on:**
 - Sharing via Docker Hub
 - Creating tarball distributions
 - Sharing source code packages
@@ -267,5 +267,5 @@ Built using:
 
 **Happy calculating! 🚀**
 
-For detailed Docker usage, see [README-DOCKER.md](README-DOCKER.md)
-For distribution instructions, see [DISTRIBUTION-GUIDE.md](DISTRIBUTION-GUIDE.md)
+For detailed Docker usage, see [container/README-DOCKER.md](container/README-DOCKER.md)  
+For distribution instructions, see [container/DISTRIBUTION-GUIDE.md](container/DISTRIBUTION-GUIDE.md)
