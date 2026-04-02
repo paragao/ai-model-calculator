@@ -4,6 +4,12 @@ Quick validation script to test Qwen3 model calculations.
 Tests memory calculations for Qwen3-30B-A3B on H200 hardware.
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path to import config files
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from variants_config import VARIANTS
 from hardware_config import HARDWARE
 from project_config import *

@@ -39,3 +39,6 @@ phase*.csv
 phase*.json
 *_analysis*.txt
 *_output.txt
+
+# Backup files
+*.backup

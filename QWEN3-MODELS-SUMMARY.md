@@ -45,14 +45,14 @@ dense_layer_params = attn_per_layer + (d × dense_ffn × 3)
 ## Files Created/Modified
 
 ### Created Files
-1. **`calculate_qwen_params.py`** - Helper script for parameter calculation
+1. **`utils/calculate_qwen_params.py`** - Helper script for parameter calculation
    - Fetches config.json from Hugging Face
    - Auto-detects dense vs MoE architecture
    - Calculates all component parameters
    - Validates against published parameter counts
    - Outputs Python dictionary for variants_config.py
 
-2. **`validate_qwen3.py`** - Quick validation script
+2. **`utils/validate_qwen3.py`** - Quick validation script
    - Tests Qwen3-30B-A3B on H200 hardware
    - Verifies memory calculations
    - Confirms model fits in GPU memory
@@ -84,16 +84,16 @@ dense_layer_params = attn_per_layer + (d × dense_ffn × 3)
 ### Calculate Parameters for New Models
 ```bash
 # From Hugging Face
-python3 calculate_qwen_params.py --model "Qwen/Qwen3-30B-A3B" --published-params 30.5
+python3 utils/calculate_qwen_params.py --model "Qwen/Qwen3-30B-A3B" --published-params 30.5
 
 # From local config.json
-python3 calculate_qwen_params.py --config path/to/config.json
+python3 utils/calculate_qwen_params.py --config path/to/config.json
 ```
 
 ### Validate Qwen3 Models
 ```bash
 # Quick validation of Qwen3-30B-A3B
-python3 validate_qwen3.py
+python3 utils/validate_qwen3.py
 
 # Full analysis of all models
 python3 model_calculations.py
@@ -144,7 +144,7 @@ You can now:
 
 5. **Add more models** using the helper script:
    ```bash
-   python3 calculate_qwen_params.py --model "Qwen/Qwen3-<size>"
+   python3 utils/calculate_qwen_params.py --model "Qwen/Qwen3-<size>"
    ```
 
 ## Technical Notes
