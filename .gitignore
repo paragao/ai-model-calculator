@@ -33,3 +33,9 @@ venv/
 .claude/
 
 benchmarks/
+
+# Generated output files
+phase*.csv
+phase*.json
+*_analysis*.txt
+*_output.txt

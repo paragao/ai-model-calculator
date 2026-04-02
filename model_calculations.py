@@ -181,6 +181,11 @@ if recommendations:
 else:
     print("  ✅ All configurations look good!")
 
+# Export Phase 1 results
+export_results_csv(all_results, "phase1_memory_results.csv")
+export_results_json(all_results, "phase1_memory_results.json")
+print(f"\n📊 Phase 1 results exported to: phase1_memory_results.csv, phase1_memory_results.json")
+
 # ============================================================================
 # PHASE 2: Batch size analysis
 # ============================================================================
@@ -251,6 +256,10 @@ if batch_recommendations:
         print(f"  {rec}")
 else:
     print("  ✅ All hardware has optimal batch configurations!")
+
+# Export Phase 2 results
+export_batch_results_csv(batch_results, "phase2_batch_results.csv")
+print(f"\n📊 Phase 2 results exported to: phase2_batch_results.csv")
 
 # ============================================================================
 # PHASE 3: Training time estimates
@@ -350,6 +359,10 @@ if training_recommendations:
 else:
     print("  ✅ All training configurations look good!")
 
+# Export Phase 3 results
+export_training_results_csv(training_results, "phase3_training_results.csv")
+print(f"\n📊 Phase 3 results exported to: phase3_training_results.csv")
+
 # ============================================================================
 # PHASE 4: ZeRO-2 Communication Overhead Analysis
 # ============================================================================
@@ -431,6 +444,10 @@ if comm_recommendations:
         print(f"  {rec}")
 else:
     print("  ✅ All ZeRO-2 communication patterns look optimal!")
+
+# Export Phase 4 results
+export_communication_results_csv(comm_results, "phase4_zero2_comm_results.csv")
+print(f"\n📊 Phase 4 (ZeRO-2) results exported to: phase4_zero2_comm_results.csv")
 
 # ============================================================================
 # PHASE 4.1: ZeRO-1 Communication Overhead Analysis
@@ -519,6 +536,10 @@ if zero1_recommendations:
 else:
     print("  ✅ All ZeRO-1 communication patterns look optimal!")
 
+# Export Phase 4.1 results
+export_zero1_results_csv(zero1_results, "phase4_1_zero1_comm_results.csv")
+print(f"\n📊 Phase 4.1 (ZeRO-1) results exported to: phase4_1_zero1_comm_results.csv")
+
 # ============================================================================
 # PHASE 5: All-to-all Communication Volumes (Intra-node)
 # ============================================================================
@@ -570,3 +591,19 @@ if a2a_recommendations:
         print(f"  {rec}")
 else:
     print("  ✅ All all-to-all communication patterns look optimal!")
+
+# Export Phase 5 results
+export_alltoall_results_csv(a2a_results, "phase5_alltoall_comm_results.csv")
+print(f"\n📊 Phase 5 results exported to: phase5_alltoall_comm_results.csv")
+
+# Summary of all exports
+print(f"\n{'=' * 140}")
+print("📊 EXPORT SUMMARY")
+print(f"{'=' * 140}")
+print("All analysis results have been exported to CSV/JSON files:")
+print("  ✅ phase1_memory_results.csv / .json")
+print("  ✅ phase2_batch_results.csv")
+print("  ✅ phase3_training_results.csv")
+print("  ✅ phase4_zero2_comm_results.csv")
+print("  ✅ phase4_1_zero1_comm_results.csv")
+print("  ✅ phase5_alltoall_comm_results.csv")
