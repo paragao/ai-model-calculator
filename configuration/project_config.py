@@ -18,7 +18,7 @@ CP = 1  # Context parallelism degree (sequence/context split across GPUs)
 EP = 8  # Expert parallelism degree (experts distributed across GPUs)
 
 # Training configuration
-TOTAL_TOKENS = 30e12  # Total tokens to train on (e.g., 30T = 30 trillion)
+TOTAL_TOKENS = 21e12  # Total tokens to train on (e.g., 30T = 30 trillion)
 PRECISION = "BF16"  # Training precision: "BF16" (16-bit) or "FP8" (8-bit)
 
 # Performance and time estimation

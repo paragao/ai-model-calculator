@@ -4,8 +4,12 @@ FROM python:3.11-slim
 # Set working directory in container
 WORKDIR /app
 
-# Copy all Python files to container
-COPY *.py /app/
+# Copy main script
+COPY model_calculations.py /app/
+
+# Copy configuration and utility modules
+COPY configuration/ /app/configuration/
+COPY utils/ /app/utils/
 
 # Set environment variable to ensure Python output is not buffered
 ENV PYTHONUNBUFFERED=1
