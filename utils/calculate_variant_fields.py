@@ -8,7 +8,7 @@ set of fields required for memory and training analysis.
 Formulas used:
 - attn_per_layer = d² × 2.25
 - expert_each = d × expert_ffn × 3
-- shared_each = d × expert_ffn × 3 (assumes shared experts same size as regular)
+- shared_each = d × dense_ffn × 3 (shared expert uses dense FFN dimension)
 - router_each = d × num_experts
 - moe_layer_params = (num_experts × expert_each) + shared_each + router_each
 - dense_layer_params = attn_per_layer + (d × dense_ffn × 3)
@@ -55,21 +55,23 @@ def calculate_expert_each(d, expert_ffn):
     return d * expert_ffn * 3
 
 
-def calculate_shared_each(d, expert_ffn):
+def calculate_shared_each(d, dense_ffn):
     """
     Calculate parameters for shared expert (if present).
 
-    Formula: d × expert_ffn × 3
-    Assumes shared experts have the same architecture as regular experts.
+    Formula: d × dense_ffn × 3
+    The shared expert uses the dense FFN dimension (not expert FFN dimension),
+    matching the Qwen3 architecture where the shared expert has the same
+    intermediate size as the dense layers.
 
     Args:
         d: Hidden dimension
-        expert_ffn: Expert FFN intermediate dimension
+        dense_ffn: Dense FFN intermediate dimension (used by shared expert)
 
     Returns:
         int: Number of parameters for shared expert
     """
-    return d * expert_ffn * 3
+    return d * dense_ffn * 3
 
 
 def calculate_router_each(d, num_experts=DEFAULT_NUM_EXPERTS):
@@ -89,7 +91,7 @@ def calculate_router_each(d, num_experts=DEFAULT_NUM_EXPERTS):
     return d * num_experts
 
 
-def calculate_moe_layer_params(d, expert_ffn, num_experts=DEFAULT_NUM_EXPERTS, has_shared=True):
+def calculate_moe_layer_params(d, expert_ffn, dense_ffn, num_experts=DEFAULT_NUM_EXPERTS, has_shared=True):
     """
     Calculate total parameters for a MoE layer.
 
@@ -98,6 +100,7 @@ def calculate_moe_layer_params(d, expert_ffn, num_experts=DEFAULT_NUM_EXPERTS, h
     Args:
         d: Hidden dimension
         expert_ffn: Expert FFN intermediate dimension
+        dense_ffn: Dense FFN intermediate dimension (used by shared expert)
         num_experts: Total number of experts
         has_shared: Whether the layer has shared experts
 
@@ -105,7 +108,7 @@ def calculate_moe_layer_params(d, expert_ffn, num_experts=DEFAULT_NUM_EXPERTS, h
         int: Total parameters for MoE layer
     """
     expert_each = calculate_expert_each(d, expert_ffn)
-    shared_each = calculate_shared_each(d, expert_ffn) if has_shared else 0
+    shared_each = calculate_shared_each(d, dense_ffn) if has_shared else 0
     router_each = calculate_router_each(d, num_experts)
 
     return (num_experts * expert_each) + shared_each + router_each
@@ -185,9 +188,9 @@ def calculate_missing_fields(variant, num_experts=DEFAULT_NUM_EXPERTS):
     # Calculate expert-related parameters
     if expert_ffn > 0:
         calculated['expert_each'] = calculate_expert_each(d, expert_ffn)
-        calculated['shared_each'] = calculate_shared_each(d, expert_ffn) if has_shared else 0
+        calculated['shared_each'] = calculate_shared_each(d, dense_ffn) if has_shared else 0
         calculated['router_each'] = calculate_router_each(d, num_experts)
-        calculated['moe_layer_params'] = calculate_moe_layer_params(d, expert_ffn, num_experts, has_shared)
+        calculated['moe_layer_params'] = calculate_moe_layer_params(d, expert_ffn, dense_ffn, num_experts, has_shared)
     else:
         # Dense model (no experts)
         calculated['expert_each'] = 0

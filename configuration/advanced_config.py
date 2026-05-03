@@ -15,7 +15,7 @@ Most users should leave these at their default values.
 from .project_config import PRECISION
 
 # Target batch size configuration
-TOKENS_PER_BATCH = 67.1e6  # Chinchilla-optimal batch size for ~160B parameter models
+TOKENS_PER_BATCH = 33e6  # Chinchilla-optimal batch size for ~72B MoE models
 
 # ZeRO optimization strategies with efficiency multipliers
 ZERO_STRATEGY = [
@@ -25,7 +25,7 @@ ZERO_STRATEGY = [
 ]
 
 # Micro batch sizes to test for memory feasibility
-MICROS = [1, 2, 4, 8]
+MICROS = [1, 2, 4, 8, 16]
 
 # Gradient accumulation steps to evaluate
 GRAD_ACCUM_VALUES = [4, 8, 16, 32, 64, 128]
@@ -71,3 +71,4 @@ MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
 # Hardware memory specifications (GB)
 H200_MEM_GB = 141  # H200 GPU memory capacity
 H100_MEM_GB = 80   # H100 GPU memory capacity
+B200_MEM_GB = 178  # B200 GPU memory capacity
