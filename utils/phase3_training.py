@@ -45,12 +45,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
 
     # Try ZeRO-1 first (better efficiency)
     viable_z1 = calculate_viable_micro_batch_sizes(
-        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1,
+        tp=TP
     )
 
     # Try ZeRO-2
     viable_z2 = calculate_viable_micro_batch_sizes(
-        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=2
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=2,
+        tp=TP
     )
 
     # Determine best ZeRO strategy and micro batch size

@@ -19,6 +19,7 @@ def calculate_model_memory_gb(
     layer_norm,
     ffn_weight_matrices,
     num_embeddings_tables,
+    tp=1,
 ):
     """
     Calculate model memory in GB for a given variant.
@@ -32,6 +33,8 @@ def calculate_model_memory_gb(
         layer_norm: Layer norm constant (typically 2)
         ffn_weight_matrices: FFN weight matrices constant (typically 3)
         num_embeddings_tables: Number of embedding tables (typically 2)
+        tp: Tensor parallelism degree (default 1). TP shards attention,
+            FFN, expert, and embedding weights across tp GPUs.
 
     Returns:
         float: Model memory in GB
@@ -54,14 +57,12 @@ def calculate_model_memory_gb(
     )
     embed_mem = num_embeddings_tables * vocab * d * param_bytes
 
+    # TP shards attention, FFN, expert, and embedding weights across tp GPUs.
+    # Layer norm and router weights are small and replicated (not sharded).
     model_mem_bytes = (
-        attn_mem
-        + routed_mem
-        + shared_mem
-        + router_mem
+        (attn_mem + routed_mem + shared_mem + dense_ffn_mem + embed_mem) / tp
         + ln_mem
-        + dense_ffn_mem
-        + embed_mem
+        + router_mem
     )
     return model_mem_bytes / 1e9
 
@@ -197,6 +198,7 @@ def calculate_viable_micro_batch_sizes(
     zero_strategy,
     micros_to_test=None,
     threshold=None,
+    tp=1,
 ):
     """
     Calculate which micro batch sizes fit in GPU memory.
@@ -210,6 +212,7 @@ def calculate_viable_micro_batch_sizes(
         zero_strategy: ZeRO strategy (1, 2, or 3)
         micros_to_test: List of micro batch sizes to test (default: use global MICROS)
         threshold: Memory utilization threshold (default: use global GPU_MEM_UTILIZATION_THRESHOLD)
+        tp: Tensor parallelism degree (default 1)
 
     Returns:
         list: Viable micro batch sizes sorted ascending (e.g., [1, 2, 4])
@@ -231,6 +234,7 @@ def calculate_viable_micro_batch_sizes(
         LAYER_NORM,
         FFN_WEIGHT_MATRICES,
         NUM_EMBEDDINGS_TABLES,
+        tp=tp,
     )
 
     viable_micros = []

@@ -79,7 +79,8 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     # Calculate model memory (doesn't change with ZeRO)
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
-        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES
+        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        tp=TP
     )
 
     # Try to calculate with micro=1 and best ZeRO strategy attempted
@@ -177,17 +178,20 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     # Calculate model memory once
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
-        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES
+        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        tp=TP
     )
 
     # Try ZeRO-1 first (better efficiency)
     viable_z1 = calculate_viable_micro_batch_sizes(
-        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1,
+        tp=TP
     )
 
     # Try ZeRO-2
     viable_z2 = calculate_viable_micro_batch_sizes(
-        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=2
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=2,
+        tp=TP
     )
 
     # Determine best ZeRO strategy and micro batch size
