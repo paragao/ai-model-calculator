@@ -53,11 +53,13 @@ def analyze_zero1_communication_overhead(variant, hw, dp_values, layers_per_gpu,
         LAYER_NORM,
         FFN_WEIGHT_MATRICES,
         NUM_EMBEDDINGS_TABLES,
+        tp=TP,
     )
 
     # Check viable micro batch sizes with ZeRO-1
     viable_micros = calculate_viable_micro_batch_sizes(
-        variant, gpu_mem, dp_full, layers_per_gpu, experts_per_gpu, zero_strategy=1
+        variant, gpu_mem, dp_full, layers_per_gpu, experts_per_gpu, zero_strategy=1,
+        tp=TP
     )
 
     if not viable_micros:
