@@ -6,7 +6,8 @@ their basic architecture parameters. It ensures all variants have the complete
 set of fields required for memory and training analysis.
 
 Formulas used:
-- attn_per_layer = d² × 2.25
+- attn_per_layer = 2 * d * (q_heads + kv_heads) * head_dim
+  (falls back to d² × 2.25 when head_dim = d / q_heads)
 - expert_each = d × expert_ffn × 3
 - shared_each = d × dense_ffn × 3 (shared expert uses dense FFN dimension)
 - router_each = d × num_experts
@@ -22,20 +23,32 @@ from pathlib import Path
 DEFAULT_NUM_EXPERTS = 128
 
 
-def calculate_attn_per_layer(d):
+def calculate_attn_per_layer(d, q_heads=None, kv_heads=None, head_dim=None):
     """
     Calculate attention parameters per layer.
 
-    Formula: d² × 2.25
+    Formula: 2 * d * (q_heads + kv_heads) * head_dim
     This accounts for Q, K, V projections and output projection.
+
+    If q_heads/kv_heads/head_dim are not provided, falls back to d^2 * 2.25
+    (which assumes head_dim = d / q_heads and kv_heads = q_heads / 8).
 
     Args:
         d: Hidden dimension
+        q_heads: Number of query attention heads (optional)
+        kv_heads: Number of key/value attention heads (optional)
+        head_dim: Dimension per attention head (optional, defaults to d // q_heads)
 
     Returns:
         int: Number of attention parameters per layer
     """
-    return int(d * d * 2.25)
+    if q_heads is not None and kv_heads is not None:
+        if head_dim is None:
+            head_dim = d // q_heads
+        return int(2 * d * (q_heads + kv_heads) * head_dim)
+    else:
+        # Legacy fallback for models where head_dim = d / q_heads
+        return int(d * d * 2.25)
 
 
 def calculate_expert_each(d, expert_ffn):
@@ -183,7 +196,10 @@ def calculate_missing_fields(variant, num_experts=DEFAULT_NUM_EXPERTS):
     calculated = {}
 
     # Calculate attention parameters
-    calculated['attn_per_layer'] = calculate_attn_per_layer(d)
+    q_heads = variant.get('q_heads', None)
+    kv_heads = variant.get('kv_heads', None)
+    head_dim = variant.get('head_dim', None)
+    calculated['attn_per_layer'] = calculate_attn_per_layer(d, q_heads, kv_heads, head_dim)
 
     # Calculate expert-related parameters
     if expert_ffn > 0:

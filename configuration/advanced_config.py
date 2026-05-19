@@ -15,7 +15,7 @@ Most users should leave these at their default values.
 from .project_config import PRECISION
 
 # Target batch size configuration
-TOKENS_PER_BATCH = 33e6  # Chinchilla-optimal batch size for ~72B MoE models
+TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
 
 # ZeRO optimization strategies with efficiency multipliers
 ZERO_STRATEGY = [
@@ -56,19 +56,24 @@ NCCL_MEM_BUF = 4.0  # NCCL communication buffer size in GB
 GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory
 
 # Training step boundaries (for assessing batch size quality)
-LOWER_BOUND_OPTIM_RANGE = 300_000    # Lower bound for "reasonable" training steps
-UPPER_BOUND_OPTIM_RANGE = 800_000    # Upper bound for "reasonable" training steps
-LOWER_BOUND_LOW_RANGE = 200_000      # Lower bound for "borderline low" steps
-UPPER_BOUND_LOW_RANGE = 300_000      # Upper bound for "borderline low" steps
-LOWER_BOUND_HIGH_RANGE = 800_000     # Lower bound for "borderline high" steps
-UPPER_BOUND_HIGH_RANGE = 1_200_000   # Upper bound for "borderline high" steps
-MIN_STEPS = 200_000                  # Minimum acceptable training steps
-MAX_STEPS = 1_200_000                # Maximum acceptable training steps
+LOWER_BOUND_OPTIM_RANGE = 300_000
+UPPER_BOUND_OPTIM_RANGE = 800_000
+LOWER_BOUND_LOW_RANGE = 200_000
+UPPER_BOUND_LOW_RANGE = 300_000
+LOWER_BOUND_HIGH_RANGE = 800_000
+UPPER_BOUND_HIGH_RANGE = 1_200_000
+MIN_STEPS = 200_000
+MAX_STEPS = 1_200_000
 
 # Batch size constraints
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
 
 # Hardware memory specifications (GB)
-H200_MEM_GB = 141  # H200 GPU memory capacity
-H100_MEM_GB = 80   # H100 GPU memory capacity
-B200_MEM_GB = 178  # B200 GPU memory capacity
+H100_MEM_GB = 80    # H100 GPU memory capacity
+H200_MEM_GB = 141   # H200 GPU memory capacity
+B200_MEM_GB = 180   # B200 GPU memory capacity
+B300_MEM_GB = 268   # B300 Ultra GPU memory capacity
+GB200_MEM_GB = 185  # GB200 NVL GPU memory capacity
+A10G_MEM_GB = 24    # A10G GPU memory capacity
+L4_MEM_GB = 24      # L4 GPU memory capacity
+L40S_MEM_GB = 48    # L40S GPU memory capacity

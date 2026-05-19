@@ -13,6 +13,18 @@ This calculator performs detailed analysis across 5 phases:
 5. **Phase 4.1: ZeRO-1 Communication** - Analyze all-gather communication overhead for optimizer sharding
 6. **Phase 5: All-to-All Communication** - Analyze intra-node MoE routing communication volumes
 
+## Supported Models
+
+**Dense Models:** Llama-3.1-8B, Llama-3.1-70B, Llama-3.1-405B, Llama-3.2-3B, Llama-3.3-70B, Qwen2.5-7B, Qwen2.5-32B, Qwen2.5-72B, Qwen3-8B, Qwen3-32B, Qwen3.5-27B
+
+**MoE Models:** Qwen3-30B-A3B, Qwen3-235B-A22B, Qwen3.5-35B-A3B, Qwen3.5-122B-A10B, Qwen3.5-397B-A17B, Llama-4-Scout-17B-16E, Llama-4-Maverick-17B-128E, DeepSeek-V3, DeepSeek-V3.1, DeepSeek-V3.2, DeepSeek-V4
+
+## Supported Hardware
+
+**Training (P-family):** p5 (H100 80GB), p5en (H200 141GB), p6-B200 (180GB), p6-B300 (268GB), p6e-GB200 (185GB)
+
+**Inference/Fine-tuning (G-family):** g5 (A10G 24GB), g6 (L4 24GB), g6e (L40S 48GB)
+
 ## Quick Start
 
 ### Using Docker (Recommended)

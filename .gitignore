@@ -1,44 +1,23 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-*.egg-info/
-dist/
-build/
 
-# macOS
+# Output files
+*.csv
+*.json
+*.txt
+!README*.md
+
+# OS files
 .DS_Store
-.AppleDouble
-.LSOverride
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Logs
-*.log
-
-# Environment
-.env
-.venv
-venv/
-
-# Cache
-.cache/
-.claude/
-
-benchmarks/
-
-# Generated output files
-phase*.csv
-phase*.json
-*_analysis*.txt
-*_output.txt
+Thumbs.db
 
 # Backup files
 *.backup
+*.BAK
+*.bak
+
+# IDE
+.vscode/
+.idea/
