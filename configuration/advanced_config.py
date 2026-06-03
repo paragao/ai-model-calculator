@@ -50,7 +50,15 @@ SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkp
 
 # Communication buffer configuration
 FWD_BWD_ROUTING_BUFF_PASSES = 2  # All-to-all buffer passes for MoE routing
-NCCL_MEM_BUF = 4.0  # NCCL communication buffer size in GB
+NCCL_MEM_BUF = 6.0  # NCCL base communication buffer size in GB (includes CUDA context)
+NCCL_EP_SCALING_FACTOR = 1.0  # Additional GB per EP rank beyond 1 (all-to-all workspace)
+
+# PyTorch memory allocator fragmentation
+# Calibrated against nsys profiling of Qwen3-235B-A22B on 64 B300 GPUs (PP=8, EP=8):
+# actual measured 150 GB vs raw calculated ~121 GB → ratio ≈ 1.24x.
+# Accounts for CUDA caching allocator fragmentation, memory alignment, and
+# small transient buffers not explicitly modeled.
+FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching allocator
 
 # Memory utilization
 GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory

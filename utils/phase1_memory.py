@@ -101,6 +101,12 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
         nccl_mem_buf=NCCL_MEM_BUF,
         optim_bytes=OPTIM_BYTES,
+        ep=EP,
+        pp=PP,
+        vp=VP,
+        nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+        fragmentation_factor=FRAGMENTATION_FACTOR,
+        experts_per_gpu=experts_per_gpu,
     )
 
     required = memory_breakdown["total"]
@@ -238,6 +244,12 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
         nccl_mem_buf=NCCL_MEM_BUF,
         optim_bytes=OPTIM_BYTES,
+        ep=EP,
+        pp=PP,
+        vp=VP,
+        nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+        fragmentation_factor=FRAGMENTATION_FACTOR,
+        experts_per_gpu=experts_per_gpu,
     )
 
     # Calculate efficiency metrics

@@ -12,7 +12,8 @@ TOPK = 8             # Top-K experts selected per token in MoE routing (0 for de
 N_EXPERTS = 128      # Total number of experts in MoE layers (0 for dense)
 
 # Parallelism configuration
-PP = 1   # Pipeline parallelism degree (layers split across pipeline stages)
+PP = 8   # Pipeline parallelism degree (layers split across pipeline stages)
+VP = 4   # Virtual pipeline parallelism degree (interleaved schedule; 1 = no VP)
 TP = 1   # Tensor parallelism degree (model split within layers)
 CP = 1   # Context parallelism degree (sequence/context split across GPUs)
 EP = 8   # Expert parallelism degree (experts distributed across GPUs; 1 for dense)

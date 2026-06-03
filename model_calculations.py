@@ -70,6 +70,9 @@ from utils.phase5_alltoall_comm import (
     export_alltoall_results_csv
 )
 
+# Import Phase 6: PP SendRecv Communication
+from utils.phase6_pp_comm import calculate_pp_communication
+
 # Validate configuration
 validate_configuration()
 
@@ -596,6 +599,67 @@ else:
 export_alltoall_results_csv(a2a_results, "phase5_alltoall_comm_results.csv")
 print(f"\n📊 Phase 5 results exported to: phase5_alltoall_comm_results.csv")
 
+# ============================================================================
+# PHASE 6: Pipeline Parallelism SendRecv Communication
+# ============================================================================
+print(f"\n\n{'=' * 140}")
+print("PP SENDRECV COMMUNICATION ANALYSIS")
+print("=" * 140)
+
+if PP > 1:
+    for hw in HARDWARE:
+        total_gpus = hw["gpus"]
+        dp = total_gpus // (TP * PP * CP)
+        inter_node_bw = hw["inter_node_bw_gb"]
+
+        print(f"\n{'#' * 140}")
+        print(f"# {hw['name']} (PP={PP}, VP={VP}, DP={dp}, inter-node BW={inter_node_bw} GB/s)")
+        print(f"{'#' * 140}")
+
+        for v in VARIANTS:
+            # Use best micro batch size from Phase 1 results if available
+            phase1_result = all_results["variants"].get(v["name"], [])
+            best_micro = 1
+            if phase1_result:
+                last_result = phase1_result[-1] if phase1_result else None
+                if last_result and last_result.get("best_micro"):
+                    best_micro = last_result["best_micro"]
+
+            # GBS from tokens_per_batch / seq_len
+            gbs = int(TOKENS_PER_BATCH / SEQ_LEN)
+
+            pp_metrics = calculate_pp_communication(
+                layers=v["layers"],
+                hidden_dim=v["d"],
+                seq_len=SEQ_LEN,
+                mbs=best_micro,
+                gbs=gbs,
+                pp=PP,
+                vp=VP,
+                dp=dp,
+                ep=EP,
+                dtype_bytes=PARAM_BYTES,
+                inter_node_bw_gb=inter_node_bw,
+                intra_node_bw_gbps=hw["intra_node_bw_gbps"],
+                gpus_per_node=8,
+            )
+
+            print(f"\n  {v['name']} (d={v['d']}, MBS={best_micro}):")
+            print(f"    Activation per send:    {pp_metrics['activation_size_mb']:.1f} MB")
+            print(f"    Sends/micro-batch:      {pp_metrics['sends_per_microbatch']}")
+            print(f"    Micro-batches/step:     {pp_metrics['num_microbatches']}")
+            print(f"    Total sends/step:       {pp_metrics['total_sends_per_step']}")
+            print(f"    Total traffic/step:     {pp_metrics['total_traffic_gb']:.2f} GB")
+            print(f"    Pipeline bubble:        {pp_metrics['pipeline_bubble_pct']:.1f}%")
+            print(f"    Time per send:          {pp_metrics['time_per_send_us']:.0f} µs")
+            print(f"    Exposed PP time/step:   {pp_metrics['estimated_pp_time_ms']:.1f} ms")
+            print(f"    Comm type:              {pp_metrics['comm_type']}")
+            print(f"    EFA utilization:        {pp_metrics['efa_utilization_pct']:.1f}%")
+else:
+    print("\n  PP=1: No pipeline parallelism communication (skipped)")
+
+print(f"\n📊 Phase 6 analysis complete.")
+
 # Summary of all exports
 print(f"\n{'=' * 140}")
 print("📊 EXPORT SUMMARY")
@@ -607,3 +671,4 @@ print("  ✅ phase3_training_results.csv")
 print("  ✅ phase4_zero2_comm_results.csv")
 print("  ✅ phase4_1_zero1_comm_results.csv")
 print("  ✅ phase5_alltoall_comm_results.csv")
+print("  ✅ phase6_pp_comm (inline output)")

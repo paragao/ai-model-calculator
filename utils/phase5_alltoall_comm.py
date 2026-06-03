@@ -190,6 +190,85 @@ def generate_alltoall_recommendations(a2a_results):
     return recommendations
 
 
+def calculate_moe_all_to_all(layers_per_gpu, hidden_dim, seq_len, mbs, gbs, dp, ep,
+                             topk, num_experts, dtype_bytes=2,
+                             intra_node_bw_gbps=1800, inter_node_bw_gb=400,
+                             gpus_per_node=8):
+    """
+    Comprehensive MoE All-to-All communication analysis.
+
+    Args:
+        layers_per_gpu: MoE layers on this GPU
+        hidden_dim: Model hidden dimension
+        seq_len: Sequence length
+        mbs: Micro batch size
+        gbs: Global batch size (in sequences)
+        dp: Data parallelism degree
+        ep: Expert parallelism degree
+        topk: Number of experts selected per token
+        num_experts: Total number of experts
+        dtype_bytes: Bytes per element (2 for BF16)
+        intra_node_bw_gbps: Intra-node bandwidth in GB/s
+        inter_node_bw_gb: Inter-node bandwidth in GB/s
+        gpus_per_node: GPUs per node
+
+    Returns:
+        dict with per-layer, per-step, and bandwidth metrics
+    """
+    # Per-layer A2A volume: each token sends hidden_dim to topk experts
+    # Forward: tokens dispatched to experts + gathered back
+    a2a_per_layer_fwd_bytes = seq_len * mbs * topk * hidden_dim * dtype_bytes
+    a2a_per_layer_bwd_bytes = a2a_per_layer_fwd_bytes  # symmetric
+    a2a_per_layer_bytes = a2a_per_layer_fwd_bytes + a2a_per_layer_bwd_bytes
+
+    # Per micro-batch: across all MoE layers on this GPU
+    a2a_per_microbatch_bytes = layers_per_gpu * a2a_per_layer_bytes
+
+    # Number of micro-batches per training step
+    num_microbatches = gbs // (mbs * dp) if (mbs * dp) > 0 else 1
+
+    # Total A2A per training step
+    total_a2a_bytes = a2a_per_microbatch_bytes * num_microbatches
+
+    # Determine if A2A is intra-node or inter-node
+    # EP GPUs within same node use NVLink; cross-node uses EFA
+    is_intra_node = ep <= gpus_per_node
+    effective_bw = intra_node_bw_gbps if is_intra_node else inter_node_bw_gb
+    comm_type = "intra-node (NVLink)" if is_intra_node else "inter-node (EFA)"
+
+    # A2A bandwidth: each GPU sends (EP-1)/EP fraction of its data
+    # Ring-based A2A effective BW = link_bw * (EP-1)/EP for large messages
+    ep_efficiency = (ep - 1) / ep if ep > 1 else 1.0
+    effective_a2a_bw = effective_bw * ep_efficiency
+
+    # Timing estimates
+    a2a_per_layer_ms = (a2a_per_layer_bytes / 1e9) / effective_a2a_bw * 1000 if effective_a2a_bw > 0 else 0
+    a2a_per_microbatch_ms = a2a_per_layer_ms * layers_per_gpu
+    a2a_per_step_ms = a2a_per_microbatch_ms * num_microbatches
+
+    # Bandwidth utilization
+    peak_bw = intra_node_bw_gbps if is_intra_node else inter_node_bw_gb
+    achieved_bw_gbps = (a2a_per_layer_bytes / 1e9) / (a2a_per_layer_ms / 1000) if a2a_per_layer_ms > 0 else 0
+    bw_utilization_pct = (achieved_bw_gbps / peak_bw * 100) if peak_bw > 0 else 0
+
+    return {
+        "a2a_per_layer_fwd_mb": a2a_per_layer_fwd_bytes / 1e6,
+        "a2a_per_layer_total_mb": a2a_per_layer_bytes / 1e6,
+        "a2a_per_microbatch_mb": a2a_per_microbatch_bytes / 1e6,
+        "num_microbatches": num_microbatches,
+        "total_a2a_per_step_gb": total_a2a_bytes / 1e9,
+        "comm_type": comm_type,
+        "is_intra_node": is_intra_node,
+        "effective_bw_gbps": effective_a2a_bw,
+        "a2a_per_layer_ms": a2a_per_layer_ms,
+        "a2a_per_microbatch_ms": a2a_per_microbatch_ms,
+        "a2a_per_step_ms": a2a_per_step_ms,
+        "bw_utilization_pct": bw_utilization_pct,
+        "layers_per_gpu": layers_per_gpu,
+        "ep": ep,
+    }
+
+
 def export_alltoall_results_csv(a2a_results, filename):
     """
     Export all-to-all communication analysis results to CSV file.
