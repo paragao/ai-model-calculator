@@ -43,13 +43,21 @@ def calculate_model_memory_gb(
     layers = variant["layers"]
     moe_layers = layers - variant["dense_layers"]
 
+    # When using pipeline parallelism, only a fraction of MoE layers are on this GPU.
+    # Approximate: distribute MoE layers proportionally to total layers.
+    moe_layers_per_gpu = max(0, layers_per_gpu - min(variant["dense_layers"], layers_per_gpu))
+    # More precise: ratio of MoE layers in the full model applied to layers_per_gpu
+    if layers > 0 and moe_layers > 0:
+        moe_layers_per_gpu = int(layers_per_gpu * moe_layers / layers)
+
     attn_mem = layers_per_gpu * variant["attn_per_layer"] * param_bytes
-    routed_mem = experts_per_gpu * moe_layers * variant["expert_each"] * param_bytes
-    shared_mem = moe_layers * variant["shared_each"] * param_bytes
-    router_mem = moe_layers * variant["router_each"] * param_bytes
-    ln_mem = layers * layer_norm * d * param_bytes
+    routed_mem = experts_per_gpu * moe_layers_per_gpu * variant["expert_each"] * param_bytes
+    shared_mem = moe_layers_per_gpu * variant["shared_each"] * param_bytes
+    router_mem = moe_layers_per_gpu * variant["router_each"] * param_bytes
+    ln_mem = layers_per_gpu * layer_norm * d * param_bytes
+    dense_layers_per_gpu = layers_per_gpu - moe_layers_per_gpu
     dense_ffn_mem = (
-        variant["dense_layers"]
+        dense_layers_per_gpu
         * ffn_weight_matrices
         * d
         * variant["dense_ffn"]
@@ -118,6 +126,12 @@ def calculate_memory_for_micro(
     fwd_bwd_routing_buff_passes,
     nccl_mem_buf,
     optim_bytes,
+    ep=1,
+    pp=1,
+    vp=1,
+    nccl_ep_scaling_factor=0.0,
+    fragmentation_factor=1.0,
+    experts_per_gpu=0,
 ):
     """
     Calculate total GPU memory required for a given micro batch size.
@@ -135,8 +149,14 @@ def calculate_memory_for_micro(
         empirical_act_multiplier: Activation multiplier constant
         selective_act_checkpointing_multiplier: Checkpointing multiplier
         fwd_bwd_routing_buff_passes: Forward/backward routing buffer passes
-        nccl_mem_buf: NCCL buffer memory in GB
+        nccl_mem_buf: NCCL base buffer memory in GB
         optim_bytes: Optimizer bytes per parameter
+        ep: Expert parallelism degree (default 1)
+        pp: Pipeline parallelism degree (default 1)
+        vp: Virtual pipeline parallelism degree (default 1)
+        nccl_ep_scaling_factor: Additional NCCL GB per EP rank (default 0.0)
+        fragmentation_factor: PyTorch allocator fragmentation multiplier (default 1.0)
+        experts_per_gpu: Number of experts per GPU (default 0)
 
     Returns:
         dict: Memory breakdown with keys:
@@ -148,36 +168,110 @@ def calculate_memory_for_micro(
             - buffer: Communication buffer memory
     """
     d = variant["d"]
+    is_moe = variant.get("expert_ffn", 0) > 0
+    moe_layers = variant["layers"] - variant.get("dense_layers", variant["layers"])
+    total_layers = variant["layers"]
+    moe_layers_per_gpu = int(layers_per_gpu * moe_layers / total_layers) if total_layers > 0 else 0
+
+    # --- Optimizer memory with EP/DP interaction fix ---
+    # When EP subdivides DP (dp > ep), MoE params are only shared within dp/ep ranks.
+    # When dp <= ep, optimizer uses full dp normally (all experts already distributed).
+    if is_moe and ep > 1 and dp > ep:
+        eff_dp_moe = dp // ep
+    else:
+        eff_dp_moe = dp
+
+    # Estimate fraction of model memory that is MoE expert params vs non-MoE
+    if is_moe and model_mem_gb > 0:
+        # Expert memory fraction based on architecture (must match calculate_model_memory_gb)
+        routed_mem = experts_per_gpu * moe_layers_per_gpu * variant["expert_each"] * param_bytes
+        total_model_bytes = model_mem_gb * 1e9
+        moe_frac = min(1.0, routed_mem / total_model_bytes) if total_model_bytes > 0 else 0
+        dense_frac = 1.0 - moe_frac
+    else:
+        moe_frac = 0.0
+        dense_frac = 1.0
 
     # Calculate gradient and optimizer memory based on ZeRO strategy
     if zero_strategy == 1:
-        grad_mem = model_mem_gb  # Full gradients on each GPU
-        optim_mem = model_mem_gb * optim_bytes / dp  # Optimizer sharded across DP
+        grad_mem = model_mem_gb
+        # Optimizer: dense params sharded across full DP, MoE params across eff_dp_moe
+        optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
+        optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
+        optim_mem = optim_dense + optim_moe
     elif zero_strategy == 2:
-        grad_mem = model_mem_gb / dp  # Gradients sharded across DP
-        optim_mem = model_mem_gb * optim_bytes / dp  # Optimizer sharded across DP
+        grad_mem = model_mem_gb / dp
+        optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
+        optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
+        optim_mem = optim_dense + optim_moe
     elif zero_strategy == 3:
-        grad_mem = model_mem_gb / dp  # Gradients sharded
-        optim_mem = model_mem_gb * optim_bytes / dp  # Optimizer sharded
-        # ZeRO-3 also shards model params, but we don't model that here
+        grad_mem = model_mem_gb / dp
+        optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
+        optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
+        optim_mem = optim_dense + optim_moe
     else:
         raise ValueError(f"Unknown ZeRO strategy: {zero_strategy}")
 
-    # Calculate activation memory (scales with micro batch size)
-    act_per_layer_full = seq_len * micro * d * empirical_act_multiplier
-    act_per_layer_selective = (
-        act_per_layer_full * selective_act_checkpointing_multiplier
-    )
-    activation_mem = layers_per_gpu * act_per_layer_selective / 1e9
+    # --- Activation memory ---
+    # For MoE layers, activations include expert intermediates (higher per-layer cost)
+    if is_moe and moe_layers_per_gpu > 0:
+        # MoE activation per layer: attention acts + routed expert intermediates
+        # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output of expert FFN)
+        expert_ffn = variant.get("expert_ffn", 0)
+        moe_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * param_bytes)
+        dense_act_per_layer = seq_len * micro * d * empirical_act_multiplier
+        dense_layers_on_gpu = layers_per_gpu - moe_layers_per_gpu
+        act_total_full = (moe_layers_per_gpu * moe_act_per_layer + dense_layers_on_gpu * dense_act_per_layer)
+    else:
+        act_total_full = layers_per_gpu * seq_len * micro * d * empirical_act_multiplier
 
-    # Calculate buffer memory (scales with micro batch size)
+    activation_mem = act_total_full * selective_act_checkpointing_multiplier / 1e9
+
+    # VP activation overhead: interleaved schedule keeps more activations in-flight
+    # In interleaved 1F1B, warmup fills (PP-1)*VP micro-batches before steady state.
+    # Each micro-batch occupies layers_per_virtual_chunk = layers_per_gpu / VP layers.
+    # Total layer-activations stored = (PP-1) * layers_per_gpu (independent of VP).
+    # But lower VP = fewer but larger chunks = less overhead from per-chunk metadata.
+    if vp > 1 and pp > 1:
+        layers_per_virtual_chunk = layers_per_gpu // vp
+        inflight_micros = (pp - 1) * vp  # warmup micro-batches
+        # In-flight activations use the same per-layer cost but without checkpointing reduction
+        if is_moe and moe_layers_per_gpu > 0:
+            expert_ffn = variant.get("expert_ffn", 0)
+            avg_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * param_bytes)
+        else:
+            avg_act_per_layer = seq_len * micro * d * empirical_act_multiplier
+        vp_act_overhead = inflight_micros * layers_per_virtual_chunk * avg_act_per_layer / 1e9
+        activation_mem += vp_act_overhead
+
+    # --- Buffer memory ---
+    # All-to-all routing buffers
     a2a_buf = (
         seq_len * micro * topk * d * fwd_bwd_routing_buff_passes * param_bytes / 1e9
     )
-    buffer_mem = a2a_buf + nccl_mem_buf
 
-    # Total memory
-    total_mem = model_mem_gb + grad_mem + optim_mem + activation_mem + buffer_mem
+    # MoE dispatch buffers: send + recv permutation buffers per MoE layer
+    moe_dispatch_buf = 0.0
+    if is_moe and experts_per_gpu > 0:
+        moe_dispatch_buf = (
+            moe_layers_per_gpu * 2 * micro * seq_len * d * param_bytes
+            * (topk / experts_per_gpu) / 1e9
+        )
+
+    # NCCL workspace: base + scaling with EP group size
+    nccl_workspace = nccl_mem_buf + nccl_ep_scaling_factor * max(0, ep - 1)
+
+    # PP pipeline send/recv buffers: each stage needs send+recv buffers for activations
+    pp_buf = 0.0
+    if pp > 1:
+        # Two buffers (send + recv) each holding one micro-batch's activation slice
+        pp_buf = 2 * micro * seq_len * d * param_bytes / 1e9
+
+    buffer_mem = a2a_buf + moe_dispatch_buf + nccl_workspace + pp_buf
+
+    # --- Total with fragmentation ---
+    raw_total = model_mem_gb + grad_mem + optim_mem + activation_mem + buffer_mem
+    total_mem = raw_total * fragmentation_factor
 
     return {
         "total": total_mem,
@@ -254,6 +348,12 @@ def calculate_viable_micro_batch_sizes(
             fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
             nccl_mem_buf=NCCL_MEM_BUF,
             optim_bytes=OPTIM_BYTES,
+            ep=EP,
+            pp=PP,
+            vp=VP,
+            nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+            fragmentation_factor=FRAGMENTATION_FACTOR,
+            experts_per_gpu=experts_per_gpu,
         )
 
         # Check if this micro batch size fits in memory
