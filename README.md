@@ -1,283 +1,127 @@
-# LLM Training Calculator
+# AI Model Training Calculator
 
-A comprehensive tool for analyzing memory requirements, batch configurations, training time estimates, and communication overhead for large language model training across different hardware platforms.
+A [Kiro Power](https://kiro.dev/docs/powers/) that analyzes GPU memory, batch configuration, training time, and communication overhead for LLM training across AWS hardware platforms.
 
-## Overview
+## Getting Started
 
-This calculator performs detailed analysis across 5 phases:
+### Step 1: Open the Powers panel in Kiro
 
-1. **Phase 1: Memory Analysis** - Calculate GPU memory requirements with ZeRO-1 and ZeRO-2 optimization strategies
-2. **Phase 2: Batch Configuration** - Analyze optimal batch sizes and gradient accumulation steps
-3. **Phase 3: Training Time Estimation** - Estimate training duration using FLOPs calculations
-4. **Phase 4: ZeRO-2 Communication** - Analyze reduce-scatter communication overhead for data parallelism
-5. **Phase 4.1: ZeRO-1 Communication** - Analyze all-gather communication overhead for optimizer sharding
-6. **Phase 5: All-to-All Communication** - Analyze intra-node MoE routing communication volumes
+In your Kiro IDE, open the command palette (`Cmd+Shift+P` on macOS or `Ctrl+Shift+P` on Linux) and search for:
 
-## Supported Models
+```
+Kiro: Add Power
+```
 
-**Dense Models:** Llama-3.1-8B, Llama-3.1-70B, Llama-3.1-405B, Llama-3.2-3B, Llama-3.3-70B, Qwen2.5-7B, Qwen2.5-32B, Qwen2.5-72B, Qwen3-8B, Qwen3-32B, Qwen3.5-27B
+Select the command to open the power installation dialog.
 
-**MoE Models:** Qwen3-30B-A3B, Qwen3-235B-A22B, Qwen3.5-35B-A3B, Qwen3.5-122B-A10B, Qwen3.5-397B-A17B, Llama-4-Scout-17B-16E, Llama-4-Maverick-17B-128E, DeepSeek-V3, DeepSeek-V3.1, DeepSeek-V3.2, DeepSeek-V4
+### Step 2: Enter the repository URL
 
-## Supported Hardware
+When prompted for the Git repository URL, paste:
 
-**Training (P-family):** p5 (H100 80GB), p5en (H200 141GB), p6-B200 (180GB), p6-B300 (268GB), p6e-GB200 (185GB)
+```
+https://github.com/paragao/ai-model-calc-power.git
+```
 
-**Inference/Fine-tuning (G-family):** g5 (A10G 24GB), g6 (L4 24GB), g6e (L40S 48GB)
+Press Enter. Kiro will clone the power into your workspace under `.kiro/powers/ai-model-calc/`.
 
-## Quick Start
+### Step 3: Verify the installation
 
-### Using Docker (Recommended)
+After installation, confirm the power appears in your workspace:
 
-The easiest way to run the calculator is using Docker:
+```
+.kiro/
+  powers/
+    ai-model-calc/
+      POWER.md
+      steering/
+        calculator-workflow.md
+        model-catalog.md
+        hardware-catalog.md
+        training-config.md
+        report-integration.md
+```
+
+You can also check the Kiro Powers panel in the sidebar — the "AI Model Training Calculator" should be listed as an installed power.
+
+### Step 4: Confirm Python 3 is available
+
+The calculator uses only the Python standard library, so no additional packages are needed. Just verify Python 3.8+ is on your path:
 
 ```bash
-# Build the Docker image
-docker build -f container/Dockerfile -t llm-training-calculator:latest .
-
-# Run the calculator
-docker run --rm llm-training-calculator:latest
-
-# Or use the convenience script
-./container/run-docker.sh
+python3 --version
 ```
 
-**See [container/README-DOCKER.md](container/README-DOCKER.md) for detailed Docker usage instructions.**
+### Step 5: Start using the power
 
-### Running Directly with Python
+Once installed, Kiro automatically loads the power's steering files when you ask about training infrastructure. Open a chat session and try prompts like:
 
-Requirements: Python 3.8+
+- "Calculate memory requirements for training Llama 3.1 70B on p5en instances"
+- "How many H200 GPUs do I need to train a 13B model in 2 weeks?"
+- "Compare training configurations for DeepSeek-V3 on p5 vs p5en"
+- "What's the minimum hardware to fit Qwen3-235B for inference?"
 
-```bash
-# Run the calculator
-python3 model_calculations.py
-```
+Kiro will walk you through selecting a mode, model, and hardware, then run the 5-phase analysis and produce CSV/JSON results with an optional HTML report.
 
-No external dependencies required - uses only Python standard library!
+### Optional: Install the AWS Branded Report power
 
-## Features
-
-- ✅ **Memory Optimization** - Automatic selection between ZeRO-1 and ZeRO-2 based on memory constraints
-- ✅ **Multiple Hardware Platforms** - Analyze across H100, H200, and custom hardware configurations
-- ✅ **Model Variants** - Compare different model architectures and parameter counts
-- ✅ **Batch Size Optimization** - Find optimal micro-batch and accumulation settings
-- ✅ **Training Time Estimates** - Calculate training duration with MFU considerations
-- ✅ **Communication Analysis** - Identify bottlenecks in distributed training
-- ✅ **Color-Coded Output** - Easy-to-read results with performance indicators
-- ✅ **Export Options** - Save results to CSV/JSON for further analysis
-
-## Architecture
-
-The codebase is organized into modular components:
+For automatic HTML report generation after each analysis, install the companion power using the same "Add Power" command with:
 
 ```
-model_calculations.py          # Main orchestration script (572 lines)
-├── validation.py               # Configuration validation (67 lines)
-├── core_calculations.py        # Shared calculation functions (280 lines)
-├── formatting_utils.py         # Color output and formatting (180 lines)
-├── phase1_memory.py           # Phase 1: Memory Analysis (383 lines)
-├── phase2_batch.py            # Phase 2: Batch Configuration (164 lines)
-├── phase3_training.py         # Phase 3: Training Time (337 lines)
-├── phase4_zero2_comm.py       # Phase 4: ZeRO-2 Communication (241 lines)
-├── phase4_1_zero1_comm.py     # Phase 4.1: ZeRO-1 Communication (241 lines)
-└── phase5_alltoall_comm.py    # Phase 5: All-to-All Communication (230 lines)
-
-Configuration files:
-├── variants_config.py         # Model variant definitions
-├── hardware_config.py         # Hardware platform specifications
-├── project_config.py          # Training parameters
-└── advanced_config.py         # Parallelization settings (PP, TP, EP, CP)
+https://github.com/paragao/aws-branded-report-power.git
 ```
 
-**Total: 2,123 lines of clean, modular Python code**
+When both powers are installed, the calculator will automatically generate a professional AWS-branded HTML report from the analysis results.
 
-## Configuration
+## Modes of Operation
 
-### Define Model Variants
+The calculator supports three modes, each answering a different infrastructure planning question:
 
-Edit `variants_config.py`:
+### Mode A — "How many instances do I need to finish in time X?"
 
-```python
-VARIANTS = [
-    {
-        "name": "A",
-        "d": 12288,              # Hidden dimension
-        "layers": 64,            # Number of layers
-        "total_params_B": 671,   # Total parameters (billions)
-        "active_params_B": 53,   # Active parameters per forward pass
-    },
-    # Add more variants...
-]
-```
+You provide:
+- Model to train
+- Dataset size (in tokens)
+- Target training time (e.g., "2 months", "30 days")
 
-### Configure Hardware Platforms
+The calculator sweeps multiple node counts and finds the minimum cluster size that meets your time target.
 
-Edit `hardware_config.py`:
+### Mode B — "How long will training take?"
 
-```python
-HARDWARE = [
-    {
-        "name": "4,096 H200",
-        "nodes": 512,
-        "gpus": 4096,
-        "mem_gb": 141,
-        "peak_tflops_bf16": 1979,
-        "inter_node_bw_gb": 200,
-        "intra_node_bw_gbps": 900,
-    },
-    # Add more hardware configs...
-]
-```
+You provide:
+- Model to train
+- Dataset size (in tokens)
+- Number of instances and instance type
 
-### Set Training Parameters
+The calculator estimates wall-clock training duration with low/high confidence ranges.
 
-Edit `project_config.py`:
+### Mode C — "What's the minimum to fit this model?"
 
-```python
-TOTAL_TOKENS = 15e12           # Total training tokens (15T)
-TOKENS_PER_BATCH = 4e6         # Target tokens per batch (4M)
-SEQ_LEN = 8192                 # Sequence length
-MICROS = [1, 2, 4]            # Micro batch sizes to test
-```
+You provide:
+- Model to train (or serve/fine-tune)
+- Instance type
 
-### Configure Parallelization
+The calculator determines the minimum number of instances required to hold the model in GPU memory. This is a pure memory-fit calculation — no dataset size needed. Results are presented for inference, fine-tuning, and full pre-training scenarios side by side.
 
-Edit `advanced_config.py`:
+## What it calculates
 
-```python
-PP = 1          # Pipeline Parallelism
-TP = 1          # Tensor Parallelism
-EP = 8          # Expert Parallelism
-CP = 1          # Context Parallelism
-N_EXPERTS = 128 # Total number of experts
-```
+| Phase | Output |
+|-------|--------|
+| 1. Memory Analysis | Per-GPU memory breakdown (model, gradient, optimizer, activation) across ZeRO stages |
+| 2. Batch Configuration | Optimal micro batch size and gradient accumulation steps |
+| 3. Training Time | Wall-clock estimates with confidence ranges |
+| 4. Communication Overhead | ZeRO reduce-scatter and all-gather latency |
+| 5. MoE Routing | All-to-all communication for Mixture-of-Experts models |
 
-## Output Examples
+Supports dense models (Llama, Qwen) and MoE models (Mixtral, DeepSeek-V3, Qwen3-MoE) on AWS GPU instances (p5/H100, p5en/H200).
 
-### Phase 1: Memory Analysis
+## Repository structure
 
 ```
-  Variant       Model     Grad    Optim    Activ      Buf    TOTAL  Headroom  Util%   ZeRO  micro
-  ---------- -------- -------- -------- -------- -------- -------- --------- ------ ------ ------
-  A             46.4G    46.4G     0.1G    18.1G     5.1G   116.1G    24.9G    82%     Z1      4
-  B             49.2G    49.2G     0.1G    18.5G     5.6G   122.6G    18.4G    87%     Z1      4
+POWER.md                    # Power manifest and onboarding instructions
+steering/
+  calculator-workflow.md    # Full calculation workflow and formulas
+  model-catalog.md          # Supported model architectures
+  hardware-catalog.md       # AWS GPU instance definitions
+  training-config.md        # Parallelism, precision, and batch settings
+  report-integration.md    # Optional HTML report generation
 ```
-
-### Phase 3: Training Time Estimates
-
-```
-  Platform                  GPUs  ZeRO  micro  accum  Tok/batch  Steps  Rel Speed  Est. Time
-  ------------------------- ----- ----- ------ ------ ---------- ------ ---------- -----------
-  4,096 H200 (4.0M)          4096    Z1      4     61      4.0M  3,750       1.0x    1.5-1.7mo
-  4,096 H100 (4.0M)          4096    Z2      4     61      4.0M  3,750       0.6x    2.4-2.8mo
-```
-
-## Advanced Features
-
-### Export Results
-
-Uncomment export functions in `model_calculations.py` to save results:
-
-```python
-# At the end of each phase, add:
-export_results_csv(all_results, "phase1_memory_results.csv")
-export_results_json(all_results, "phase1_memory_results.json")
-```
-
-### Custom Analysis
-
-Import and use individual phase modules:
-
-```python
-from phase1_memory import analyze_variant_memory
-from phase3_training import calculate_training_metrics
-
-# Run custom analysis...
-```
-
-## Distribution
-
-Want to share this tool with others?
-
-📦 **See [container/DISTRIBUTION-GUIDE.md](container/DISTRIBUTION-GUIDE.md) for comprehensive instructions on:**
-- Sharing via Docker Hub
-- Creating tarball distributions
-- Sharing source code packages
-- Git repository setup
-- Customization options for recipients
-
-## System Requirements
-
-### For Docker
-- Docker Engine 20.10+ or Docker Desktop
-- 512MB RAM minimum
-- No GPU required
-
-### For Python
-- Python 3.8 or higher
-- No external dependencies (uses standard library only)
-
-## Troubleshooting
-
-### Colors not displaying
-Disable ANSI colors:
-```bash
-# For Python
-export USE_COLOR=False
-python3 model_calculations.py
-
-# For Docker
-docker run --rm -e USE_COLOR=False llm-training-calculator:latest
-```
-
-### Out of Memory (OOM) warnings
-This is expected! The tool analyzes which configurations fit in GPU memory. OOM warnings indicate that a particular variant doesn't fit on that hardware configuration.
-
-### Import errors
-Ensure all Python files are in the same directory:
-```bash
-ls *.py
-# Should show all 14 Python files
-```
-
-## Contributing
-
-Contributions are welcome! Areas for improvement:
-- Additional hardware platform configurations
-- More sophisticated communication models
-- Pipeline parallelism analysis
-- Activation checkpointing support
-- Extended MoE routing strategies
-
-## Performance
-
-The calculator is computationally lightweight:
-- **Execution time**: ~1-5 seconds for standard configurations
-- **Memory usage**: <100MB RAM
-- **Container size**: 212MB (Docker image)
-
-## Acknowledgments
-
-Built using:
-- Python 3.11 standard library
-- Docker for containerization
-- Mathematical models based on:
-  - ZeRO optimization (Microsoft DeepSpeed)
-  - Transformer architecture analysis
-  - FLOPs-based training time estimation
-  - Communication overhead modeling
-
-## License
-
-[Add your license here - MIT, Apache 2.0, GPL, etc.]
-
-## Contact
-
-[Add your contact information here]
-
----
-
-**Happy calculating! 🚀**
-
-For detailed Docker usage, see [container/README-DOCKER.md](container/README-DOCKER.md)  
-For distribution instructions, see [container/DISTRIBUTION-GUIDE.md](container/DISTRIBUTION-GUIDE.md)
