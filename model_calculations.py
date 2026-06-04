@@ -1,5 +1,14 @@
 #!/usr/bin/python3
 
+import argparse
+import sys
+import os
+
+parser = argparse.ArgumentParser(description='LLM Training Calculator')
+parser.add_argument('--report', action='store_true',
+                    help='Output a concise markdown-style summary report')
+args = parser.parse_args()
+
 # Import configurations
 from configuration.variants_config import VARIANTS
 from configuration.hardware_config import HARDWARE
@@ -74,7 +83,143 @@ from utils.phase5_alltoall_comm import (
 from utils.phase6_pp_comm import calculate_pp_communication
 
 # Validate configuration
-validate_configuration()
+if args.report:
+    _stdout = sys.stdout
+    sys.stdout = open(os.devnull, 'w')
+    validate_configuration()
+    sys.stdout = _stdout
+else:
+    validate_configuration()
+
+
+def generate_report():
+    """Generate a concise markdown-style summary report."""
+    from utils.core_calculations import calculate_training_time_months
+
+    lines = []
+    lines.append("# LLM Training Calculator — Summary Report")
+    lines.append("")
+
+    # Configuration summary
+    lines.append("## Configuration")
+    lines.append("")
+    lines.append(f"- **Variants**: {', '.join(v['name'] for v in VARIANTS)}")
+    lines.append(f"- **Hardware**: {', '.join(hw['name'] for hw in HARDWARE)}")
+    lines.append(f"- **Parallelism**: PP={PP}, TP={TP}, EP={EP}, CP={CP}")
+    lines.append(f"- **Total tokens**: {TOTAL_TOKENS/1e12:.1f}T")
+    lines.append(f"- **Sequence length**: {SEQ_LEN}")
+    lines.append(f"- **Precision**: {PRECISION}")
+    lines.append(f"- **MFU**: {MFU}")
+    lines.append("")
+
+    # Phase 1: Best memory config per variant
+    lines.append("## Phase 1: Memory Analysis (Best Config per Variant)")
+    lines.append("")
+    lines.append("| Variant | Hardware | ZeRO | Micro Batch | Total Mem (GB) | Headroom (GB) |")
+    lines.append("|---------|----------|------|-------------|----------------|---------------|")
+
+    for v in VARIANTS:
+        best_result = None
+        best_hw_name = None
+        for hw in HARDWARE:
+            dp = hw["gpus"] // (TP * PP * CP)
+            layers_per_gpu = v["layers"] // PP
+            result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
+            if result["best_zero"] > 0:
+                if best_result is None or result["efficiency_metrics"]["wasted_headroom"] < best_result["efficiency_metrics"]["wasted_headroom"]:
+                    best_result = result
+                    best_hw_name = hw["name"]
+
+        if best_result:
+            mb = best_result["memory_breakdown"]
+            em = best_result["efficiency_metrics"]
+            lines.append(
+                f"| {v['name']} | {best_hw_name} | Z{best_result['best_zero']} | "
+                f"{best_result['best_micro']} | {mb['total']:.1f} | "
+                f"{em['wasted_headroom']:.1f} |"
+            )
+        else:
+            lines.append(f"| {v['name']} | — | OOM | — | — | — |")
+
+    lines.append("")
+
+    # Phase 3: Training time estimate (best strategy)
+    lines.append("## Phase 3: Training Time Estimate (Best ZeRO Strategy)")
+    lines.append("")
+    lines.append("| Variant | Hardware | GPUs | ZeRO | Est. Time (months) |")
+    lines.append("|---------|----------|------|------|---------------------|")
+
+    for v in VARIANTS:
+        active_params_b = v["active_params_B"]
+        best_time = None
+        best_entry = None
+
+        for hw in HARDWARE:
+            dp = hw["gpus"] // (TP * PP * CP)
+            layers_per_gpu = v["layers"] // PP
+            config_result = generate_platform_configs(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
+            if config_result["oom"]:
+                continue
+            for p in config_result["platforms"]:
+                time_months = calculate_training_time_months(
+                    TOTAL_TOKENS, active_params_b, p["gpus"],
+                    p["peak_tflops"], MFU, p["eff"]
+                )
+                if best_time is None or time_months < best_time:
+                    best_time = time_months
+                    best_entry = p
+
+        if best_entry:
+            low = best_time * TIME_ESTIMATE_LOW_MULTIPLIER
+            high = best_time * TIME_ESTIMATE_HIGH_MULTIPLIER
+            lines.append(
+                f"| {v['name']} | {best_entry['name']} | {best_entry['gpus']} | "
+                f"Z{best_entry['zero']} | {low:.1f} – {high:.1f} |"
+            )
+        else:
+            lines.append(f"| {v['name']} | — | — | — | OOM on all hardware |")
+
+    lines.append("")
+
+    # Recommendations
+    lines.append("## Key Recommendations")
+    lines.append("")
+
+    all_results = {"hardware": [], "variants": {v["name"]: [] for v in VARIANTS}}
+    for hw in HARDWARE:
+        dp = hw["gpus"] // (TP * PP * CP)
+        all_results["hardware"].append(hw["name"])
+        for v in VARIANTS:
+            layers_per_gpu = v["layers"] // PP
+            result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
+            all_results["variants"][v["name"]].append(result)
+
+    recommendations = generate_recommendations(all_results)
+    if recommendations:
+        for rec in recommendations:
+            lines.append(f"- {rec}")
+    else:
+        lines.append("- All configurations look good!")
+
+    lines.append("")
+
+    # MFU disclaimer
+    lines.append("## Disclaimer")
+    lines.append("")
+    lines.append(
+        f"Training time estimates assume MFU={MFU} ({MFU*100:.0f}% of peak FLOPS). "
+        "Actual MFU varies significantly based on implementation quality, "
+        "communication overhead, pipeline bubble fraction, and hardware utilization. "
+        "Typical range: 0.30–0.55 for large-scale distributed training."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+if args.report:
+    print(generate_report())
+    sys.exit(0)
 
 # Note: All function definitions have been moved to phase-specific modules.
 # This file now contains only the execution flow for all 5 analysis phases.
