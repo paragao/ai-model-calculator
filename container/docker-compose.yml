@@ -3,21 +3,21 @@ version: '3.8'
 services:
   calculator:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: container/Dockerfile
     image: llm-training-calculator:latest
     container_name: llm-calculator
     volumes:
       # Mount results directory for output files (optional)
       - ./results:/app/results
-      # Uncomment to use custom configuration files
-      # - ./custom_variants.py:/app/variants_config.py:ro
-      # - ./custom_hardware.py:/app/hardware_config.py:ro
-      # - ./custom_project.py:/app/project_config.py:ro
-      # - ./custom_advanced.py:/app/advanced_config.py:ro
+      # Uncomment to override configuration files:
+      # - ./my_project_config.py:/app/configuration/project_config.py:ro
+      # - ./my_hardware_config.py:/app/configuration/hardware_config.py:ro
+      # - ./my_variants_config.py:/app/configuration/variants_config.py:ro
+      # - ./my_advanced_config.py:/app/configuration/advanced_config.py:ro
     environment:
-      # Set to False to disable color output
       - USE_COLOR=True
       - PYTHONUNBUFFERED=1
-    # Uncomment to override the default command
-    # command: python3 model_calculations.py
+    # ENTRYPOINT is python3 model_calculations.py
+    # Pass flags via 'command' — e.g. uncomment for concise report:
+    # command: ["--report"]
