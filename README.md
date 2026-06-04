@@ -1,127 +1,127 @@
 # AI Model Training Calculator
 
-A [Kiro Power](https://kiro.dev/docs/powers/) that analyzes GPU memory, batch configuration, training time, and communication overhead for LLM training across AWS hardware platforms.
+Analyze GPU memory, batch configuration, training time, and communication overhead for LLM training on AWS hardware.
+
+Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSeek V3/V3.1/V3.2/V4, Qwen3-MoE, Llama 4 Scout/Maverick) on AWS GPU instances (p5/H100, p5en/H200, p6-b200/B200, p6-b300/B300 Ultra, p6e-gb200/GB200 NVL).
+
+## Modes of Operation
+
+| Mode | Question | Required Inputs |
+|------|----------|----------------|
+| **A** | How many instances do I need to finish in time X? | Model, dataset tokens, target time |
+| **B** | How long will training take? | Model, dataset tokens, instance count |
+| **C** | What's the minimum hardware to fit this model? | Model, instance type |
+
+## What It Calculates
+
+| Phase | Output |
+|-------|--------|
+| 1. Memory Analysis | Per-GPU memory breakdown with MoE dispatch buffers, VP overhead, NCCL scaling, and fragmentation factor |
+| 2. Batch Configuration | Optimal micro batch size and gradient accumulation steps |
+| 3. Training Time | Wall-clock estimates with low/high confidence ranges |
+| 4. ZeRO Communication | Reduce-scatter (ZeRO-2) and all-gather (ZeRO-1) latency |
+| 5. MoE All-to-All | Intra-node communication for expert routing |
+| 6. PP SendRecv | Pipeline parallelism latency — NVLink (intra-node) vs EFA (inter-node), bubble % |
+
+## Key Features
+
+- **MoE-aware memory**: Dispatch buffers, NCCL workspace scaling with EP, fragmentation factor (1.24×), EP/DP optimizer sharding
+- **Virtual Pipeline Parallelism (VP)**: In-flight micro-batch activation overhead modeling
+- **Pipeline communication (Phase 6)**: NVLink vs EFA send/recv with bubble percentage and exposed latency
+- **Multi-platform comparison**: Sweep node counts across hardware platforms
+- **CSV/JSON export**: All phases produce structured exports for analysis
 
 ## Getting Started
 
-### Step 1: Open the Powers panel in Kiro
+### Standalone (Python)
 
-In your Kiro IDE, open the command palette (`Cmd+Shift+P` on macOS or `Ctrl+Shift+P` on Linux) and search for:
-
+```bash
+git clone https://github.com/paragao/ai-model-calculator.git
+cd ai-model-calculator
+python3 model_calculations.py
 ```
-Kiro: Add Power
+
+No external dependencies — Python standard library only.
+
+### Docker
+
+```bash
+cd container
+docker compose up
 ```
 
-Select the command to open the power installation dialog.
+See `container/README.md` for details.
 
-### Step 2: Enter the repository URL
+### As a Kiro Power
 
-When prompted for the Git repository URL, paste:
+Install via Kiro command palette → "Kiro: Add Power":
 
 ```
 https://github.com/paragao/ai-model-calc-power.git
 ```
 
-Press Enter. Kiro will clone the power into your workspace under `.kiro/powers/ai-model-calc/`.
-
-### Step 3: Verify the installation
-
-After installation, confirm the power appears in your workspace:
-
-```
-.kiro/
-  powers/
-    ai-model-calc/
-      POWER.md
-      steering/
-        calculator-workflow.md
-        model-catalog.md
-        hardware-catalog.md
-        training-config.md
-        report-integration.md
-```
-
-You can also check the Kiro Powers panel in the sidebar — the "AI Model Training Calculator" should be listed as an installed power.
-
-### Step 4: Confirm Python 3 is available
-
-The calculator uses only the Python standard library, so no additional packages are needed. Just verify Python 3.8+ is on your path:
+### As an Amazon Quick Skill
 
 ```bash
-python3 --version
+git clone https://github.com/paragao/amazon-quick-skill.git ~/.quickwork/profiles/federate-prod/skills/ai-model-calc
 ```
 
-### Step 5: Start using the power
+## Configuration
 
-Once installed, Kiro automatically loads the power's steering files when you ask about training infrastructure. Open a chat session and try prompts like:
+Edit `configuration/project_config.py` before running:
 
-- "Calculate memory requirements for training Llama 3.1 70B on p5en instances"
-- "How many H200 GPUs do I need to train a 13B model in 2 weeks?"
-- "Compare training configurations for DeepSeek-V3 on p5 vs p5en"
-- "What's the minimum hardware to fit Qwen3-235B for inference?"
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `VOCAB` | 151,936 | Vocabulary size |
+| `SEQ_LEN` | 4,096 | Sequence length |
+| `N_EXPERTS` | 128 | Total experts (0 for dense) |
+| `TOPK` | 8 | Experts per token |
+| `PP` | 8 | Pipeline parallelism |
+| `VP` | 4 | Virtual pipeline parallelism (1 = disabled) |
+| `TP` | 1 | Tensor parallelism |
+| `EP` | 8 | Expert parallelism (1 for dense) |
+| `TOTAL_TOKENS` | 15e12 | Dataset size in tokens |
+| `PRECISION` | BF16 | Training precision (BF16 or FP8) |
+| `MFU` | 0.40 | Model FLOPs Utilization (0.35–0.55 typical) |
 
-Kiro will walk you through selecting a mode, model, and hardware, then run the 5-phase analysis and produce CSV/JSON results with an optional HTML report.
+## Supported Hardware
 
-### Optional: Install the AWS Branded Report power
+| Platform | GPU | Memory | Peak BF16 TFLOPS |
+|----------|-----|--------|-----------------|
+| p5.48xlarge | H100 SXM | 80 GB | 989 |
+| p5en.48xlarge | H200 SXM | 141 GB | 989 |
+| p6-b200.48xlarge | B200 | 180 GB | 2,250 |
+| p6-b300.48xlarge | B300 Ultra | 268 GB | 3,375 |
+| p6e-gb200.36xlarge | GB200 NVL | 185 GB | 2,500 |
+| g5.48xlarge | A10G | 24 GB | 35 |
+| g6.48xlarge | L4 | 24 GB | 121 |
+| g6e.48xlarge | L40S | 48 GB | 366 |
 
-For automatic HTML report generation after each analysis, install the companion power using the same "Add Power" command with:
-
-```
-https://github.com/paragao/aws-branded-report-power.git
-```
-
-When both powers are installed, the calculator will automatically generate a professional AWS-branded HTML report from the analysis results.
-
-## Modes of Operation
-
-The calculator supports three modes, each answering a different infrastructure planning question:
-
-### Mode A — "How many instances do I need to finish in time X?"
-
-You provide:
-- Model to train
-- Dataset size (in tokens)
-- Target training time (e.g., "2 months", "30 days")
-
-The calculator sweeps multiple node counts and finds the minimum cluster size that meets your time target.
-
-### Mode B — "How long will training take?"
-
-You provide:
-- Model to train
-- Dataset size (in tokens)
-- Number of instances and instance type
-
-The calculator estimates wall-clock training duration with low/high confidence ranges.
-
-### Mode C — "What's the minimum to fit this model?"
-
-You provide:
-- Model to train (or serve/fine-tune)
-- Instance type
-
-The calculator determines the minimum number of instances required to hold the model in GPU memory. This is a pure memory-fit calculation — no dataset size needed. Results are presented for inference, fine-tuning, and full pre-training scenarios side by side.
-
-## What it calculates
-
-| Phase | Output |
-|-------|--------|
-| 1. Memory Analysis | Per-GPU memory breakdown (model, gradient, optimizer, activation) across ZeRO stages |
-| 2. Batch Configuration | Optimal micro batch size and gradient accumulation steps |
-| 3. Training Time | Wall-clock estimates with confidence ranges |
-| 4. Communication Overhead | ZeRO reduce-scatter and all-gather latency |
-| 5. MoE Routing | All-to-all communication for Mixture-of-Experts models |
-
-Supports dense models (Llama, Qwen) and MoE models (Mixtral, DeepSeek-V3, Qwen3-MoE) on AWS GPU instances (p5/H100, p5en/H200).
-
-## Repository structure
+## Repository Structure
 
 ```
-POWER.md                    # Power manifest and onboarding instructions
-steering/
-  calculator-workflow.md    # Full calculation workflow and formulas
-  model-catalog.md          # Supported model architectures
-  hardware-catalog.md       # AWS GPU instance definitions
-  training-config.md        # Parallelism, precision, and batch settings
-  report-integration.md    # Optional HTML report generation
+model_calculations.py           # Main orchestrator (runs all 6 phases)
+configuration/
+  variants_config.py            # Model architecture definitions
+  hardware_config.py            # AWS GPU instance configs
+  project_config.py             # Training parameters
+  advanced_config.py            # Expert-level settings
+utils/
+  core_calculations.py          # Shared calculation helpers
+  phase1_memory.py              # Memory analysis
+  phase2_batch.py               # Batch configuration
+  phase3_training.py            # Training time
+  phase4_zero2_comm.py          # ZeRO-2 reduce-scatter
+  phase4_1_zero1_comm.py        # ZeRO-1 all-gather
+  phase5_alltoall_comm.py       # MoE all-to-all
+  phase6_pp_comm.py             # PP send/recv communication
+  validate_moe_memory.py        # MoE memory validation
+  validation.py                 # Input validation
+container/                      # Docker distribution
+tests/                          # Edge case tests
 ```
+
+## Related
+
+- [Kiro Power](https://github.com/paragao/ai-model-calc-power) — AI IDE integration
+- [Amazon Quick Skill](https://github.com/paragao/amazon-quick-skill) — Desktop AI assistant integration
