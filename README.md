@@ -63,7 +63,7 @@ https://github.com/paragao/ai-model-calc-power.git
 ### As an Amazon Quick Skill
 
 ```bash
-git clone https://github.com/paragao/amazon-quick-skill.git ~/.quickwork/profiles/federate-prod/skills/ai-model-calc
+git clone https://github.com/paragao/ai-model-calc-skill.git ~/.quickwork/profiles/federate-prod/skills/ai-model-calc
 ```
 
 ## Configuration
@@ -124,4 +124,4 @@ tests/                          # Edge case tests
 ## Related
 
 - [Kiro Power](https://github.com/paragao/ai-model-calc-power) — AI IDE integration
-- [Amazon Quick Skill](https://github.com/paragao/amazon-quick-skill) — Desktop AI assistant integration
+- [Amazon Quick Skill](https://github.com/paragao/ai-model-calc-skill) — Desktop AI assistant integration
