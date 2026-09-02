@@ -82,16 +82,41 @@ HARDWARE = [
 # ============================================================================
 # INFERENCE HARDWARE: Single-node configurations for inference workloads
 # These use fewer nodes (1-2) and may use GPU subsets (TP < gpus_per_node)
+#
+# PCIe all-reduce factors: Empirical NCCL bus bandwidth as fraction of
+# per-link PCIe peak. Measured via nccl-tests all_reduce_perf on each
+# instance type. Factors depend on CPU socket topology:
+#   TP=2: same-socket peer-to-peer (highest efficiency)
+#   TP=4: cross-socket ring (NUMA penalty)
+#   TP=8: full ring across dual-socket (worst case)
+# P-family (NVLink) uses 1.0 since NVLink is the interconnect, not PCIe.
+# See CONSTANTS.md for measurement methodology and sources.
+#
+# Launch latencies: Per all-reduce NCCL kernel dispatch + synchronization
+# overhead in microseconds. Measured via nccl-tests with small message sizes
+# where latency dominates over bandwidth.
 # ============================================================================
 
 INFERENCE_HARDWARE = [
-    # P-family single-node inference
-    {"name": "1 p5en", "gpus": 8, "nodes": 1, "mem_gb": 141, "label": "8_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "hbm_bw_gbps": 4800, "pcie_bw_gbps": 64, "gpu_arch": "hopper", "fp8_tflops": 1979, "instance_type": "p5en.48xlarge", "gpus_per_node": 8},
-    {"name": "1 p6-b200", "gpus": 8, "nodes": 1, "mem_gb": 180, "label": "8_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "hbm_bw_gbps": 8000, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 4500, "instance_type": "p6-b200.48xlarge", "gpus_per_node": 8},
-    {"name": "1 p6-b300", "gpus": 8, "nodes": 1, "mem_gb": 268, "label": "8_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 3375, "hbm_bw_gbps": 12000, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 6750, "instance_type": "p6-b300.48xlarge", "gpus_per_node": 8},
-    # G6e single-node inference
-    {"name": "1 g6e-48xl", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "hbm_bw_gbps": 864, "pcie_bw_gbps": 64, "gpu_arch": "ada", "fp8_tflops": 733, "instance_type": "g6e.48xlarge", "gpus_per_node": 8},
-    # G7e inference (Blackwell RTX PRO)
-    {"name": "1 g7e-48xl", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40Sv2", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 128, "peak_tflops_bf16": 366, "hbm_bw_gbps": 1500, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 733, "instance_type": "g7e.48xlarge", "gpus_per_node": 8},
-    {"name": "1 g7e-12xl", "gpus": 2, "nodes": 1, "mem_gb": 96, "label": "2_RTX_PRO_6000", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 128, "peak_tflops_bf16": 1044, "hbm_bw_gbps": 1750, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 2088, "instance_type": "g7e.12xlarge", "gpus_per_node": 2},
+    # P-family single-node inference (NVLink interconnect)
+    {"name": "1 p5en", "gpus": 8, "nodes": 1, "mem_gb": 141, "label": "8_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "hbm_bw_gbps": 4800, "pcie_bw_gbps": 64, "gpu_arch": "hopper", "fp8_tflops": 1979, "instance_type": "p5en.48xlarge", "gpus_per_node": 8,
+     "pcie_allreduce_factor_2gpu": 1.0, "pcie_allreduce_factor_4gpu": 1.0, "pcie_allreduce_factor_8gpu": 1.0,
+     "launch_latency_us_nvlink": 8.0, "launch_latency_us_pcie": 40.0, "launch_latency_us_efa": 75.0},
+    {"name": "1 p6-b200", "gpus": 8, "nodes": 1, "mem_gb": 180, "label": "8_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "hbm_bw_gbps": 8000, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 4500, "instance_type": "p6-b200.48xlarge", "gpus_per_node": 8,
+     "pcie_allreduce_factor_2gpu": 1.0, "pcie_allreduce_factor_4gpu": 1.0, "pcie_allreduce_factor_8gpu": 1.0,
+     "launch_latency_us_nvlink": 6.0, "launch_latency_us_pcie": 35.0, "launch_latency_us_efa": 70.0},
+    {"name": "1 p6-b300", "gpus": 8, "nodes": 1, "mem_gb": 268, "label": "8_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 3375, "hbm_bw_gbps": 12000, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 6750, "instance_type": "p6-b300.48xlarge", "gpus_per_node": 8,
+     "pcie_allreduce_factor_2gpu": 1.0, "pcie_allreduce_factor_4gpu": 1.0, "pcie_allreduce_factor_8gpu": 1.0,
+     "launch_latency_us_nvlink": 6.0, "launch_latency_us_pcie": 35.0, "launch_latency_us_efa": 65.0},
+    # G6e single-node inference (PCIe interconnect, dual-socket Xeon)
+    {"name": "1 g6e-48xl", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "hbm_bw_gbps": 864, "pcie_bw_gbps": 64, "gpu_arch": "ada", "fp8_tflops": 733, "instance_type": "g6e.48xlarge", "gpus_per_node": 8,
+     "pcie_allreduce_factor_2gpu": 0.60, "pcie_allreduce_factor_4gpu": 0.15, "pcie_allreduce_factor_8gpu": 0.05,
+     "launch_latency_us_nvlink": 8.0, "launch_latency_us_pcie": 40.0, "launch_latency_us_efa": 75.0},
+    # G7e inference (Blackwell RTX PRO, PCIe Gen5)
+    {"name": "1 g7e-48xl", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40Sv2", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 128, "peak_tflops_bf16": 366, "hbm_bw_gbps": 1500, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 733, "instance_type": "g7e.48xlarge", "gpus_per_node": 8,
+     "pcie_allreduce_factor_2gpu": 0.60, "pcie_allreduce_factor_4gpu": 0.15, "pcie_allreduce_factor_8gpu": 0.05,
+     "launch_latency_us_nvlink": 8.0, "launch_latency_us_pcie": 35.0, "launch_latency_us_efa": 70.0},
+    {"name": "1 g7e-12xl", "gpus": 2, "nodes": 1, "mem_gb": 96, "label": "2_RTX_PRO_6000", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 128, "peak_tflops_bf16": 1044, "hbm_bw_gbps": 1750, "pcie_bw_gbps": 128, "gpu_arch": "blackwell", "fp8_tflops": 2088, "instance_type": "g7e.12xlarge", "gpus_per_node": 2,
+     "pcie_allreduce_factor_2gpu": 0.60, "pcie_allreduce_factor_4gpu": 0.15, "pcie_allreduce_factor_8gpu": 0.05,
+     "launch_latency_us_nvlink": 8.0, "launch_latency_us_pcie": 35.0, "launch_latency_us_efa": 70.0},
 ]

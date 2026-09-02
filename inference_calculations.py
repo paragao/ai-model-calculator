@@ -50,7 +50,7 @@ from configuration.hardware_config import INFERENCE_HARDWARE
 from configuration.inference_config import (
     INPUT_SEQ_LENS, OUTPUT_SEQ_LEN, CONCURRENCY_LEVELS,
     ENGINE, QUANTIZATION, KV_CACHE_DTYPE,
-    MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION,
+    MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION, ENGINE_OVERHEAD_GB,
     INFERENCE_TP, INFERENCE_PP, INFERENCE_EP,
     ENGINE_MFU, QUANT_BYTES, KV_DTYPE_BYTES,
     INSTANCE_PRICING,
@@ -169,7 +169,7 @@ def generate_report():
                 # KV cache analysis
                 kv = analyze_kv_cache(v, hw, tp, quant_bytes, kv_bytes,
                                       INPUT_SEQ_LENS, OUTPUT_SEQ_LEN,
-                                      gpu_util)
+                                      gpu_util, ENGINE_OVERHEAD_GB)
 
                 # Prefill analysis
                 pf = analyze_prefill(v, hw, tp, quant_bytes, INPUT_SEQ_LENS, emfu)
@@ -278,7 +278,7 @@ for eng in engines_to_run:
             # ==================================================================
             kv = analyze_kv_cache(v, hw, tp, quant_bytes, kv_bytes,
                                   INPUT_SEQ_LENS, OUTPUT_SEQ_LEN,
-                                  gpu_util)
+                                  gpu_util, ENGINE_OVERHEAD_GB)
             hw_kv_results.append(kv)
 
             print(f"\n  {v['name']} (TP={tp}, model={kv['model_mem_gb']:.1f} GB/GPU, "

@@ -10,7 +10,7 @@ Key formulas:
   arithmetic_intensity = prefill_flops / model_bytes_read
   machine_balance = peak_tflops * 1e12 / (hbm_bw * 1e9)
   is_compute_bound = (arithmetic_intensity > machine_balance)
-  ttft_theoretical_ms = (prefill_flops / (peak_tflops * 1e12 * TP * mfu)) * 1000
+  ttft_theoretical_ms = (prefill_flops / (peak_tflops * 1e12 * TP * mfu)) * 1000  # seconds -> ms
   ttft_adjusted_ms = ttft_theoretical * (1 + chunked_prefill_overhead) * (1 + tp_comm_factor)
 
 Notes:
@@ -21,6 +21,15 @@ Notes:
   - TP communication: each layer has 2 all-reduce ops (attn + MLP) but
     during prefill this is partially overlapped. The overlap fraction comes
     from engine_mfu["tp_comm_overlap"].
+  - PCIe all-reduce factors and launch latencies are read from hardware
+    config (INFERENCE_HARDWARE entries). See CONSTANTS.md for sources.
+
+References:
+  - NCCL ring all-reduce: 2*(N-1)/N * message_size bytes per operation.
+    https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html
+  - nccl-tests: https://github.com/NVIDIA/nccl-tests
+  - FLOPs per token (2N): Kaplan et al., "Scaling Laws for Neural Language Models"
+    https://arxiv.org/abs/2001.08361
 """
 
 import math
@@ -162,37 +171,36 @@ def _calculate_tp_comm_factor(variant, hw, tp, isl, quant_bytes, engine_mfu):
     comm_per_layer = 2 * allreduce_volume_per_op  # 2 all-reduces
     total_comm_bytes = comm_per_layer * layers
 
-    # Detect interconnect bandwidth
+    # Detect interconnect bandwidth and launch latency.
+    # PCIe all-reduce factors and launch latencies are read from hardware
+    # config (pcie_allreduce_factor_{2,4,8}gpu, launch_latency_us_{nvlink,pcie,efa}).
+    # Source: nccl-tests all_reduce_perf measurements. See CONSTANTS.md.
     intra_bw = hw.get("intra_node_bw_gbps", 900)
     pcie_bw = hw.get("pcie_bw_gbps", 64)
     gpus_per_node = hw.get("gpus_per_node", 8)
 
     if tp > gpus_per_node:
         bw_gbps = hw.get("inter_node_bw_gb", 400)
-        launch_latency_us = 75.0
+        launch_latency_us = hw.get("launch_latency_us_efa", 75.0)
     elif intra_bw > 200:
         # NVLink: high-bandwidth, near-full utilization for ring all-reduce
         bw_gbps = intra_bw
-        launch_latency_us = 8.0
+        launch_latency_us = hw.get("launch_latency_us_nvlink", 8.0)
     else:
-        # PCIe: effective all-reduce bandwidth is much lower than per-link peak
-        # For ring all-reduce with N GPUs over PCIe:
-        # - Theoretical: PCIe_bw * (N-1)/N for each phase
-        # - In practice: dual-socket CPU topology, shared PCIe root complexes,
-        #   and NCCL implementation overhead reduce this significantly
-        # Empirical NCCL bus bandwidth on PCIe (GB/s effective):
-        #   2 GPUs: ~0.6 × per-link  (PCIe P2P, same socket)
-        #   4 GPUs: ~0.15 × per-link (cross-socket, ring)
-        #   8 GPUs: ~0.05 × per-link (full ring, dual-socket)
-        pcie_per_link = pcie_bw
+        # PCIe: effective all-reduce bandwidth is much lower than per-link peak.
+        # Read empirical factors from hardware config.
+        factor_2gpu = hw.get("pcie_allreduce_factor_2gpu", 0.60)
+        factor_4gpu = hw.get("pcie_allreduce_factor_4gpu", 0.15)
+        factor_8gpu = hw.get("pcie_allreduce_factor_8gpu", 0.05)
+
         if tp <= 2:
-            pcie_factor = 0.6
+            pcie_factor = factor_2gpu
         elif tp <= 4:
-            pcie_factor = 0.15
+            pcie_factor = factor_4gpu
         else:
-            pcie_factor = 0.05  # 8-GPU ring over PCIe
-        bw_gbps = pcie_per_link * pcie_factor
-        launch_latency_us = 40.0
+            pcie_factor = factor_8gpu
+        bw_gbps = pcie_bw * pcie_factor
+        launch_latency_us = hw.get("launch_latency_us_pcie", 40.0)
 
     # Comm time = bandwidth time + launch latency
     num_ops = 2 * layers
@@ -277,6 +285,7 @@ def estimate_ttft_ms(variant, hw, tp, quant_bytes, isl, engine_mfu):
     # Theoretical compute-bound TTFT
     effective_tflops = peak_tflops * tp * mfu
     if effective_tflops > 0:
+        # Result is in seconds; multiply by 1000 to convert to milliseconds
         ttft_theoretical_ms = (prefill_flops / (effective_tflops * 1e12)) * 1000.0
     else:
         ttft_theoretical_ms = float("inf")
@@ -286,6 +295,7 @@ def estimate_ttft_ms(variant, hw, tp, quant_bytes, isl, engine_mfu):
     model_bytes = total_params * quant_bytes
     model_bytes_per_gpu = model_bytes / tp
     if hbm_bw_gbps > 0:
+        # Result is in seconds; multiply by 1000 to convert to milliseconds
         ttft_memory_ms = (model_bytes_per_gpu / (hbm_bw_gbps * 1e9)) * 1000.0
     else:
         ttft_memory_ms = float("inf")

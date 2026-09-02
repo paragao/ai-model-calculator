@@ -29,6 +29,14 @@ ENABLE_CHUNKED_PREFILL = True     # Chunked prefill (vLLM/SGLang)
 ENABLE_PREFIX_CACHING = True      # Prefix/radix caching
 GPU_MEMORY_UTILIZATION = 0.90     # Fraction of GPU memory available for model + KV cache
 
+# Engine overhead: fixed memory reservation per GPU (GB) for non-model, non-KV allocations.
+# Includes: CUDA context (~0.5 GB), NCCL workspace/buffers (~0.25-0.5 GB),
+# PagedAttention block tables / radix tree metadata (~0.1-0.3 GB),
+# PyTorch allocator fragmentation (~0.5-1.0 GB), CUDA graph captures (~0.1-0.3 GB).
+# Conservative default of 2.0 GB covers worst-case across vLLM/SGLang/TRT-LLM.
+# Reduce to ~1.0 GB for TP=1 on small models; increase to ~3.0 GB for large CUDA graphs.
+ENGINE_OVERHEAD_GB = 2.0
+
 # Parallelism for inference (override from project_config if needed)
 INFERENCE_TP = 1      # Tensor parallelism for inference
 INFERENCE_PP = 1      # Pipeline parallelism for inference

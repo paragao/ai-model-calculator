@@ -29,6 +29,14 @@ Notes:
   - bw_efficiency from engine_mfu["decode_bw_eff"] (typically 0.70-0.80).
   - batching_eff from engine_mfu["batching_eff"] (typically 0.85-0.90).
   - At high batch sizes decode transitions from memory-bound to compute-bound.
+
+References:
+  - Roofline model for LLM inference decode: Pope et al.,
+    "Efficiently Scaling Transformer Inference" (2022).
+    https://arxiv.org/abs/2211.05102
+  - Kernel launch overhead: CUDA kernel dispatch + synchronization barriers.
+    TP=1: ~2us/kernel (CUDA graph pipelining). TP>1: ~10us/kernel (NCCL
+    sync barriers between compute and communication kernels).
 """
 
 import math
@@ -166,9 +174,11 @@ def calculate_single_request_throughput(variant, hw, tp, quant_bytes, kv_dtype_b
             # TP>1: synchronization barriers between compute & NCCL stall pipeline
             # Plus NCCL kernels themselves have higher dispatch overhead
             kernel_launch_us = 10.0
+        # Convert microseconds to seconds (1e6 us/s)
         kernel_overhead_s = layers * kernels_per_layer * kernel_launch_us / 1e6
 
         # Add TP communication overhead (serialized per decode step)
+        # tp_comm_ms_per_step is in ms; divide by 1000 to convert to seconds
         total_step_time_s = mem_step_time_s + (tp_comm_ms_per_step / 1000.0) + kernel_overhead_s
         avg_tok_s = 1.0 / total_step_time_s if total_step_time_s > 0 else 0.0
         bottleneck = "tp_comm" if tp_comm_ms_per_step / 1000.0 > mem_step_time_s else "memory"
@@ -176,6 +186,7 @@ def calculate_single_request_throughput(variant, hw, tp, quant_bytes, kv_dtype_b
         avg_tok_s = 0.0
         bottleneck = "memory"
 
+    # Convert tokens/sec to milliseconds per token (1000 ms/s)
     itl_ms = (1000.0 / avg_tok_s) if avg_tok_s > 0 else float("inf")
 
     return {
@@ -305,9 +316,11 @@ def calculate_batched_throughput(variant, hw, tp, quant_bytes, kv_dtype_bytes,
             kernel_launch_us = 2.0
         else:
             kernel_launch_us = 10.0
+        # Convert microseconds to seconds (1e6 us/s)
         kernel_overhead_s = layers * kernels_per_layer * kernel_launch_us / 1e6
 
         # Add TP communication overhead (serialized per decode step)
+        # tp_comm_ms_per_step is in ms; divide by 1000 to convert to seconds
         total_step_time_s = mem_step_time_s + (tp_comm_ms_per_step / 1000.0) + kernel_overhead_s
         bw_bound_tok_s = tokens_per_step / total_step_time_s if total_step_time_s > 0 else 0.0
     else:
@@ -335,6 +348,7 @@ def calculate_batched_throughput(variant, hw, tp, quant_bytes, kv_dtype_bytes,
 
     total_tok_s = raw_tok_s * batching_eff
     per_request_tok_s = total_tok_s / batch_size if batch_size > 0 else 0.0
+    # Convert tokens/sec to milliseconds per token (1000 ms/s)
     itl_ms = (1000.0 / per_request_tok_s) if per_request_tok_s > 0 else float("inf")
 
     return {

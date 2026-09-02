@@ -13,6 +13,17 @@ Key formulas:
   kv_per_token_per_layer = 2 * kv_heads_per_gpu * head_dim * kv_bytes
   kv_per_request = kv_per_token_per_layer * layers * (ISL + OSL)
   max_concurrent = floor((gpu_mem * util - model_mem - overhead) / kv_per_request)
+
+Notes:
+  - Engine overhead (default 2.0 GB) is configurable via ENGINE_OVERHEAD_GB
+    in inference_config.py. See CONSTANTS.md for component breakdown.
+  - KV cache memory per token formula follows the vLLM PagedAttention
+    implementation: each block stores KV for (block_size) tokens.
+
+References:
+  - PagedAttention: Kwon et al., "Efficient Memory Management for Large
+    Language Model Serving with PagedAttention" (2023).
+    https://arxiv.org/abs/2309.06180
 """
 
 import math
@@ -115,6 +126,8 @@ def calculate_max_concurrent(variant, hw, tp, quant_bytes, kv_dtype_bytes,
 
     Engine overhead includes: CUDA context, NCCL buffers, engine workspace,
     PagedAttention block tables (vLLM), radix tree (SGLang).
+    Configurable via ENGINE_OVERHEAD_GB in inference_config.py.
+    See CONSTANTS.md for component breakdown and tuning guidance.
 
     Args:
         variant: Model variant dict.

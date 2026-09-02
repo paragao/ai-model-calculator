@@ -18,7 +18,7 @@ Key formulas:
 
   # Comm time:
   #   NVLink (intra_node_bw_gbps > 200): use intra_node_bw_gbps
-  #   PCIe  (intra_node_bw_gbps <= 200): use pcie_bw_gbps
+  #   PCIe  (intra_node_bw_gbps <= 200): use pcie_bw_gbps * allreduce_factor
   #   If TP > gpus_per_node: inter-node via EFA (inter_node_bw_gb)
   comm_time_per_step = total_comm_bytes / (interconnect_bw * 1e9)
 
@@ -29,6 +29,18 @@ Notes:
   - Detect NVLink vs PCIe by intra_node_bw_gbps threshold (>200 = NVLink).
   - If TP > gpus_per_node, communication goes inter-node via EFA.
   - Overlap fraction from engine_mfu["tp_comm_overlap"].
+
+References:
+  - NCCL ring all-reduce algorithm: each operation exchanges
+    2 * (N-1)/N * message_size bytes in 2*(N-1) steps across N ranks.
+    https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html
+  - PCIe effective bandwidth factors measured via:
+    nccl-tests all_reduce_perf -b 8 -e 256M -f 2 -g <num_gpus>
+    https://github.com/NVIDIA/nccl-tests
+  - Launch latency = NCCL kernel dispatch + inter-GPU synchronization,
+    measured from nccl-tests with small message sizes (8B-4KB).
+  - PCIe factors and launch latencies are configurable per instance type
+    in hardware_config.py INFERENCE_HARDWARE entries.
 """
 
 import math
@@ -46,14 +58,24 @@ def _detect_interconnect(hw, tp):
     For PCIe, the effective all-reduce bandwidth is significantly lower
     than the per-link peak due to multi-hop ring topology, dual-socket
     CPU architectures, and NCCL implementation overhead. The bandwidth
-    is scaled by an empirical factor based on the number of GPUs.
+    scaling factors are read from the hardware config
+    (pcie_allreduce_factor_{2,4,8}gpu), which are empirical measurements
+    from nccl-tests all_reduce_perf on each instance type.
+
+    Launch latencies per all-reduce operation are also read from hardware
+    config (launch_latency_us_{nvlink,pcie,efa}). These represent NCCL
+    kernel dispatch + synchronization overhead, measured via nccl-tests
+    with small message sizes where latency dominates.
+
+    See CONSTANTS.md for measurement methodology and source references.
 
     Args:
         hw: Hardware config dict.
         tp: Tensor parallelism degree.
 
     Returns:
-        Tuple of (effective_bandwidth_gbps, interconnect_type_string).
+        Tuple of (effective_bandwidth_gbps, interconnect_type_string,
+                  launch_latency_us).
     """
     gpus_per_node = hw.get("gpus_per_node", 8)
     intra_bw = hw.get("intra_node_bw_gbps", 900)
@@ -61,22 +83,29 @@ def _detect_interconnect(hw, tp):
     inter_bw = hw.get("inter_node_bw_gb", 400)
 
     if tp > gpus_per_node:
-        return (inter_bw, "EFA")
+        latency = hw.get("launch_latency_us_efa", 75.0)
+        return (inter_bw, "EFA", latency)
     elif intra_bw > 200:
-        return (intra_bw, "NVLink")
+        latency = hw.get("launch_latency_us_nvlink", 8.0)
+        return (intra_bw, "NVLink", latency)
     else:
-        # PCIe effective bandwidth for ring all-reduce with TP GPUs
-        # Empirical NCCL bus bandwidth factors (vs per-link peak):
-        #   TP=2: ~60% (same-socket P2P)
-        #   TP=4: ~15% (cross-socket ring)
-        #   TP=8: ~5%  (full ring, dual-socket)
+        # PCIe effective bandwidth for ring all-reduce with TP GPUs.
+        # Read empirical NCCL bus bandwidth factors from hardware config
+        # (with fallback defaults matching g6e measurements).
+        # Source: nccl-tests all_reduce_perf -b 8 -e 256M -f 2 -g <TP>
+        factor_2gpu = hw.get("pcie_allreduce_factor_2gpu", 0.60)
+        factor_4gpu = hw.get("pcie_allreduce_factor_4gpu", 0.15)
+        factor_8gpu = hw.get("pcie_allreduce_factor_8gpu", 0.05)
+
         if tp <= 2:
-            pcie_factor = 0.6
+            pcie_factor = factor_2gpu
         elif tp <= 4:
-            pcie_factor = 0.15
+            pcie_factor = factor_4gpu
         else:
-            pcie_factor = 0.05
-        return (pcie_bw * pcie_factor, "PCIe")
+            pcie_factor = factor_8gpu
+
+        latency = hw.get("launch_latency_us_pcie", 40.0)
+        return (pcie_bw * pcie_factor, "PCIe", latency)
 
 
 def calculate_tp_comm_volume(variant, tp, batch_size, dtype_bytes):
@@ -172,30 +201,30 @@ def estimate_tp_comm_time_ms(variant, hw, tp, batch_size, dtype_bytes):
             "total_comm_bytes": 0,
         }
 
-    bw_gbps, ic_type = _detect_interconnect(hw, tp)
+    bw_gbps, ic_type, launch_latency_us = _detect_interconnect(hw, tp)
 
     # Number of all-reduce operations per decode step
-    # 2 per layer (attention + MLP) × num_layers
+    # 2 per layer (attention + MLP) x num_layers
     layers = variant["layers"]
     num_allreduces = 2 * layers
 
-    # NCCL kernel launch latency per all-reduce operation (empirical)
-    # PCIe: ~30-50us per op (ring all-reduce over PCIe bus, high latency)
-    # NVLink: ~5-10us per op (fast interconnect, low latency)
-    # EFA: ~50-100us per op (network latency)
-    if ic_type == "NVLink":
-        launch_latency_us = 8.0
-    elif ic_type == "EFA":
-        launch_latency_us = 75.0
-    else:  # PCIe
-        launch_latency_us = 40.0
+    # NCCL kernel launch latency per all-reduce operation.
+    # Read from hardware config via _detect_interconnect().
+    # Source: nccl-tests all_reduce_perf with small message sizes (8B-4KB)
+    # where latency dominates over bandwidth.
+    # Typical values:
+    #   NVLink: ~5-10 us (fast intra-node, minimal synchronization)
+    #   PCIe:   ~30-50 us (ring all-reduce over PCIe bus, CPU-mediated sync)
+    #   EFA:    ~50-100 us (network RTT + NCCL proxy thread overhead)
 
     # Total launch latency for all operations
+    # Convert microseconds to milliseconds (1000 us/ms)
     launch_latency_ms = num_allreduces * launch_latency_us / 1000.0
 
     if bw_gbps > 0:
         # Bandwidth component: total bytes / effective bandwidth
         comm_time_s = total_bytes / (bw_gbps * 1e9)
+        # Convert seconds to milliseconds (1000 ms/s)
         bw_time_ms = comm_time_s * 1000.0
         # Total = bandwidth time + launch latency
         comm_time_ms = bw_time_ms + launch_latency_ms
@@ -268,6 +297,7 @@ def calculate_tp_efficiency(variant, hw, tp, batch_size, quant_bytes,
     flops_per_step = 2.0 * active_params * batch_size
     if peak_tflops > 0 and tp > 0:
         compute_time_s = flops_per_step / (peak_tflops * 1e12 * tp)
+        # Convert seconds to milliseconds (1000 ms/s)
         compute_time_ms = compute_time_s * 1000.0
     else:
         compute_time_ms = float("inf")
