@@ -492,6 +492,53 @@ DEEPSEEK_VARIANTS = [
 ]
 
 # ============================================================================
+# Google Gemma Models
+# ============================================================================
+
+GEMMA_VARIANTS = [
+    {
+        "name": "Gemma-4-12B-IT",
+        "layers": 36,
+        "d": 3840,
+        "expert_ffn": 0,
+        "dense_ffn": 21504,
+        "q_heads": 32,
+        "kv_heads": 8,
+        "head_dim": 256,
+        "dense_layers": 36,
+        "total_params_B": 12.23,
+        "active_params_B": 12.23,
+        "attn_per_layer": 62_914_560,
+        "expert_each": 0,
+        "shared_each": 0,
+        "router_each": 0,
+        "moe_layer_params": 0,
+        "dense_layer_params": 310_378_496,
+        "valid_pp": [1, 2, 3, 4, 6, 9, 12, 18, 36],
+    },
+    {
+        "name": "Gemma-4-31B-IT",
+        "layers": 48,
+        "d": 6144,
+        "expert_ffn": 0,
+        "dense_ffn": 24576,
+        "q_heads": 32,
+        "kv_heads": 8,
+        "head_dim": 256,
+        "dense_layers": 48,
+        "total_params_B": 31.25,
+        "active_params_B": 31.25,
+        "attn_per_layer": 125_829_120,
+        "expert_each": 0,
+        "shared_each": 0,
+        "router_each": 0,
+        "moe_layer_params": 0,
+        "dense_layer_params": 578_813_952,
+        "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
+    },
+]
+
+# ============================================================================
 # Combined list -- the calculator iterates over VARIANTS
 # Include ONLY the variants the user selected for this analysis.
 # ============================================================================
@@ -505,4 +552,5 @@ VARIANTS = (
     + QWEN35_DENSE_VARIANTS
     + QWEN35_MOE_VARIANTS
     + DEEPSEEK_VARIANTS
+    + GEMMA_VARIANTS
 )
