@@ -1,0 +1,32 @@
+{
+  "_field_guide": {
+    "_about": "Template input for: python3 ai_model_calculator.py --hardware <this-file>. When --hardware is used, ONLY the entries below are analyzed (the project's built-in hardware list is ignored). This '_field_guide' block is ignored by the loader; delete it or keep it as documentation.",
+    "_accepted_shapes": "This file uses the {\"hardware\": [...]} wrapper. The loader also accepts a bare list [ {...} ] or a single hardware object {...}.",
+    "_required_fields": "name, gpus, nodes, mem_gb, inter_node_bw_gb, intra_node_bw_gbps, peak_tflops_bf16. Missing any of these fails with a clear error.",
+    "_units": "gpus = total GPUs in the cluster; nodes = number of nodes; mem_gb = memory per GPU (GB); inter_node_bw_gb = per-GPU inter-node bandwidth (GB/s, e.g. EFA); intra_node_bw_gbps = intra-node link bandwidth (GB/s, e.g. NVLink/PCIe); peak_tflops_bf16 = per-GPU peak BF16 TFLOPS.",
+    "_optional_fields": "label is accepted but unused by the calculator. gpus_per_node is assumed to be 8 by the phase-5/phase-6 communication models and is not read from these entries.",
+    "_validation_note": "gpus must be divisible by TP*PP*CP (from configuration/project_config.py); otherwise validation fails. name is matched case-insensitively by --hw-name; keep names unique within this file."
+  },
+  "hardware": [
+    {
+      "name": "MyCluster-Large",
+      "gpus": 512,
+      "nodes": 64,
+      "mem_gb": 141,
+      "inter_node_bw_gb": 400,
+      "intra_node_bw_gbps": 900,
+      "peak_tflops_bf16": 989,
+      "label": "512_ExampleGPU"
+    },
+    {
+      "name": "MyCluster-Single-Node",
+      "gpus": 8,
+      "nodes": 1,
+      "mem_gb": 80,
+      "inter_node_bw_gb": 400,
+      "intra_node_bw_gbps": 900,
+      "peak_tflops_bf16": 989,
+      "label": "8_ExampleGPU"
+    }
+  ]
+}

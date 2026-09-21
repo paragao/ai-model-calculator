@@ -24,6 +24,7 @@ WHAT WAS CREATED
    ✓ ai_model_calculator.py    - CLI entry point (104 lines)
    ✓ model_calculations.py     - Analysis engine (840 lines)
    ✓ variant_loader.py         - JSON variant loading + name selection (133 lines)
+   ✓ hardware_loader.py        - JSON hardware loading + name selection (110 lines)
    ✓ validation.py             - Configuration validation (67 lines)
    ✓ core_calculations.py      - Shared functions (280 lines)
    ✓ formatting_utils.py       - Output formatting (180 lines)

@@ -48,6 +48,13 @@ python3 ai_model_calculator.py --model llama-3.1-8b
 # Analyze a custom architecture from a JSON file (replaces built-in variants)
 python3 ai_model_calculator.py --json my_model.json
 
+# Analyze against a custom hardware set from a JSON file (replaces built-in hardware)
+python3 ai_model_calculator.py --hardware my_hardware.json
+
+# Combine custom model + custom hardware, single entries selected by name
+python3 ai_model_calculator.py --json my_model.json --model my-model \
+  --hardware my_hardware.json --hw-name my-cluster
+
 # Concise markdown summary instead of full output
 python3 ai_model_calculator.py --model qwen3-8b --report
 ```
@@ -65,6 +72,8 @@ No external dependencies — Python standard library only.
 |--------|-------------|
 | `--model NAME` | Analyze only the variant named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--json` list when combined. Unknown names print the available variants and exit non-zero. |
 | `--json FILE` | Analyze the variant(s) defined in `FILE` **only** (replaces the built-in variants). |
+| `--hardware FILE` | Analyze against the hardware config(s) defined in `FILE` **only** (replaces the built-in hardware list). |
+| `--hw-name NAME` | Analyze only the hardware entry named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--hardware` list when combined. Unknown names print the available hardware and exit non-zero. |
 | `--report` | Emit a concise markdown-style summary instead of the full per-phase output. |
 
 #### Custom model JSON format
@@ -98,6 +107,34 @@ Required base fields: `name`, `layers`, `d`, `dense_layers`, `total_params_B`,
       "total_params_B": 60.0,
       "active_params_B": 6.0,
       "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48]
+    }
+  ]
+}
+```
+
+#### Custom hardware JSON format
+
+A JSON file may contain a single hardware object, a bare list, or a
+`{"hardware": [ ... ]}` wrapper. Each entry requires: `name`, `gpus`, `nodes`,
+`mem_gb`, `inter_node_bw_gb`, `intra_node_bw_gbps`, `peak_tflops_bf16`.
+`label` is accepted but unused; `gpus_per_node` is assumed to be 8. Note that
+`gpus` must be divisible by `TP*PP*CP` (from `project_config.py`) or validation
+fails.
+
+Copy [`hardware_variant_template.json`](hardware_variant_template.json) as a
+starting point — it ships with a field guide plus two example clusters.
+
+```json
+{
+  "hardware": [
+    {
+      "name": "MyCluster-Large",
+      "gpus": 512,
+      "nodes": 64,
+      "mem_gb": 141,
+      "inter_node_bw_gb": 400,
+      "intra_node_bw_gbps": 900,
+      "peak_tflops_bf16": 989
     }
   ]
 }
@@ -169,6 +206,7 @@ configuration/
   advanced_config.py            # Expert-level settings
 utils/
   variant_loader.py             # JSON variant loading + name selection
+  hardware_loader.py            # JSON hardware loading + name selection
   core_calculations.py          # Shared calculation helpers
   phase1_memory.py              # Memory analysis
   phase2_batch.py               # Batch configuration

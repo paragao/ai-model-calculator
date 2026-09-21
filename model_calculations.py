@@ -85,7 +85,7 @@ from utils.phase5_alltoall_comm import (
 from utils.phase6_pp_comm import calculate_pp_communication
 
 
-def generate_report(variants):
+def generate_report(variants, hardware):
     """Generate a concise markdown-style summary report."""
     from utils.core_calculations import calculate_training_time_months
 
@@ -97,7 +97,7 @@ def generate_report(variants):
     lines.append("## Configuration")
     lines.append("")
     lines.append(f"- **Variants**: {', '.join(v['name'] for v in variants)}")
-    lines.append(f"- **Hardware**: {', '.join(hw['name'] for hw in HARDWARE)}")
+    lines.append(f"- **Hardware**: {', '.join(hw['name'] for hw in hardware)}")
     lines.append(f"- **Parallelism**: PP={PP}, TP={TP}, EP={EP}, CP={CP}")
     lines.append(f"- **Total tokens**: {TOTAL_TOKENS/1e12:.1f}T")
     lines.append(f"- **Sequence length**: {SEQ_LEN}")
@@ -114,7 +114,7 @@ def generate_report(variants):
     for v in variants:
         best_result = None
         best_hw_name = None
-        for hw in HARDWARE:
+        for hw in hardware:
             dp = hw["gpus"] // (TP * PP * CP)
             layers_per_gpu = v["layers"] // PP
             result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
@@ -147,7 +147,7 @@ def generate_report(variants):
         best_time = None
         best_entry = None
 
-        for hw in HARDWARE:
+        for hw in hardware:
             dp = hw["gpus"] // (TP * PP * CP)
             layers_per_gpu = v["layers"] // PP
             config_result = generate_platform_configs(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
@@ -179,7 +179,7 @@ def generate_report(variants):
     lines.append("")
 
     all_results = {"hardware": [], "variants": {v["name"]: [] for v in variants}}
-    for hw in HARDWARE:
+    for hw in hardware:
         dp = hw["gpus"] // (TP * PP * CP)
         all_results["hardware"].append(hw["name"])
         for v in variants:
@@ -210,11 +210,12 @@ def generate_report(variants):
     return "\n".join(lines)
 
 
-def run(variants, *, report=False):
+def run(variants, hardware, *, report=False):
     """Run the full six-phase analysis over the supplied list of variants.
 
     Args:
         variants: List of variant dicts (each with all derived fields present).
+        hardware: List of hardware-config dicts to analyze against.
         report: When True, print only the concise markdown summary and return.
     """
     # Validate configuration (parallelism/precision/hardware). Suppress the
@@ -222,13 +223,13 @@ def run(variants, *, report=False):
     if report:
         _stdout = sys.stdout
         sys.stdout = open(os.devnull, 'w')
-        validate_configuration()
+        validate_configuration(hardware)
         sys.stdout = _stdout
     else:
-        validate_configuration()
+        validate_configuration(hardware)
 
     if report:
-        print(generate_report(variants))
+        print(generate_report(variants, hardware))
         return
 
     # Note: All function definitions have been moved to phase-specific modules.
@@ -247,7 +248,7 @@ def run(variants, *, report=False):
         "variants": {v["name"]: [] for v in variants}
     }
 
-    for hw in HARDWARE:
+    for hw in hardware:
         total_gpus = hw["gpus"]
         gpu_mem = hw["mem_gb"]
         dp = total_gpus // (TP * PP * CP)
@@ -354,7 +355,7 @@ def run(variants, *, report=False):
     # Collect batch results for recommendations
     batch_results = {}
 
-    for hw in HARDWARE:
+    for hw in hardware:
         total_gpus = hw["gpus"]
         dp = total_gpus // (TP * PP * CP)
 
@@ -447,7 +448,7 @@ def run(variants, *, report=False):
         all_platforms = []
         oom_list = []
 
-        for hw in HARDWARE:
+        for hw in hardware:
             dp = hw["gpus"] // (TP * PP * CP)
             layers_per_gpu = variant["layers"] // PP
 
@@ -533,7 +534,7 @@ def run(variants, *, report=False):
         "hardware": {},  # hw_name -> {variant_name -> analysis results}
     }
 
-    for hw in HARDWARE:
+    for hw in hardware:
         total_gpus = hw["gpus"]
         inter_node_bw = hw["inter_node_bw_gb"]
         dp = total_gpus // (TP * PP * CP)
@@ -619,7 +620,7 @@ def run(variants, *, report=False):
         "hardware": {},  # hw_name -> {variant_name -> analysis results}
     }
 
-    for hw in HARDWARE:
+    for hw in hardware:
         total_gpus = hw["gpus"]
         inter_node_bw = hw["inter_node_bw_gb"]
         dp = total_gpus // (TP * PP * CP)
@@ -710,7 +711,7 @@ def run(variants, *, report=False):
         "hardware": {},  # hw_name -> list of variant analysis results
     }
 
-    for hw in HARDWARE:
+    for hw in hardware:
         intra_node_bw = hw["intra_node_bw_gbps"]
 
         print(f"\n{'#' * 140}")
@@ -762,7 +763,7 @@ def run(variants, *, report=False):
     print("=" * 140)
 
     if PP > 1:
-        for hw in HARDWARE:
+        for hw in hardware:
             total_gpus = hw["gpus"]
             dp = total_gpus // (TP * PP * CP)
             inter_node_bw = hw["inter_node_bw_gb"]
@@ -835,6 +836,7 @@ if __name__ == "__main__":
                         help='Output a concise markdown-style summary report')
     args = parser.parse_args()
 
-    # Standalone execution runs against the built-in VARIANTS list, preserving
-    # backward-compatible behavior. Use ai_model_calculator.py for --model/--json.
-    run(VARIANTS, report=args.report)
+    # Standalone execution runs against the built-in VARIANTS and HARDWARE
+    # lists, preserving backward-compatible behavior. Use ai_model_calculator.py
+    # for --model/--json/--hardware/--hw-name.
+    run(VARIANTS, HARDWARE, report=args.report)

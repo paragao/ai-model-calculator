@@ -40,6 +40,10 @@ docker run --rm llm-training-calculator --model qwen3-8b --report
 # Analyze a custom architecture from a mounted JSON file (replaces built-ins)
 docker run --rm -v $(pwd)/my_model.json:/app/my_model.json \
   llm-training-calculator --json my_model.json
+
+# Analyze against a custom hardware set from a mounted JSON file
+docker run --rm -v $(pwd)/my_hardware.json:/app/my_hardware.json \
+  llm-training-calculator --hardware my_hardware.json
 ```
 
 ## Configuration
@@ -126,6 +130,7 @@ The calculator is organized into modular components:
 ai_model_calculator.py         # CLI entry point (parses args, selects variants)
 model_calculations.py          # Analysis engine — run(variants) over all phases
 ├── variant_loader.py           # JSON variant loading + name selection
+├── hardware_loader.py          # JSON hardware loading + name selection
 ├── validation.py               # Configuration validation
 ├── core_calculations.py        # Shared calculation functions
 ├── formatting_utils.py         # Color output and formatting
