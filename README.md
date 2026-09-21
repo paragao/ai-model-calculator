@@ -38,10 +38,67 @@ Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSe
 ```bash
 git clone https://github.com/paragao/ai-model-calculator.git
 cd ai-model-calculator
-python3 model_calculations.py
+
+# Analyze all built-in variants
+python3 ai_model_calculator.py
+
+# Analyze a single built-in variant (name is case-insensitive)
+python3 ai_model_calculator.py --model llama-3.1-8b
+
+# Analyze a custom architecture from a JSON file (replaces built-in variants)
+python3 ai_model_calculator.py --json my_model.json
+
+# Concise markdown summary instead of full output
+python3 ai_model_calculator.py --model qwen3-8b --report
 ```
 
+`ai_model_calculator.py` is the entry point: it parses the command-line
+arguments and calls `model_calculations.py` to do the work. `model_calculations.py`
+can still be run directly (`python3 model_calculations.py`), in which case it
+analyzes all built-in variants.
+
 No external dependencies — Python standard library only.
+
+#### CLI options
+
+| Option | Description |
+|--------|-------------|
+| `--model NAME` | Analyze only the variant named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--json` list when combined. Unknown names print the available variants and exit non-zero. |
+| `--json FILE` | Analyze the variant(s) defined in `FILE` **only** (replaces the built-in variants). |
+| `--report` | Emit a concise markdown-style summary instead of the full per-phase output. |
+
+#### Custom model JSON format
+
+A JSON file may contain a single variant object, a bare list of variants, or a
+`{"variants": [ ... ]}` wrapper. Supply the **base** architecture fields; derived
+fields (`attn_per_layer`, `expert_each`, `shared_each`, `router_each`,
+`moe_layer_params`, `dense_layer_params`) are computed automatically.
+
+Required base fields: `name`, `layers`, `d`, `dense_layers`, `total_params_B`,
+`active_params_B`, `valid_pp`. MoE variants also provide `expert_ffn`,
+`dense_ffn`, `q_heads`, `kv_heads`, and may set `num_experts` per variant
+(otherwise the project-level `N_EXPERTS` is used).
+
+```json
+{
+  "variants": [
+    {
+      "name": "MyCustom-MoE-60B-A6B",
+      "layers": 48,
+      "d": 4096,
+      "expert_ffn": 1024,
+      "dense_ffn": 0,
+      "q_heads": 32,
+      "kv_heads": 4,
+      "dense_layers": 0,
+      "num_experts": 64,
+      "total_params_B": 60.0,
+      "active_params_B": 6.0,
+      "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48]
+    }
+  ]
+}
+```
 
 ### Docker
 
@@ -100,13 +157,15 @@ Edit `configuration/project_config.py` before running:
 ## Repository Structure
 
 ```
-model_calculations.py           # Main orchestrator (runs all 6 phases)
+ai_model_calculator.py          # CLI entry point (parses args, selects variants)
+model_calculations.py           # Analysis engine — run(variants) over all 6 phases
 configuration/
   variants_config.py            # Model architecture definitions
   hardware_config.py            # AWS GPU instance configs
   project_config.py             # Training parameters
   advanced_config.py            # Expert-level settings
 utils/
+  variant_loader.py             # JSON variant loading + name selection
   core_calculations.py          # Shared calculation helpers
   phase1_memory.py              # Memory analysis
   phase2_batch.py               # Batch configuration
