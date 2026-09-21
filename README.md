@@ -74,6 +74,9 @@ A JSON file may contain a single variant object, a bare list of variants, or a
 fields (`attn_per_layer`, `expert_each`, `shared_each`, `router_each`,
 `moe_layer_params`, `dense_layer_params`) are computed automatically.
 
+Copy [`model_variant_template.json`](model_variant_template.json) as a starting
+point — it ships with a field guide plus one dense and one MoE example.
+
 Required base fields: `name`, `layers`, `d`, `dense_layers`, `total_params_B`,
 `active_params_B`, `valid_pp`. MoE variants also provide `expert_ffn`,
 `dense_ffn`, `q_heads`, `kv_heads`, and may set `num_experts` per variant
