@@ -59,6 +59,15 @@ NCCL_EP_SCALING_FACTOR = 1.0  # Additional GB per EP rank beyond 1 (all-to-all w
 # overlapped (no exposed a2a cost), 1.0 = fully exposed (upper bound).
 A2A_EXPOSED_FRACTION = 0.5
 
+# Attention FLOPs factor for the O(seq_len^2) attention term in training time.
+# The 6ND compute approximation captures only the linear-in-tokens matmuls
+# (QKV/O projections, FFN, experts); it omits the attention score (QK^T) and
+# context (softmax*V) batched matmuls, which scale as O(seq_len^2 * d) per
+# layer. This factor accounts for both attention matmuls across forward+backward
+# (forward ~4 = 2 matmuls * 2 FLOPs/MAC, x3 for fwd+bwd = 12). Set to 0 to
+# disable the attention term (reverts to pure 6ND).
+ATTENTION_FLOPS_FACTOR = 12
+
 # PyTorch memory allocator fragmentation
 # Calibrated against nsys profiling of Qwen3-235B-A22B on 64 B300 GPUs (PP=8, EP=8):
 # actual measured 150 GB vs raw calculated ~121 GB → ratio ≈ 1.24x.

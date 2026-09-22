@@ -40,6 +40,7 @@ LLAMA_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 213_909_504,
         "valid_pp": [1, 2, 4, 8, 16, 32],
+        "seq_len": 4096,
     },
     {
         "name": "Llama-3.1-70B",
@@ -59,6 +60,7 @@ LLAMA_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 855_638_016,
         "valid_pp": [1, 2, 4, 5, 8, 10, 16, 20, 40, 80],
+        "seq_len": 4096,
     },
     {
         "name": "Llama-3.1-405B",
@@ -78,6 +80,7 @@ LLAMA_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 3_220_439_040,
         "valid_pp": [1, 2, 3, 6, 7, 9, 14, 18, 21, 42, 63, 126],
+        "seq_len": 4096,
     },
     {
         "name": "Llama-3.2-3B",
@@ -97,6 +100,7 @@ LLAMA_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 100_663_296,
         "valid_pp": [1, 2, 4, 7, 14, 28],
+        "seq_len": 4096,
     },
     {
         "name": "Llama-3.3-70B",
@@ -116,6 +120,7 @@ LLAMA_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 855_638_016,
         "valid_pp": [1, 2, 4, 5, 8, 10, 16, 20, 40, 80],
+        "seq_len": 4096,
     },
 ]
 
@@ -142,6 +147,7 @@ LLAMA4_MOE_VARIANTS = [
         "moe_layer_params": 2_013_347_840,
         "dense_layer_params": 314_572_800,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
+        "seq_len": 4096,
     },
     {
         "name": "Llama-4-Maverick-17B-128E",
@@ -161,6 +167,7 @@ LLAMA4_MOE_VARIANTS = [
         "moe_layer_params": 16_106_782_720,
         "dense_layer_params": 314_572_800,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
+        "seq_len": 4096,
     },
 ]
 
@@ -187,6 +194,7 @@ QWEN25_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 233_046_016,
         "valid_pp": [1, 2, 4, 7, 14, 28],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen2.5-32B",
@@ -206,6 +214,7 @@ QWEN25_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 487_587_840,
         "valid_pp": [1, 2, 4, 8, 16, 32, 64],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen2.5-72B",
@@ -225,6 +234,7 @@ QWEN25_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 877_658_112,
         "valid_pp": [1, 2, 4, 5, 8, 10, 16, 20, 40, 80],
+        "seq_len": 4096,
     },
 ]
 
@@ -251,6 +261,7 @@ QWEN3_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 173_015_040,
         "valid_pp": [1, 2, 3, 4, 6, 9, 12, 18, 36],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen3-32B",
@@ -270,6 +281,7 @@ QWEN3_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 452_165_632,
         "valid_pp": [1, 2, 4, 8, 16, 32, 64],
+        "seq_len": 4096,
     },
 ]
 
@@ -296,6 +308,7 @@ QWEN3_MOE_VARIANTS = [
         "moe_layer_params": 604_241_920,
         "dense_layer_params": 56_623_104,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen3-235B-A22B",
@@ -315,6 +328,7 @@ QWEN3_MOE_VARIANTS = [
         "moe_layer_params": 2_416_443_392,
         "dense_layer_params": 222_298_112,
         "valid_pp": [1, 2, 47, 94],
+        "seq_len": 4096,
     },
 ]
 
@@ -341,6 +355,7 @@ QWEN35_DENSE_VARIANTS = [
         "moe_layer_params": 0,
         "dense_layer_params": 340_787_200,
         "valid_pp": [1, 2, 4, 8, 16, 32, 64],
+        "seq_len": 4096,
     },
 ]
 
@@ -367,6 +382,7 @@ QWEN35_MOE_VARIANTS = [
         "moe_layer_params": 808_976_384,
         "dense_layer_params": 18_874_368,
         "valid_pp": [1, 2, 4, 5, 8, 10, 20, 40],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen3.5-122B-A10B",
@@ -386,6 +402,7 @@ QWEN35_MOE_VARIANTS = [
         "moe_layer_params": 2_426_142_720,
         "dense_layer_params": 53_477_376,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
+        "seq_len": 4096,
     },
     {
         "name": "Qwen3.5-397B-A17B",
@@ -405,6 +422,7 @@ QWEN35_MOE_VARIANTS = [
         "moe_layer_params": 6_457_131_008,
         "dense_layer_params": 71_303_168,
         "valid_pp": [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60],
+        "seq_len": 4096,
     },
 ]
 
@@ -431,6 +449,7 @@ DEEPSEEK_VARIANTS = [
         "moe_layer_params": 11_672_485_888,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
+        "seq_len": 4096,
     },
     {
         "name": "DeepSeek-V3.1",
@@ -450,6 +469,7 @@ DEEPSEEK_VARIANTS = [
         "moe_layer_params": 11_672_485_888,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
+        "seq_len": 4096,
     },
     {
         "name": "DeepSeek-V3.2",
@@ -469,6 +489,7 @@ DEEPSEEK_VARIANTS = [
         "moe_layer_params": 11_672_485_888,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
+        "seq_len": 4096,
     },
     {
         "name": "DeepSeek-V4",
@@ -488,6 +509,7 @@ DEEPSEEK_VARIANTS = [
         "moe_layer_params": 25_435_963_392,
         "dense_layer_params": 253_165_568,
         "valid_pp": [1, 61],
+        "seq_len": 4096,
     },
 ]
 

@@ -100,7 +100,6 @@ def generate_report(variants, hardware):
     lines.append(f"- **Hardware**: {', '.join(hw['name'] for hw in hardware)}")
     lines.append(f"- **Parallelism**: PP={PP}, TP={TP}, EP={EP}, CP={CP}")
     lines.append(f"- **Total tokens**: {TOTAL_TOKENS/1e12:.1f}T")
-    lines.append(f"- **Sequence length**: {SEQ_LEN}")
     lines.append(f"- **Precision**: {PRECISION}")
     lines.append(f"- **MFU**: {MFU}")
     lines.append("")
@@ -156,7 +155,10 @@ def generate_report(variants, hardware):
             for p in config_result["platforms"]:
                 time_months = calculate_training_time_months(
                     TOTAL_TOKENS, active_params_b, p["gpus"],
-                    p["peak_tflops"], MFU, p["eff"]
+                    p["peak_tflops"], MFU, p["eff"],
+                    layers=v["layers"], hidden_dim=v["d"],
+                    seq_len=v.get("seq_len", SEQ_LEN),
+                    attention_flops_factor=ATTENTION_FLOPS_FACTOR,
                 )
                 if best_time is None or time_months < best_time:
                     best_time = time_months
@@ -357,55 +359,61 @@ def run(variants, hardware, *, report=False):
     # Collect batch results for recommendations
     batch_results = {}
 
-    for hw in hardware:
-        total_gpus = hw["gpus"]
-        dp = total_gpus // (TP * PP * CP)
+    for v in variants:
+        variant_name = v["name"]
+        v_seq_len = v.get("seq_len", SEQ_LEN)
+        for hw in hardware:
+            total_gpus = hw["gpus"]
+            dp = total_gpus // (TP * PP * CP)
 
-        print(f"\n{'#' * 140}")
-        print(f"# {hw['name']}: DP={dp} (analyzing {len(MICROS)} micro × {len(GRAD_ACCUM_VALUES)} accum = {len(MICROS) * len(GRAD_ACCUM_VALUES)} combinations)")
-        print(f"{'#' * 140}")
+            print(f"\n{'#' * 140}")
+            print(f"# {variant_name} on {hw['name']} (seq_len={v_seq_len:,}): DP={dp} "
+                  f"(analyzing {len(MICROS)} micro × {len(GRAD_ACCUM_VALUES)} accum = {len(MICROS) * len(GRAD_ACCUM_VALUES)} combinations)")
+            print(f"{'#' * 140}")
 
-        print(
-            f"\n  {'micro':>6} {'accum':>6} {'Tok/batch':>12} {'Steps':>10} {'Priority':>10} {'Assessment':>35}"
-        )
-        print(
-            f"  {'-' * 6} {'-' * 6} {'-' * 12} {'-' * 10} {'-' * 10} {'-' * 35}"
-        )
+            print(
+                f"\n  {'micro':>6} {'accum':>6} {'Tok/batch':>12} {'Steps':>10} {'Priority':>10} {'Assessment':>35}"
+            )
+            print(
+                f"  {'-' * 6} {'-' * 6} {'-' * 12} {'-' * 10} {'-' * 10} {'-' * 35}"
+            )
 
-        hw_configs = []
+            hw_configs = []
 
-        for micro in MICROS:
-            for accum in GRAD_ACCUM_VALUES:
-                # Analyze this configuration
-                config = analyze_batch_configuration(hw, micro, accum, dp)
-
-                # Only display if tokens per batch is reasonable
-                if config["tokens_per_batch"] < MAX_TOKENS_PER_BATCH:
-                    hw_configs.append(config)
-
-                    # Format assessment with color
-                    colored_assessment = format_batch_assessment_with_color(
-                        config["assessment"], config["priority"]
+            for micro in MICROS:
+                for accum in GRAD_ACCUM_VALUES:
+                    # Analyze this configuration (per-variant sequence length)
+                    config = analyze_batch_configuration(
+                        hw, micro, accum, dp, seq_len=v_seq_len, variant_name=variant_name
                     )
 
-                    # Priority indicator
-                    priority_symbols = ["⭐⭐⭐", "⭐⭐ ", "⭐  ", "   "]
-                    priority_str = priority_symbols[config["priority"]]
+                    # Only display if tokens per batch is reasonable
+                    if config["tokens_per_batch"] < MAX_TOKENS_PER_BATCH:
+                        hw_configs.append(config)
 
-                    print(
-                        f"  {config['micro']:>6} {config['accum']:>6} "
-                        f"{config['tokens_per_batch'] / 1e6:>10.1f}M {config['steps']:>10,.0f} "
-                        f"{priority_str:>10} {colored_assessment:>35}"
-                    )
+                        # Format assessment with color
+                        colored_assessment = format_batch_assessment_with_color(
+                            config["assessment"], config["priority"]
+                        )
 
-        # Store results for this hardware
-        batch_results[hw["name"]] = hw_configs
+                        # Priority indicator
+                        priority_symbols = ["⭐⭐⭐", "⭐⭐ ", "⭐  ", "   "]
+                        priority_str = priority_symbols[config["priority"]]
 
-        # Summary for this hardware
-        optimal_count = len([c for c in hw_configs if c["priority"] == 0])
-        good_count = len([c for c in hw_configs if c["priority"] <= 1])
+                        print(
+                            f"  {config['micro']:>6} {config['accum']:>6} "
+                            f"{config['tokens_per_batch'] / 1e6:>10.1f}M {config['steps']:>10,.0f} "
+                            f"{priority_str:>10} {colored_assessment:>35}"
+                        )
 
-        print(f"\n  Summary: {optimal_count} optimal, {good_count} good out of {len(hw_configs)} feasible configurations")
+            # Store results for this variant/hardware
+            batch_results[f"{variant_name} | {hw['name']}"] = hw_configs
+
+            # Summary for this variant/hardware
+            optimal_count = len([c for c in hw_configs if c["priority"] == 0])
+            good_count = len([c for c in hw_configs if c["priority"] <= 1])
+
+            print(f"\n  Summary: {optimal_count} optimal, {good_count} good out of {len(hw_configs)} feasible configurations")
 
     # Generate and display batch recommendations
     print(f"\n{'=' * 140}")
@@ -779,13 +787,14 @@ def run(variants, hardware, *, report=False):
                     if last_result and last_result.get("best_micro"):
                         best_micro = last_result["best_micro"]
 
-                # GBS from tokens_per_batch / seq_len
-                gbs = int(TOKENS_PER_BATCH / SEQ_LEN)
+                # GBS from tokens_per_batch / seq_len (per-variant sequence length)
+                v_seq_len = v.get("seq_len", SEQ_LEN)
+                gbs = int(TOKENS_PER_BATCH / v_seq_len)
 
                 pp_metrics = calculate_pp_communication(
                     layers=v["layers"],
                     hidden_dim=v["d"],
-                    seq_len=SEQ_LEN,
+                    seq_len=v_seq_len,
                     mbs=best_micro,
                     gbs=gbs,
                     pp=PP,

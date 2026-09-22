@@ -89,7 +89,11 @@ point — it ships with a field guide plus one dense and one MoE example.
 Required base fields: `name`, `layers`, `d`, `dense_layers`, `total_params_B`,
 `active_params_B`, `valid_pp`. MoE variants also provide `expert_ffn`,
 `dense_ffn`, `q_heads`, `kv_heads`, and may set `num_experts` per variant
-(otherwise the project-level `N_EXPERTS` is used).
+(otherwise the project-level `N_EXPERTS` is used). Optionally set `seq_len` per
+variant (defaults to the project-level `SEQ_LEN`); it drives memory,
+communication, tokens/batch, and the O(seq_len²) attention term in training
+time, so a 32K-context variant estimates a longer time than a 4K one at equal
+total tokens.
 
 ```json
 {

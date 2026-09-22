@@ -31,11 +31,12 @@ def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
     d = variant["d"]
     v_name = variant["name"]
     intra_node_bw = hw["intra_node_bw_gbps"]
+    seq_len = variant.get("seq_len", SEQ_LEN)
 
     # Calculate metrics for each micro batch size
     a2a_metrics = []
     for micro in micro_batch_sizes:
-        metrics = calculate_alltoall_metrics(micro, d, intra_node_bw)
+        metrics = calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=seq_len)
         metrics["micro"] = micro
         a2a_metrics.append(metrics)
 
@@ -46,7 +47,7 @@ def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
     }
 
 
-def calculate_alltoall_metrics(micro, d, intra_node_bw):
+def calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=None):
     """
     Calculate all-to-all communication volume and time for MoE routing.
 
@@ -54,6 +55,7 @@ def calculate_alltoall_metrics(micro, d, intra_node_bw):
         micro: Micro batch size
         d: Hidden dimension
         intra_node_bw: Intra-node bandwidth in GB/s
+        seq_len: Sequence length (defaults to the global SEQ_LEN when None)
 
     Returns:
         dict with:
@@ -61,9 +63,11 @@ def calculate_alltoall_metrics(micro, d, intra_node_bw):
         - a2a_time_ms: All-to-all communication time in milliseconds
         - performance_rating: Rating (0=excellent, 3=poor)
     """
+    if seq_len is None:
+        seq_len = SEQ_LEN
     # All-to-all for MoE routing: activations sent to experts
-    # Formula: SEQ_LEN * micro * TOPK * d * PARAM_BYTES
-    fwd_bytes = SEQ_LEN * micro * TOPK * d * PARAM_BYTES
+    # Formula: seq_len * micro * TOPK * d * PARAM_BYTES
+    fwd_bytes = seq_len * micro * TOPK * d * PARAM_BYTES
     fwd_bwd_gb = fwd_bytes * 2 / 1e9  # Factor of 2 for forward + backward passes
 
     # Calculate communication time at intra-node bandwidth

@@ -4,7 +4,8 @@
     "_accepted_shapes": "This file uses the {\"variants\": [...]} wrapper. The loader also accepts a bare list [ {...} ] or a single variant object {...}.",
     "_required_fields": "name, layers, d, dense_layers, total_params_B, active_params_B, valid_pp. Missing any of these fails with a clear error.",
     "_recommended_for_accuracy": "expert_ffn, dense_ffn, q_heads, kv_heads. These drive the auto-computed parameter counts; omitting q_heads/kv_heads falls back to a coarse d^2*2.25 attention estimate.",
-    "_optional_fields": "head_dim (defaults to d // q_heads), num_experts / n_experts (per-variant expert count; otherwise the project-level N_EXPERTS from configuration/project_config.py is used), shared_each (set > 0 to mark a shared-expert MoE).",
+    "_optional_fields": "head_dim (defaults to d // q_heads), num_experts / n_experts (per-variant expert count; otherwise the project-level N_EXPERTS from configuration/project_config.py is used), shared_each (set > 0 to mark a shared-expert MoE), seq_len (per-variant sequence/context length; defaults to the project-level SEQ_LEN when omitted).",
+    "_seq_len_note": "seq_len is used everywhere for this variant (memory, buffers, comm, tokens/batch) AND in the training-time attention term. Longer context (e.g. 32768) increases activation memory, communication, and the O(seq_len^2) attention FLOPs, so a 32K run estimates a longer time than a 4K run at equal total tokens.",
     "_auto_computed_do_not_provide": "attn_per_layer, expert_each, router_each, moe_layer_params, dense_layer_params are calculated automatically from the fields above. shared_each is computed too, but may be provided to signal shared experts.",
     "_dense_vs_moe": "Dense model: set expert_ffn = 0 and dense_layers = layers, and omit num_experts. MoE model: set expert_ffn > 0, dense_layers = number of non-MoE (dense) layers (0 if all layers are MoE), and set num_experts.",
     "_name_note": "name is matched case-insensitively by --model. Keep names unique within this file.",
@@ -23,6 +24,7 @@
       "num_experts": 128,
       "total_params_B": 30.0,
       "active_params_B": 3.0,
+      "seq_len": 4096,
       "valid_pp": [1, 2, 3, 4, 6, 8]
     }
   ]

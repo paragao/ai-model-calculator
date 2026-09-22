@@ -87,11 +87,12 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     # Sweep the full micro x accum grid. Gradient accumulation is an explicit
     # input the user controls (it affects convergence/perplexity), so we sweep
     # the configured GRAD_ACCUM_VALUES rather than deriving accum from a target.
+    seq_len = variant.get("seq_len", SEQ_LEN)
     platforms = []
     for micro in viable_micros:
         for accum in GRAD_ACCUM_VALUES:
             gbs = dp * micro * accum  # global batch in sequences
-            tok_batch = gbs * SEQ_LEN
+            tok_batch = gbs * seq_len
 
             # Skip configurations that exceed the max tokens-per-batch cap
             if tok_batch > MAX_TOKENS_PER_BATCH:
@@ -114,12 +115,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
                 "peak_tflops": peak_tflops,
                 # Inputs needed for overhead (bubble + exposed comm) estimation
                 "dp": dp,
+                "layers": variant["layers"],
                 "layers_per_gpu": layers_per_gpu,
                 "moe_layers_per_gpu": moe_layers_per_gpu,
                 "pp": PP,
                 "vp": VP,
                 "ep": EP,
                 "hidden_dim": variant["d"],
+                "seq_len": seq_len,
                 "inter_node_bw_gb": hw["inter_node_bw_gb"],
                 "intra_node_bw_gbps": hw["intra_node_bw_gbps"],
             })
@@ -154,7 +157,7 @@ def calculate_platform_overhead(platform):
     pp_metrics = calculate_pp_communication(
         layers=platform["layers_per_gpu"] * platform["pp"],
         hidden_dim=platform["hidden_dim"],
-        seq_len=SEQ_LEN,
+        seq_len=platform["seq_len"],
         mbs=platform["micro"],
         gbs=platform["gbs"],
         pp=platform["pp"],
@@ -174,7 +177,7 @@ def calculate_platform_overhead(platform):
         a2a = calculate_moe_all_to_all(
             layers_per_gpu=platform["moe_layers_per_gpu"],
             hidden_dim=platform["hidden_dim"],
-            seq_len=SEQ_LEN,
+            seq_len=platform["seq_len"],
             mbs=platform["micro"],
             gbs=platform["gbs"],
             dp=platform["dp"],
@@ -223,6 +226,10 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
         platform["tok_batch"],
         bubble_fraction=bubble_fraction,
         exposed_comm_ms_per_step=exposed_comm_ms,
+        layers=platform["layers"],
+        hidden_dim=platform["hidden_dim"],
+        seq_len=platform["seq_len"],
+        attention_flops_factor=ATTENTION_FLOPS_FACTOR,
     )
     est_months = overhead["est_months"]
 
