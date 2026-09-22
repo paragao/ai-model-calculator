@@ -12,8 +12,13 @@ from configuration.advanced_config import *
 # Import core calculation functions
 from .core_calculations import (
     calculate_viable_micro_batch_sizes,
-    calculate_training_time_months
+    calculate_training_time_months,
+    calculate_training_time_months_with_overhead,
 )
+
+# Import communication models for overhead estimation
+from .phase6_pp_comm import calculate_pp_communication
+from .phase5_alltoall_comm import calculate_moe_all_to_all
 
 # Import formatting utilities
 from .formatting_utils import color_text
@@ -24,7 +29,9 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     Generate platform configurations for a variant/hardware combination.
 
     Tries ZeRO-1 first (best efficiency), falls back to ZeRO-2 if needed.
-    Generates configs for both 1x and 2x target batch sizes.
+    Sweeps the full grid of viable micro batch sizes x configured
+    GRAD_ACCUM_VALUES, deriving the global batch and step count from each
+    (micro, accum) pair.
 
     Args:
         variant: Variant dict with model architecture
@@ -55,13 +62,13 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         tp=TP
     )
 
-    # Determine best ZeRO strategy and micro batch size
+    # Determine best ZeRO strategy and viable micro batch sizes
     if viable_z1:
         zero_config = ZERO_STRATEGY[0]  # ZeRO-1
-        micro = max(viable_z1)  # Use largest viable
+        viable_micros = viable_z1
     elif viable_z2:
         zero_config = ZERO_STRATEGY[1]  # ZeRO-2
-        micro = max(viable_z2)  # Use largest viable
+        viable_micros = viable_z2
     else:
         # OOM - cannot fit on this hardware
         return {
@@ -70,42 +77,121 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
             "oom_reason": f"Insufficient memory even with ZeRO-2 (requires >{gpu_mem}GB)"
         }
 
-    # Generate configurations for 1x and 2x target batch size
+    # MoE layers on this GPU (for all-to-all comm overhead)
+    moe_layers = variant["layers"] - variant.get("dense_layers", variant["layers"])
+    total_layers = variant["layers"]
+    moe_layers_per_gpu = (
+        int(layers_per_gpu * moe_layers / total_layers) if total_layers > 0 else 0
+    )
+
+    # Sweep the full micro x accum grid. Gradient accumulation is an explicit
+    # input the user controls (it affects convergence/perplexity), so we sweep
+    # the configured GRAD_ACCUM_VALUES rather than deriving accum from a target.
+    seq_len = variant.get("seq_len", SEQ_LEN)
     platforms = []
-    for batch_multiplier in [1, 2]:
-        tok_batch = TOKENS_PER_BATCH * batch_multiplier
+    for micro in viable_micros:
+        for accum in GRAD_ACCUM_VALUES:
+            gbs = dp * micro * accum  # global batch in sequences
+            tok_batch = gbs * seq_len
 
-        # Calculate required accumulation steps: tok_batch = dp * micro * accum * SEQ_LEN
-        accum = max(1, round(tok_batch / (dp * micro * SEQ_LEN)))
+            # Skip configurations that exceed the max tokens-per-batch cap
+            if tok_batch > MAX_TOKENS_PER_BATCH:
+                continue
 
-        # Calculate training steps
-        steps = int(TOTAL_TOKENS / tok_batch)
+            steps = int(TOTAL_TOKENS / tok_batch) if tok_batch > 0 else 0
 
-        # Create platform name
-        batch_label = (
-            f"{tok_batch / 1e6:.0f}M"
-            if batch_multiplier == 2
-            else f"{tok_batch / 1e6:.1f}M"
-        )
-        platform_name = f"{hw['name']} ({batch_label})"
+            platform_name = f"{hw['name']} (m{micro}/a{accum}, {tok_batch / 1e6:.1f}M)"
 
-        platforms.append({
-            "name": platform_name,
-            "gpus": total_gpus,
-            "zero": zero_config["zero"],
-            "eff": zero_config["eff"],
-            "micro": micro,
-            "accum": accum,
-            "tok_batch": tok_batch,
-            "steps": steps,
-            "peak_tflops": peak_tflops,
-        })
+            platforms.append({
+                "name": platform_name,
+                "gpus": total_gpus,
+                "zero": zero_config["zero"],
+                "eff": zero_config["eff"],
+                "micro": micro,
+                "accum": accum,
+                "gbs": gbs,
+                "tok_batch": tok_batch,
+                "steps": steps,
+                "peak_tflops": peak_tflops,
+                # Inputs needed for overhead (bubble + exposed comm) estimation
+                "dp": dp,
+                "layers": variant["layers"],
+                "layers_per_gpu": layers_per_gpu,
+                "moe_layers_per_gpu": moe_layers_per_gpu,
+                "pp": PP,
+                "vp": VP,
+                "ep": EP,
+                "hidden_dim": variant["d"],
+                "seq_len": seq_len,
+                "inter_node_bw_gb": hw["inter_node_bw_gb"],
+                "intra_node_bw_gbps": hw["intra_node_bw_gbps"],
+            })
+
+    if not platforms:
+        return {
+            "platforms": [],
+            "oom": True,
+            "oom_reason": (
+                f"No micro×accum combination stays under the "
+                f"{MAX_TOKENS_PER_BATCH / 1e6:.0f}M tokens/batch cap"
+            ),
+        }
 
     return {
         "platforms": platforms,
         "oom": False,
         "oom_reason": None
     }
+
+
+def calculate_platform_overhead(platform):
+    """Estimate PP bubble fraction and exposed comm ms/step for a platform.
+
+    Uses the Phase 6 (PP send/recv) and Phase 5 (MoE all-to-all) models,
+    keyed on the platform's micro/gbs/parallelism so the result varies with
+    the swept gradient-accumulation value.
+
+    Returns:
+        tuple: (bubble_fraction, exposed_comm_ms_per_step)
+    """
+    pp_metrics = calculate_pp_communication(
+        layers=platform["layers_per_gpu"] * platform["pp"],
+        hidden_dim=platform["hidden_dim"],
+        seq_len=platform["seq_len"],
+        mbs=platform["micro"],
+        gbs=platform["gbs"],
+        pp=platform["pp"],
+        vp=platform["vp"],
+        dp=platform["dp"],
+        ep=platform["ep"],
+        dtype_bytes=PARAM_BYTES,
+        inter_node_bw_gb=platform["inter_node_bw_gb"],
+        intra_node_bw_gbps=platform["intra_node_bw_gbps"],
+        gpus_per_node=8,
+    )
+    bubble_fraction = pp_metrics["pipeline_bubble_pct"] / 100.0
+    exposed_comm_ms = pp_metrics["estimated_pp_time_ms"]
+
+    # Exposed MoE all-to-all (only when the variant has MoE layers on-GPU)
+    if platform["moe_layers_per_gpu"] > 0:
+        a2a = calculate_moe_all_to_all(
+            layers_per_gpu=platform["moe_layers_per_gpu"],
+            hidden_dim=platform["hidden_dim"],
+            seq_len=platform["seq_len"],
+            mbs=platform["micro"],
+            gbs=platform["gbs"],
+            dp=platform["dp"],
+            ep=platform["ep"],
+            topk=TOPK,
+            num_experts=N_EXPERTS,
+            dtype_bytes=PARAM_BYTES,
+            intra_node_bw_gbps=platform["intra_node_bw_gbps"],
+            inter_node_bw_gb=platform["inter_node_bw_gb"],
+            gpus_per_node=8,
+        )
+        exposed_comm_ms += A2A_EXPOSED_FRACTION * a2a["a2a_per_step_ms"]
+
+    return bubble_fraction, exposed_comm_ms
 
 
 def calculate_training_metrics(platform, active_params_b, base_time_months):
@@ -119,24 +205,36 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
 
     Returns:
         dict with:
-        - est_months: Estimated training time in months
+        - est_months: Estimated training time in months (overhead-inclusive)
         - rel_speed: Relative speed vs baseline (1.0x = baseline)
         - months_low: Lower bound with optimistic multiplier
         - months_high: Upper bound with pessimistic multiplier
+        - bubble_pct: PP bubble as % of total time
+        - comm_overhead_pct: Exposed comm as % of total time
         - efficiency_rating: Star rating (0-3)
     """
-    # Calculate absolute training time using FLOPs
-    est_months = calculate_training_time_months(
+    # Estimate PP bubble + exposed comm for this specific (micro, accum) config
+    bubble_fraction, exposed_comm_ms = calculate_platform_overhead(platform)
+
+    overhead = calculate_training_time_months_with_overhead(
         TOTAL_TOKENS,
         active_params_b,
         platform["gpus"],
         platform["peak_tflops"],
         MFU,
-        platform["eff"]
+        platform["eff"],
+        platform["tok_batch"],
+        bubble_fraction=bubble_fraction,
+        exposed_comm_ms_per_step=exposed_comm_ms,
+        layers=platform["layers"],
+        hidden_dim=platform["hidden_dim"],
+        seq_len=platform["seq_len"],
+        attention_flops_factor=ATTENTION_FLOPS_FACTOR,
     )
+    est_months = overhead["est_months"]
 
-    # Calculate relative speed compared to baseline
-    rel_speed = base_time_months / est_months
+    # Calculate relative speed compared to baseline (overhead-inclusive)
+    rel_speed = base_time_months / est_months if est_months > 0 else 0
 
     # Apply uncertainty range
     months_low = est_months * TIME_ESTIMATE_LOW_MULTIPLIER
@@ -157,6 +255,8 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
         "rel_speed": rel_speed,
         "months_low": months_low,
         "months_high": months_high,
+        "bubble_pct": overhead["bubble_pct"],
+        "comm_overhead_pct": overhead["comm_pct"],
         "efficiency_rating": efficiency_rating
     }
 
@@ -244,30 +344,41 @@ def generate_training_recommendations(training_results):
                 f"→ Consider H200 ({H200_MEM_GB}GB) vs H100 ({H100_MEM_GB}GB) or reduce model size"
             )
 
-    # Analyze batch size impact (1x vs 2x)
-    batch_size_impacts = []
+    # Analyze gradient-accumulation impact on pipeline bubble and time.
+    # Group by (variant, hardware) and compare across the swept accum values.
+    accum_impacts = []  # (variant, hw, min_bubble, max_bubble, time_spread_pct)
     for variant_name, platforms in training_results["variants"].items():
-        # Group by hardware (first part of name before parentheses)
         hw_groups = {}
         for p in platforms:
             hw_name = p["name"].split("(")[0].strip()
-            if hw_name not in hw_groups:
-                hw_groups[hw_name] = []
-            hw_groups[hw_name].append(p)
+            hw_groups.setdefault(hw_name, []).append(p)
 
-        # Compare 1x vs 2x for each hardware
         for hw_name, hw_platforms in hw_groups.items():
-            if len(hw_platforms) >= 2:
-                p1x = hw_platforms[0]  # First is 1x
-                p2x = hw_platforms[1]  # Second is 2x
-                time_diff_pct = ((p2x["est_months"] - p1x["est_months"]) / p1x["est_months"]) * 100
-                batch_size_impacts.append((variant_name, hw_name, time_diff_pct))
+            if len(hw_platforms) < 2:
+                continue
+            bubbles = [p.get("bubble_pct", 0) for p in hw_platforms]
+            times = [p["est_months"] for p in hw_platforms]
+            min_t, max_t = min(times), max(times)
+            time_spread_pct = ((max_t - min_t) / min_t * 100) if min_t > 0 else 0
+            accum_impacts.append(
+                (variant_name, hw_name, min(bubbles), max(bubbles), time_spread_pct)
+            )
 
-    if batch_size_impacts:
-        avg_impact = sum(abs(t[2]) for t in batch_size_impacts) / len(batch_size_impacts)
-        if avg_impact > 5:  # More than 5% difference
+    if accum_impacts:
+        avg_spread = sum(t[4] for t in accum_impacts) / len(accum_impacts)
+        max_bubble = max((t[3] for t in accum_impacts), default=0)
+        if max_bubble > 1.0:
             recommendations.append(
-                f"📊 Batch size impact: 2x batch size changes training time by ~{avg_impact:.1f}% on average"
+                f"📊 Gradient accumulation impact: sweeping accum changes est. time by "
+                f"~{avg_spread:.1f}% on average; higher accum reduces the pipeline "
+                f"bubble (peak observed {max_bubble:.1f}%). Larger accum also affects "
+                f"convergence/perplexity — tune deliberately."
+            )
+        else:
+            recommendations.append(
+                f"📊 Gradient accumulation impact: sweeping accum changes est. time by "
+                f"~{avg_spread:.1f}% on average (PP bubble negligible at PP=1). Accum "
+                f"still affects convergence/perplexity — tune deliberately."
             )
 
     return recommendations
@@ -285,9 +396,9 @@ def export_training_results_csv(training_results, filename):
 
     with open(filename, 'w', newline='') as f:
         fieldnames = [
-            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum',
+            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'gbs',
             'tok_batch', 'steps', 'est_months', 'rel_speed', 'months_low',
-            'months_high', 'efficiency_rating'
+            'months_high', 'bubble_pct', 'comm_overhead_pct', 'efficiency_rating'
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -301,11 +412,14 @@ def export_training_results_csv(training_results, filename):
                     'zero': platform['zero'],
                     'micro': platform['micro'],
                     'accum': platform['accum'],
+                    'gbs': platform.get('gbs', ''),
                     'tok_batch': platform['tok_batch'],
                     'steps': platform['steps'],
                     'est_months': platform.get('est_months', 0),
                     'rel_speed': platform.get('rel_speed', 0),
                     'months_low': platform.get('months_low', 0),
                     'months_high': platform.get('months_high', 0),
+                    'bubble_pct': platform.get('bubble_pct', 0),
+                    'comm_overhead_pct': platform.get('comm_overhead_pct', 0),
                     'efficiency_rating': platform.get('efficiency_rating', 3)
                 })

@@ -21,7 +21,10 @@ WHAT WAS CREATED
    ✓ DISTRIBUTION-GUIDE.md     - Complete sharing instructions
 
 🐍 PYTHON MODULES (Refactored):
-   ✓ model_calculations.py     - Main script (572 lines, down from 1,633)
+   ✓ ai_model_calculator.py    - CLI entry point (104 lines)
+   ✓ model_calculations.py     - Analysis engine (840 lines)
+   ✓ variant_loader.py         - JSON variant loading + name selection (133 lines)
+   ✓ hardware_loader.py        - JSON hardware loading + name selection (110 lines)
    ✓ validation.py             - Configuration validation (67 lines)
    ✓ core_calculations.py      - Shared functions (280 lines)
    ✓ formatting_utils.py       - Output formatting (180 lines)
@@ -163,6 +166,8 @@ Dependencies:         0 external (Python stdlib only)
 Refactoring Results:
   - model_calculations.py reduced by 65% (1,633 → 572 lines)
   - Code organized into 9 phase-specific modules
+  - CLI parsing split into ai_model_calculator.py; model_calculations.py
+    exposes run(variants) and no longer hard-codes the variant list
   - Better maintainability and modularity
   - Zero behavioral changes
 

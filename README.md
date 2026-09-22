@@ -38,10 +38,111 @@ Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSe
 ```bash
 git clone https://github.com/paragao/ai-model-calculator.git
 cd ai-model-calculator
-python3 model_calculations.py
+
+# Analyze all built-in variants
+python3 ai_model_calculator.py
+
+# Analyze a single built-in variant (name is case-insensitive)
+python3 ai_model_calculator.py --model llama-3.1-8b
+
+# Analyze a custom architecture from a JSON file (replaces built-in variants)
+python3 ai_model_calculator.py --json my_model.json
+
+# Analyze against a custom hardware set from a JSON file (replaces built-in hardware)
+python3 ai_model_calculator.py --hardware my_hardware.json
+
+# Combine custom model + custom hardware, single entries selected by name
+python3 ai_model_calculator.py --json my_model.json --model my-model \
+  --hardware my_hardware.json --hw-name my-cluster
+
+# Concise markdown summary instead of full output
+python3 ai_model_calculator.py --model qwen3-8b --report
 ```
 
+`ai_model_calculator.py` is the entry point: it parses the command-line
+arguments and calls `model_calculations.py` to do the work. `model_calculations.py`
+can still be run directly (`python3 model_calculations.py`), in which case it
+analyzes all built-in variants.
+
 No external dependencies — Python standard library only.
+
+#### CLI options
+
+| Option | Description |
+|--------|-------------|
+| `--model NAME` | Analyze only the variant named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--json` list when combined. Unknown names print the available variants and exit non-zero. |
+| `--json FILE` | Analyze the variant(s) defined in `FILE` **only** (replaces the built-in variants). |
+| `--hardware FILE` | Analyze against the hardware config(s) defined in `FILE` **only** (replaces the built-in hardware list). |
+| `--hw-name NAME` | Analyze only the hardware entry named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--hardware` list when combined. Unknown names print the available hardware and exit non-zero. |
+| `--report` | Emit a concise markdown-style summary instead of the full per-phase output. |
+
+#### Custom model JSON format
+
+A JSON file may contain a single variant object, a bare list of variants, or a
+`{"variants": [ ... ]}` wrapper. Supply the **base** architecture fields; derived
+fields (`attn_per_layer`, `expert_each`, `shared_each`, `router_each`,
+`moe_layer_params`, `dense_layer_params`) are computed automatically.
+
+Copy [`model_variant_template.json`](model_variant_template.json) as a starting
+point — it ships with a field guide plus one dense and one MoE example.
+
+Required base fields: `name`, `layers`, `d`, `dense_layers`, `total_params_B`,
+`active_params_B`, `valid_pp`. MoE variants also provide `expert_ffn`,
+`dense_ffn`, `q_heads`, `kv_heads`, and may set `num_experts` per variant
+(otherwise the project-level `N_EXPERTS` is used). Optionally set `seq_len` per
+variant (defaults to the project-level `SEQ_LEN`); it drives memory,
+communication, tokens/batch, and the O(seq_len²) attention term in training
+time, so a 32K-context variant estimates a longer time than a 4K one at equal
+total tokens.
+
+```json
+{
+  "variants": [
+    {
+      "name": "MyCustom-MoE-60B-A6B",
+      "layers": 48,
+      "d": 4096,
+      "expert_ffn": 1024,
+      "dense_ffn": 0,
+      "q_heads": 32,
+      "kv_heads": 4,
+      "dense_layers": 0,
+      "num_experts": 64,
+      "total_params_B": 60.0,
+      "active_params_B": 6.0,
+      "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48]
+    }
+  ]
+}
+```
+
+#### Custom hardware JSON format
+
+A JSON file may contain a single hardware object, a bare list, or a
+`{"hardware": [ ... ]}` wrapper. Each entry requires: `name`, `gpus`, `nodes`,
+`mem_gb`, `inter_node_bw_gb`, `intra_node_bw_gbps`, `peak_tflops_bf16`.
+`label` is accepted but unused; `gpus_per_node` is assumed to be 8. Note that
+`gpus` must be divisible by `TP*PP*CP` (from `project_config.py`) or validation
+fails.
+
+Copy [`hardware_variant_template.json`](hardware_variant_template.json) as a
+starting point — it ships with a field guide plus two example clusters.
+
+```json
+{
+  "hardware": [
+    {
+      "name": "MyCluster-Large",
+      "gpus": 512,
+      "nodes": 64,
+      "mem_gb": 141,
+      "inter_node_bw_gb": 400,
+      "intra_node_bw_gbps": 900,
+      "peak_tflops_bf16": 989
+    }
+  ]
+}
+```
 
 ### Docker
 
@@ -100,13 +201,16 @@ Edit `configuration/project_config.py` before running:
 ## Repository Structure
 
 ```
-model_calculations.py           # Main orchestrator (runs all 6 phases)
+ai_model_calculator.py          # CLI entry point (parses args, selects variants)
+model_calculations.py           # Analysis engine — run(variants) over all 6 phases
 configuration/
   variants_config.py            # Model architecture definitions
   hardware_config.py            # AWS GPU instance configs
   project_config.py             # Training parameters
   advanced_config.py            # Expert-level settings
 utils/
+  variant_loader.py             # JSON variant loading + name selection
+  hardware_loader.py            # JSON hardware loading + name selection
   core_calculations.py          # Shared calculation helpers
   phase1_memory.py              # Memory analysis
   phase2_batch.py               # Batch configuration

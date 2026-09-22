@@ -5,7 +5,7 @@ This guide explains how to package, share, and distribute the LLM Training Calcu
 ## 📦 What's Included
 
 The Docker container packages:
-- **15 Python modules** (model_calculations.py + 14 supporting modules)
+- **Python modules** (ai_model_calculator.py entry point + model_calculations.py engine + supporting modules)
 - **Zero external dependencies** (uses only Python 3.11 standard library)
 - **212MB compressed image** size
 - **All 5 analysis phases** (Memory, Batch, Training Time, Communication Analysis)
@@ -134,7 +134,10 @@ cd llm-training-calculator
 
 ### Essential Files (Minimum)
 ```
-model_calculations.py          # Main orchestration script
+ai_model_calculator.py         # CLI entry point (parses args, selects variants)
+model_calculations.py          # Analysis engine (run over all phases)
+variant_loader.py              # JSON variant loading + name selection
+hardware_loader.py             # JSON hardware loading + name selection
 validation.py                  # Configuration validation
 core_calculations.py           # Shared calculation functions
 formatting_utils.py            # Output formatting
@@ -350,7 +353,10 @@ llm-training-calculator/
 ├── docker-compose.yml        # Docker Compose config
 ├── run-docker.sh            # Convenience script
 ├── .dockerignore            # Docker ignore file
-├── model_calculations.py    # Main script
+├── ai_model_calculator.py   # CLI entry point
+├── model_calculations.py    # Analysis engine
+├── variant_loader.py        # JSON variant loading + name selection
+├── hardware_loader.py       # JSON hardware loading + name selection
 ├── validation.py            # Validation module
 ├── core_calculations.py     # Core functions
 ├── formatting_utils.py      # Formatting utilities

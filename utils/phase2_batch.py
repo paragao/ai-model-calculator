@@ -46,7 +46,7 @@ def assess_training_steps(steps, tokens_per_batch):
         return ("unknown", 2)
 
 
-def analyze_batch_configuration(hw, micro, accum, dp):
+def analyze_batch_configuration(hw, micro, accum, dp, seq_len=None, variant_name=None):
     """
     Analyze a single batch configuration.
 
@@ -55,6 +55,7 @@ def analyze_batch_configuration(hw, micro, accum, dp):
         micro: Micro batch size
         accum: Gradient accumulation steps
         dp: Data parallelism degree
+        seq_len: Sequence length (defaults to the global SEQ_LEN when None)
 
     Returns:
         dict with:
@@ -66,12 +67,16 @@ def analyze_batch_configuration(hw, micro, accum, dp):
         - priority: Priority level (0-3, lower is better)
         - hardware: Hardware name
     """
-    tokens_per_batch = dp * micro * accum * SEQ_LEN
+    if seq_len is None:
+        seq_len = SEQ_LEN
+    tokens_per_batch = dp * micro * accum * seq_len
     steps = TOTAL_TOKENS / tokens_per_batch
     assessment, priority = assess_training_steps(steps, tokens_per_batch)
 
     return {
         "hardware": hw["name"],
+        "variant": variant_name,
+        "seq_len": seq_len,
         "micro": micro,
         "accum": accum,
         "tokens_per_batch": tokens_per_batch,
@@ -133,15 +138,17 @@ def export_batch_results_csv(batch_results, filename):
     import csv
 
     with open(filename, 'w', newline='') as f:
-        fieldnames = ['hardware', 'micro_batch', 'grad_accum', 'tokens_per_batch_M',
-                      'training_steps', 'assessment', 'priority']
+        fieldnames = ['variant', 'hardware', 'seq_len', 'micro_batch', 'grad_accum',
+                      'tokens_per_batch_M', 'training_steps', 'assessment', 'priority']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
-        for hw_name, configs in batch_results.items():
+        for group_name, configs in batch_results.items():
             for config in configs:
                 row = {
-                    'hardware': hw_name,
+                    'variant': config.get('variant', ''),
+                    'hardware': config.get('hardware', group_name),
+                    'seq_len': config.get('seq_len', ''),
                     'micro_batch': config['micro'],
                     'grad_accum': config['accum'],
                     'tokens_per_batch_M': config['tokens_per_batch'] / 1e6,
@@ -150,5 +157,4 @@ def export_batch_results_csv(batch_results, filename):
                     'priority': config['priority']
                 }
                 writer.writerow(row)
-
     print(f"\n✅ Exported batch analysis to {filename}")

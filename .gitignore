@@ -8,6 +8,8 @@ __pycache__/
 *.json
 *.txt
 !README*.md
+!model_variant_template.json
+!hardware_variant_template.json
 
 # OS files
 .DS_Store

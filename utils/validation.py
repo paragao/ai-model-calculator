@@ -12,7 +12,7 @@ from configuration.project_config import *
 from configuration.advanced_config import *
 
 
-def validate_configuration():
+def validate_configuration(hardware=None):
     """
     Validate all configuration parameters and hardware specs.
 
@@ -23,9 +23,16 @@ def validate_configuration():
     - Hardware configurations have sufficient GPUs
     - GPU counts are divisible by parallelization factors
 
+    Args:
+        hardware: List of hardware dicts to validate. Defaults to the built-in
+            HARDWARE list when None (backward compatible).
+
     Raises:
         AssertionError: If any validation check fails
     """
+    if hardware is None:
+        hardware = HARDWARE
+
     # Validate parallelization parameters
     assert EP > 0, f"EP must be positive, got {EP}"
     assert N_EXPERTS % EP == 0, (
@@ -42,7 +49,7 @@ def validate_configuration():
     )
 
     # Validate hardware configurations
-    for hw in HARDWARE:
+    for hw in hardware:
         total_gpus = hw["gpus"]
         required_gpus = TP * PP * CP
 

@@ -27,6 +27,25 @@ docker run --rm llm-training-calculator
 
 The tool will output comprehensive analysis tables with color-coded results to the console.
 
+The container's entry point is `ai_model_calculator.py`, so you can pass CLI
+arguments directly after the image name:
+
+```bash
+# Analyze a single built-in variant (name is case-insensitive)
+docker run --rm llm-training-calculator --model llama-3.1-8b
+
+# Concise markdown summary
+docker run --rm llm-training-calculator --model qwen3-8b --report
+
+# Analyze a custom architecture from a mounted JSON file (replaces built-ins)
+docker run --rm -v $(pwd)/my_model.json:/app/my_model.json \
+  llm-training-calculator --json my_model.json
+
+# Analyze against a custom hardware set from a mounted JSON file
+docker run --rm -v $(pwd)/my_hardware.json:/app/my_hardware.json \
+  llm-training-calculator --hardware my_hardware.json
+```
+
 ## Configuration
 
 ### Modifying Model Variants
@@ -81,7 +100,7 @@ docker run --rm -it llm-training-calculator /bin/bash
 
 Inside the container, you can:
 - View configuration files: `cat variants_config.py`
-- Run the calculator: `python3 model_calculations.py`
+- Run the calculator: `python3 ai_model_calculator.py` (or `python3 model_calculations.py` for the built-in variants directly)
 - Modify configs and re-run analysis
 
 ### Using Docker Compose (Optional)
@@ -108,7 +127,10 @@ docker-compose up
 The calculator is organized into modular components:
 
 ```
-model_calculations.py          # Main orchestration script
+ai_model_calculator.py         # CLI entry point (parses args, selects variants)
+model_calculations.py          # Analysis engine — run(variants) over all phases
+├── variant_loader.py           # JSON variant loading + name selection
+├── hardware_loader.py          # JSON hardware loading + name selection
 ├── validation.py               # Configuration validation
 ├── core_calculations.py        # Shared calculation functions
 ├── formatting_utils.py         # Color output and formatting

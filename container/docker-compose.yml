@@ -18,6 +18,12 @@ services:
     environment:
       - USE_COLOR=True
       - PYTHONUNBUFFERED=1
-    # ENTRYPOINT is python3 model_calculations.py
+    # ENTRYPOINT is python3 ai_model_calculator.py
     # Pass flags via 'command' — e.g. uncomment for concise report:
     # command: ["--report"]
+    # Or select a single variant / custom JSON:
+    # command: ["--model", "llama-3.1-8b"]
+    # command: ["--json", "my_model.json", "--report"]
+    # Or a custom hardware set / single hardware entry:
+    # command: ["--hardware", "my_hardware.json"]
+    # command: ["--hardware", "my_hardware.json", "--hw-name", "MyCluster-Large"]

@@ -4,7 +4,8 @@ FROM python:3.11-slim
 # Set working directory in container
 WORKDIR /app
 
-# Copy main script
+# Copy entry point and analysis engine
+COPY ai_model_calculator.py /app/
 COPY model_calculations.py /app/
 
 # Copy configuration and utility modules
@@ -17,11 +18,11 @@ RUN mkdir -p /app/results
 # Set environment variable to ensure Python output is not buffered
 ENV PYTHONUNBUFFERED=1
 
-# Make model_calculations.py executable
-RUN chmod +x model_calculations.py
+# Make entry points executable
+RUN chmod +x ai_model_calculator.py model_calculations.py
 
-# Use ENTRYPOINT so users can pass flags (e.g. --report)
-ENTRYPOINT ["python3", "model_calculations.py"]
+# Use ENTRYPOINT so users can pass flags (e.g. --model, --json, --report)
+ENTRYPOINT ["python3", "ai_model_calculator.py"]
 
 # Empty CMD — default runs full verbose output; pass --report for concise summary
 CMD []
