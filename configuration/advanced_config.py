@@ -28,7 +28,7 @@ ZERO_STRATEGY = [
 MICROS = [1, 2, 4, 8, 16]
 
 # Gradient accumulation steps to evaluate
-GRAD_ACCUM_VALUES = [4, 8, 16, 32, 64, 128]
+GRAD_ACCUM_VALUES = [2, 4, 8]
 
 # Precision-dependent parameter size
 if PRECISION == "BF16":
@@ -52,6 +52,12 @@ SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkp
 FWD_BWD_ROUTING_BUFF_PASSES = 2  # All-to-all buffer passes for MoE routing
 NCCL_MEM_BUF = 6.0  # NCCL base communication buffer size in GB (includes CUDA context)
 NCCL_EP_SCALING_FACTOR = 1.0  # Additional GB per EP rank beyond 1 (all-to-all workspace)
+
+# Training-time overhead modeling (Phase 3)
+# Fraction of MoE all-to-all communication that is NOT overlapped with compute
+# and therefore adds to wall-clock time per step. Empirical; 0.0 = fully
+# overlapped (no exposed a2a cost), 1.0 = fully exposed (upper bound).
+A2A_EXPOSED_FRACTION = 0.5
 
 # PyTorch memory allocator fragmentation
 # Calibrated against nsys profiling of Qwen3-235B-A22B on 64 B300 GPUs (PP=8, EP=8):

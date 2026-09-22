@@ -203,7 +203,9 @@ def generate_report(variants, hardware):
         f"Training time estimates assume MFU={MFU} ({MFU*100:.0f}% of peak FLOPS). "
         "Actual MFU varies significantly based on implementation quality, "
         "communication overhead, pipeline bubble fraction, and hardware utilization. "
-        "Typical range: 0.30–0.55 for large-scale distributed training."
+        "Typical range: 0.30–0.55 for large-scale distributed training. "
+        "Phase 3 per-config estimates additionally model PP pipeline-bubble and "
+        "exposed (non-overlapped) communication on top of the compute time."
     )
     lines.append("")
 
@@ -463,23 +465,18 @@ def run(variants, hardware, *, report=False):
 
         # Calculate and display training times if platforms are available
         if all_platforms:
-            # Calculate baseline time for relative speed comparison
+            # Baseline = overhead-inclusive time of the first platform config.
             base = all_platforms[0]
-            base_time_months = calculate_training_time_months(
-                TOTAL_TOKENS,
-                active_params_b,
-                base["gpus"],
-                base["peak_tflops"],
-                MFU,
-                base["eff"],
-            )
+            base_time_months = calculate_training_metrics(
+                base, active_params_b, base_time_months=1.0
+            )["est_months"]
 
             # Print table header
             print(
-                f"\n  {'Platform':<25} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'Tok/batch':>10} {'Steps':>8} {'Rel Speed':>10} {'Est. Time':>12}"
+                f"\n  {'Platform':<28} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'GBS':>8} {'Tok/batch':>10} {'Steps':>8} {'Bubble%':>8} {'Comm%':>7} {'Rel Speed':>10} {'Est. Time':>12}"
             )
             print(
-                f"  {'-' * 25} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 12}"
+                f"  {'-' * 28} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 10} {'-' * 12}"
             )
 
             # Calculate and display metrics for each platform
@@ -495,9 +492,10 @@ def run(variants, hardware, *, report=False):
                 )
 
                 print(
-                    f"  {p['name']:<25} {p['gpus']:>6} {'Z' + str(p['zero']):>5} "
-                    f"{p['micro']:>6} {p['accum']:>6} {p['tok_batch'] / 1e6:>8.1f}M "
-                    f"{p['steps']:>8,} {metrics['rel_speed']:>9.1f}x {time_str}"
+                    f"  {p['name']:<28} {p['gpus']:>6} {'Z' + str(p['zero']):>5} "
+                    f"{p['micro']:>6} {p['accum']:>6} {p['gbs']:>8,} {p['tok_batch'] / 1e6:>8.1f}M "
+                    f"{p['steps']:>8,} {metrics['bubble_pct']:>7.1f}% {metrics['comm_overhead_pct']:>6.1f}% "
+                    f"{metrics['rel_speed']:>9.1f}x {time_str}"
                 )
 
             training_results["variants"][variant_name] = platform_results

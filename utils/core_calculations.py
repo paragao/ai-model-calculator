@@ -111,6 +111,81 @@ def calculate_training_time_months(
     return training_time_months
 
 
+def calculate_training_time_months_with_overhead(
+    total_tokens,
+    active_params_b,
+    num_gpus,
+    peak_tflops_per_gpu,
+    mfu,
+    efficiency,
+    tok_batch,
+    *,
+    bubble_fraction=0.0,
+    exposed_comm_ms_per_step=0.0,
+):
+    """Training time in months including PP bubble and exposed comm overhead.
+
+    Model:
+      - compute time = ideal FLOPs-based time (same as
+        calculate_training_time_months).
+      - bubble = idle pipeline time; inflates the compute time by
+        bubble_fraction/(1 - bubble_fraction) seconds.
+      - comm   = absolute exposed communication, added as
+        (exposed_comm_ms_per_step / 1000) * steps seconds.
+
+    Reduces exactly to the FLOPs-only estimate when bubble_fraction == 0 and
+    exposed_comm_ms_per_step == 0.
+
+    Args:
+        total_tokens: Total training tokens.
+        active_params_b: Active parameters in billions.
+        num_gpus: Number of GPUs.
+        peak_tflops_per_gpu: Peak TFLOPS per GPU for the precision.
+        mfu: Model FLOPs Utilization (fraction of peak).
+        efficiency: ZeRO/efficiency multiplier.
+        tok_batch: Tokens per global batch (used to derive steps).
+        bubble_fraction: Pipeline bubble as a fraction (0..1) of compute time.
+        exposed_comm_ms_per_step: Exposed (non-overlapped) comm ms per step.
+
+    Returns:
+        dict: est_months, compute_months, bubble_months, comm_months,
+              bubble_pct (of total), comm_pct (of total).
+    """
+    _SECONDS_PER_MONTH = 24 * 3600 * 30.44
+
+    # Ideal compute time (FLOPs-based), in seconds.
+    compute_months = calculate_training_time_months(
+        total_tokens, active_params_b, num_gpus, peak_tflops_per_gpu, mfu, efficiency
+    )
+    compute_seconds = compute_months * _SECONDS_PER_MONTH
+
+    # Bubble inflates compute time. Clamp fraction to avoid blow-up at ~1.0.
+    bf = max(0.0, min(0.99, bubble_fraction))
+    bubble_seconds = compute_seconds * bf / (1.0 - bf) if bf > 0 else 0.0
+
+    # Exposed comm added as absolute ms/step * number of steps.
+    steps = total_tokens / tok_batch if tok_batch > 0 else 0
+    comm_seconds = (exposed_comm_ms_per_step / 1000.0) * steps
+
+    total_seconds = compute_seconds + bubble_seconds + comm_seconds
+
+    est_months = total_seconds / _SECONDS_PER_MONTH
+    bubble_months = bubble_seconds / _SECONDS_PER_MONTH
+    comm_months = comm_seconds / _SECONDS_PER_MONTH
+
+    bubble_pct = (bubble_seconds / total_seconds * 100) if total_seconds > 0 else 0.0
+    comm_pct = (comm_seconds / total_seconds * 100) if total_seconds > 0 else 0.0
+
+    return {
+        "est_months": est_months,
+        "compute_months": compute_months,
+        "bubble_months": bubble_months,
+        "comm_months": comm_months,
+        "bubble_pct": bubble_pct,
+        "comm_pct": comm_pct,
+    }
+
+
 def calculate_memory_for_micro(
     micro,
     model_mem_gb,
