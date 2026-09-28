@@ -33,7 +33,7 @@ LLAMA_DENSE_VARIANTS = [
         "dense_layers": 32,
         "total_params_B": 8.03,
         "active_params_B": 8.03,
-        "attn_per_layer": 37_748_736,
+        "attn_per_layer": 41_943_040,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -73,7 +73,7 @@ LLAMA_DENSE_VARIANTS = [
         "dense_layers": 126,
         "total_params_B": 405.0,
         "active_params_B": 405.0,
-        "attn_per_layer": 603_979_776,
+        "attn_per_layer": 570_425_344,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -254,7 +254,7 @@ QWEN3_DENSE_VARIANTS = [
         "dense_layers": 36,
         "total_params_B": 8.04,
         "active_params_B": 8.04,
-        "attn_per_layer": 37_748_736,
+        "attn_per_layer": 41_943_040,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -298,6 +298,7 @@ QWEN3_MOE_VARIANTS = [
         "dense_ffn": 6144,
         "q_heads": 32,
         "kv_heads": 4,
+        "head_dim": 128,
         "dense_layers": 0,
         "total_params_B": 30.53,
         "active_params_B": 3.35,
@@ -318,6 +319,7 @@ QWEN3_MOE_VARIANTS = [
         "dense_ffn": 12288,
         "q_heads": 64,
         "kv_heads": 4,
+        "head_dim": 128,
         "dense_layers": 0,
         "total_params_B": 235.09,
         "active_params_B": 22.19,
@@ -345,6 +347,7 @@ QWEN35_DENSE_VARIANTS = [
         "dense_ffn": 17408,
         "q_heads": 24,
         "kv_heads": 4,
+        "head_dim": 256,
         "dense_layers": 64,
         "total_params_B": 24.35,
         "active_params_B": 24.35,
@@ -372,6 +375,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 16,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 34.13,
         "active_params_B": 2.93,
@@ -392,6 +396,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 32,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 120.55,
         "active_params_B": 8.21,
@@ -412,6 +417,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 32,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 393.74,
         "active_params_B": 14.74,
@@ -428,6 +434,16 @@ QWEN35_MOE_VARIANTS = [
 
 # ============================================================================
 # DeepSeek MoE Models
+#
+# NOTE: attn_per_layer for these variants is NOT reproducible from the generic
+# 2 * d * (q_heads + kv_heads) * head_dim formula in
+# utils/calculate_variant_fields.py. DeepSeek uses Multi-head Latent Attention
+# (MLA), which compresses KV into a low-rank latent projection, so the standard
+# Q/K/V/O parameter count does not apply. Solving the generic formula against
+# the stored value yields a non-integer head_dim (~51), which is the signature
+# of that mismatch rather than a typo. Do not "correct" these to the formula
+# output -- doing so would replace MLA accounting with dense-attention
+# accounting and overstate DeepSeek V3/V3.1/V3.2 attention memory by ~10%.
 # ============================================================================
 
 DEEPSEEK_VARIANTS = [
