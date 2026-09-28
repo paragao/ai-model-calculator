@@ -804,7 +804,9 @@ def run(variants, hardware, *, report=False):
                     dtype_bytes=PARAM_BYTES,
                     inter_node_bw_gb=inter_node_bw,
                     intra_node_bw_gbps=hw["intra_node_bw_gbps"],
-                    gpus_per_node=8,
+                    gpus_per_node=(
+                        hw["gpus"] // hw["nodes"] if hw.get("nodes") else 8
+                    ),
                 )
 
                 print(f"\n  {v['name']} (d={v['d']}, MBS={best_micro}):")
