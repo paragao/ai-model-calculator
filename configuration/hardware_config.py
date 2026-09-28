@@ -11,6 +11,7 @@ Instance specifications:
 - p6-b200.48xlarge:  8x B200 180GB,      3200 Gbps EFAv4 = 400 GB/s, 1800 GB/s NVLink5, 2250 BF16 TFLOPS/GPU
 - p6-b300.48xlarge:  8x B300 Ultra 268GB, 6400 Gbps EFAv4 = 800 GB/s, 1800 GB/s NVLink5, 3375 BF16 TFLOPS/GPU
 - p6e-gb200.36xlarge: 4x GB200 NVL 185GB, 3200 Gbps EFAv4 = 400 GB/s, 900 GB/s NVLink, 2500 BF16 TFLOPS/GPU
+  (reference specs only -- not present in HARDWARE below; pass it via --hardware)
 - g5.48xlarge:       8x A10G 24GB,       100 Gbps ENA   = 100 GB/s, 600 GB/s NVLink, 35 BF16 TFLOPS/GPU
 - g6.48xlarge:       8x L4 24GB,         100 Gbps ENA   = 100 GB/s, 64 GB/s PCIe, 121 BF16 TFLOPS/GPU
 - g6e.48xlarge:      8x L40S 48GB,       400 Gbps ENA   = 50 GB/s, 64 GB/s PCIe, 366 BF16 TFLOPS/GPU
