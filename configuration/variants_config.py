@@ -271,10 +271,14 @@ QWEN3_DENSE_VARIANTS = [
         "dense_ffn": 25600,
         "q_heads": 64,
         "kv_heads": 8,
+        # Qwen3-32B sets head_dim explicitly to 128 in its config.json; it is
+        # NOT d // q_heads (which would give 80). Verified against
+        # https://huggingface.co/Qwen/Qwen3-32B/raw/main/config.json
+        "head_dim": 128,
         "dense_layers": 64,
         "total_params_B": 30.5,
         "active_params_B": 30.5,
-        "attn_per_layer": 58_982_400,
+        "attn_per_layer": 94_371_840,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -336,6 +340,27 @@ QWEN3_MOE_VARIANTS = [
 
 # ============================================================================
 # Qwen3.5 Dense Models
+#
+# LIMITATION: Qwen3.5 is a HYBRID attention family and these entries model it
+# as uniform full attention, which it is not. Qwen3.5-27B's config.json sets
+# full_attention_interval = 4 with a 3:1 layer_types pattern -- three Gated
+# DeltaNet "linear_attention" layers per one "full_attention" layer -- so of 64
+# layers only 16 use full attention and 48 use linear attention with their own
+# shapes (linear_key_head_dim 128, linear_num_key_heads 16,
+# linear_num_value_heads 48).
+#
+# Consequences of the simplification:
+#   - attn_per_layer is applied to all 64 layers, overstating attention memory.
+#   - the Phase 3 O(seq_len^2) attention term is applied to all 64 layers, but
+#     linear attention is O(seq_len), so long-context time is overstated and
+#     the error grows with context length.
+#
+# Also unmodelled: Qwen3.5 uses vocab_size 248320 (not the 151936 default in
+# project_config.py) and is multimodal (Qwen3_5ForConditionalGeneration with a
+# vision_config). head_dim 256 below IS correct, verified against
+# https://huggingface.co/Qwen/Qwen3.5-27B/raw/main/config.json
+#
+# Treat Qwen3.5 output as an upper bound on attention cost, not an estimate.
 # ============================================================================
 
 QWEN35_DENSE_VARIANTS = [
