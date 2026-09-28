@@ -405,7 +405,7 @@ def export_training_results_csv(training_results, filename):
 
     with open(filename, 'w', newline='') as f:
         fieldnames = [
-            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'gbs',
+            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'seq_len', 'gbs',
             'tok_batch', 'steps', 'est_months', 'rel_speed', 'months_low',
             'months_high', 'bubble_pct', 'comm_overhead_pct', 'efficiency_rating'
         ]
@@ -421,6 +421,7 @@ def export_training_results_csv(training_results, filename):
                     'zero': platform['zero'],
                     'micro': platform['micro'],
                     'accum': platform['accum'],
+                    'seq_len': platform.get('seq_len', ''),
                     'gbs': platform.get('gbs', ''),
                     'tok_batch': platform['tok_batch'],
                     'steps': platform['steps'],
