@@ -24,6 +24,7 @@ Derived fields are computed using:
 LLAMA_DENSE_VARIANTS = [
     {
         "name": "Llama-3.1-8B",
+        "vocab": 128_256,
         "layers": 32,
         "d": 4096,
         "expert_ffn": 0,
@@ -44,6 +45,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.1-70B",
+        "vocab": 128_256,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -64,6 +66,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.1-405B",
+        "vocab": 128_256,
         "layers": 126,
         "d": 16384,
         "expert_ffn": 0,
@@ -84,6 +87,8 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.2-3B",
+        "vocab": 128_256,
+        "tied_embeddings": True,
         "layers": 28,
         "d": 3072,
         "expert_ffn": 0,
@@ -104,6 +109,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.3-70B",
+        "vocab": 128_256,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -131,6 +137,9 @@ LLAMA_DENSE_VARIANTS = [
 LLAMA4_MOE_VARIANTS = [
     {
         "name": "Llama-4-Scout-17B-16E",
+        "vocab": 202_048,
+        "num_experts": 16,
+        "topk": 1,
         "layers": 48,
         "d": 5120,
         "expert_ffn": 8192,
@@ -151,6 +160,9 @@ LLAMA4_MOE_VARIANTS = [
     },
     {
         "name": "Llama-4-Maverick-17B-128E",
+        "vocab": 202_048,
+        "num_experts": 128,
+        "topk": 1,
         "layers": 48,
         "d": 5120,
         "expert_ffn": 8192,
@@ -178,6 +190,7 @@ LLAMA4_MOE_VARIANTS = [
 QWEN25_DENSE_VARIANTS = [
     {
         "name": "Qwen2.5-7B",
+        "vocab": 152_064,
         "layers": 28,
         "d": 3584,
         "expert_ffn": 0,
@@ -198,6 +211,7 @@ QWEN25_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen2.5-32B",
+        "vocab": 152_064,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -218,6 +232,7 @@ QWEN25_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen2.5-72B",
+        "vocab": 152_064,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -245,6 +260,7 @@ QWEN25_DENSE_VARIANTS = [
 QWEN3_DENSE_VARIANTS = [
     {
         "name": "Qwen3-8B",
+        "vocab": 151_936,
         "layers": 36,
         "d": 4096,
         "expert_ffn": 0,
@@ -266,6 +282,7 @@ QWEN3_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen3-32B",
+        "vocab": 151_936,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -297,6 +314,9 @@ QWEN3_DENSE_VARIANTS = [
 QWEN3_MOE_VARIANTS = [
     {
         "name": "Qwen3-30B-A3B",
+        "vocab": 151_936,
+        "num_experts": 128,
+        "topk": 8,
         "layers": 48,
         "d": 2048,
         "expert_ffn": 768,
@@ -318,6 +338,9 @@ QWEN3_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3-235B-A22B",
+        "vocab": 151_936,
+        "num_experts": 128,
+        "topk": 8,
         "layers": 94,
         "d": 4096,
         "expert_ffn": 1536,
@@ -367,6 +390,8 @@ QWEN3_MOE_VARIANTS = [
 QWEN35_DENSE_VARIANTS = [
     {
         "name": "Qwen3.5-27B",
+        "vocab": 248_320,
+        "full_attention_interval": 4,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -395,6 +420,10 @@ QWEN35_DENSE_VARIANTS = [
 QWEN35_MOE_VARIANTS = [
     {
         "name": "Qwen3.5-35B-A3B",
+        "vocab": 248_320,
+        "num_experts": 256,
+        "topk": 8,
+        "full_attention_interval": 4,
         "layers": 40,
         "d": 2048,
         "expert_ffn": 512,
@@ -416,6 +445,10 @@ QWEN35_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3.5-122B-A10B",
+        "vocab": 248_320,
+        "num_experts": 256,
+        "topk": 8,
+        "full_attention_interval": 4,
         "layers": 48,
         "d": 3072,
         "expert_ffn": 1024,
@@ -437,6 +470,10 @@ QWEN35_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3.5-397B-A17B",
+        "vocab": 248_320,
+        "num_experts": 512,
+        "topk": 10,
+        "full_attention_interval": 4,
         "layers": 60,
         "d": 4096,
         "expert_ffn": 1024,
@@ -475,6 +512,9 @@ QWEN35_MOE_VARIANTS = [
 DEEPSEEK_VARIANTS = [
     {
         "name": "DeepSeek-V3",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
@@ -500,6 +540,9 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V3.1",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
@@ -525,6 +568,9 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V3.2",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
