@@ -13,7 +13,8 @@ from configuration.advanced_config import *
 from .core_calculations import (
     calculate_model_memory_gb,
     calculate_memory_for_micro,
-    calculate_viable_micro_batch_sizes
+    calculate_viable_micro_batch_sizes,
+    calculate_zero3_transient_gb,
 )
 
 # Import formatting utilities
@@ -116,12 +117,42 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     suggestions = []
 
     # Suggestion 1: Try ZeRO-3 if not already tried
+    #
+    # NOTE -- the only in-tree caller (analyze_variant_memory) passes
+    # attempted_zero_strategies=[1, 2, 3], so this branch is currently unreachable
+    # from the calculator itself and fires only for an external caller using the
+    # [1, 2] default. Flagged rather than removed; the arithmetic below is still
+    # corrected because wrong advice is worse than unreachable advice.
     if 3 not in attempted_zero_strategies:
-        # ZeRO-3 shards model parameters too
-        potential_savings = model_mem_gb * (1 - 1/dp) if dp > 1 else model_mem_gb * 0.5
-        suggestions.append(
-            f"Use ZeRO-3 to shard model parameters (could save ~{potential_savings:.1f}G)"
-        )
+        # ZeRO-3 shards resident parameters to Psi/Nd, but adds back the transient
+        # all-gather buffer, which does NOT shrink with DP. Quote the NET saving:
+        # at large DP with a small model the buffer can exceed the resident saving,
+        # in which case ZeRO-3 costs memory rather than saving it.
+        resident_saving = model_mem_gb * (1 - 1/dp) if dp > 1 else model_mem_gb * 0.5
+        transient = calculate_zero3_transient_gb(
+            variant=variant,
+            experts_per_gpu=experts_per_gpu,
+            param_bytes=PARAM_BYTES,
+            vocab=VOCAB,
+            layer_norm=LAYER_NORM,
+            ffn_weight_matrices=FFN_WEIGHT_MATRICES,
+            max_live_params=ZERO3_MAX_LIVE_PARAMS,
+            prefetch_bucket_params=ZERO3_PREFETCH_BUCKET_PARAMS,
+            tp=TP,
+        )["transient_gb"]
+        net_saving = resident_saving - transient
+        if net_saving > 0:
+            suggestions.append(
+                f"Use ZeRO-3 to shard model parameters (could save ~{net_saving:.1f}G "
+                f"net: {resident_saving:.1f}G resident less {transient:.1f}G "
+                f"transient all-gather buffer)"
+            )
+        else:
+            suggestions.append(
+                f"ZeRO-3 would NOT help here: its {transient:.1f}G transient "
+                f"all-gather buffer exceeds the {resident_saving:.1f}G it saves on "
+                f"resident parameters at DP={dp}"
+            )
 
     # Suggestion 2: Reduce layers
     if shortage > 0:
@@ -373,6 +404,7 @@ def export_results_csv(results, filename):
         fieldnames = [
             'variant', 'hardware', 'zero_strategy', 'micro_batch',
             'model_gb', 'grad_gb', 'optim_gb', 'activation_gb', 'buffer_gb',
+            'zero3_transient_gb',
             'total_gb', 'gpu_capacity_gb', 'headroom_gb', 'utilization_pct',
             'memory_efficiency', 'status'
         ]
@@ -416,6 +448,7 @@ def export_results_csv(results, filename):
                         'optim_gb': mb["optim"],
                         'activation_gb': mb["activation"],
                         'buffer_gb': mb["buffer"],
+                        'zero3_transient_gb': mb["zero3_transient"],
                         'total_gb': mb["total"],
                         'gpu_capacity_gb': mb["total"] + em["wasted_headroom"],
                         'headroom_gb': em["wasted_headroom"],

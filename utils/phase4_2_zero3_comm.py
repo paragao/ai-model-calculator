@@ -10,6 +10,10 @@ paper (arXiv:1910.02054v3) sec 7.2.2 derives its volume as 3*Psi per step agains
 parameters must be re-gathered twice per step, once for the forward pass and
 again for the backward pass, on top of the gradient reduce-scatter that every
 stage pays.
+
+Those same re-gathers have a MEMORY cost as well as a communication cost: see
+calculate_zero3_transient_gb in core_calculations, which sizes the transient
+buffer the gathered parameters land in. This phase reports only the bytes moved.
 """
 
 # Import configurations

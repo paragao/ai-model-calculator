@@ -93,6 +93,99 @@ def calculate_model_memory_gb(
     return model_mem_bytes / 1e9
 
 
+def calculate_zero3_transient_gb(
+    variant,
+    experts_per_gpu,
+    param_bytes,
+    vocab,
+    layer_norm,
+    ffn_weight_matrices,
+    max_live_params,
+    prefetch_bucket_params,
+    tp=1,
+):
+    """
+    Calculate the ZeRO-3 transient all-gather buffer in GB.
+
+    ZeRO-3 shards resident parameters to Psi/Nd, but a module cannot EXECUTE while
+    sharded. DeepSpeed all-gathers each module's FULL parameters into a transient
+    buffer immediately before it runs and frees them afterwards, so real peak
+    memory exceeds the ZeRO paper's resident-memory model by the size of the
+    largest in-flight gather plus whatever is prefetched alongside it.
+
+    The floor is the largest single gathered unit, because that module cannot run
+    without being gathered whole. Prefetching adds on top of it, bounded by
+    DeepSpeed's live-parameter budget:
+
+        live = max(largest_unit, min(max_live_params, largest_unit + prefetch))
+
+    The gathered units are sized from the same architecture fields, and with the
+    same TP treatment, as calculate_model_memory_gb: attention, expert, shared
+    expert, dense FFN and embedding weights are TP-sharded, while layer norm and
+    router weights are small and replicated.
+
+    Args:
+        variant: Variant dictionary with architecture specs
+        experts_per_gpu: Number of experts per GPU (already EP-divided)
+        param_bytes: Bytes per parameter (2 for BF16, 1 for FP8)
+        vocab: Vocabulary size fallback; a variant's own "vocab" key wins
+        layer_norm: Layer norm constant (typically 2)
+        ffn_weight_matrices: FFN weight matrices constant (typically 3)
+        max_live_params: DeepSpeed stage3_max_live_parameters, in ELEMENTS
+        prefetch_bucket_params: DeepSpeed stage3_prefetch_bucket_size, in ELEMENTS
+        tp: Tensor parallelism degree (default 1)
+
+    Returns:
+        dict: {"transient_gb", "largest_unit_params", "largest_unit",
+               "live_params", "prefetch_capped"}
+    """
+    d = variant["d"]
+    is_moe = variant.get("expert_ffn", 0) > 0
+    has_dense = variant.get("dense_layers", variant["layers"]) > 0
+
+    units = {}
+
+    # A dense transformer layer: attention + SwiGLU FFN + layer norms.
+    if has_dense:
+        units["dense_layer"] = (
+            (variant["attn_per_layer"] + ffn_weight_matrices * d * variant["dense_ffn"]) / tp
+            + layer_norm * d
+        )
+
+    # An MoE layer: attention + this rank's experts + shared expert + router.
+    # experts_per_gpu is used (not the global expert count) because EP has already
+    # placed only that many experts on this rank -- ZeRO-3 gathers the rank's set.
+    if is_moe:
+        units["moe_layer"] = (
+            (
+                variant["attn_per_layer"]
+                + experts_per_gpu * variant["expert_each"]
+                + variant.get("shared_each", 0)
+            ) / tp
+            + variant.get("router_each", 0)
+            + layer_norm * d
+        )
+
+    # One embedding table. For a small model this EXCEEDS a transformer layer --
+    # Llama-3.2-3B's 128256 x 3072 table is larger than any of its 28 layers --
+    # so the largest gathered unit is not always a layer.
+    units["embedding"] = variant.get("vocab", vocab) * d / tp
+
+    largest_unit = max(units, key=units.get)
+    largest_unit_params = units[largest_unit]
+
+    with_prefetch = largest_unit_params + prefetch_bucket_params
+    live_params = max(largest_unit_params, min(max_live_params, with_prefetch))
+
+    return {
+        "transient_gb": live_params * param_bytes / 1e9,
+        "largest_unit_params": largest_unit_params,
+        "largest_unit": largest_unit,
+        "live_params": live_params,
+        "prefetch_capped": with_prefetch > max_live_params,
+    }
+
+
 def calculate_training_time_months(
     total_tokens, active_params_b, num_gpus, peak_tflops_per_gpu, mfu, efficiency,
     layers=0, hidden_dim=0, seq_len=0, attention_flops_factor=0,
@@ -315,6 +408,8 @@ def calculate_memory_for_micro(
     # (arXiv:1910.02054v3) sec 5.3: "With parameter partitioning, we reduce the
     # memory consumption of an Psi parameter model from 16*Psi to 16*Psi/Nd."
     param_mem = model_mem_gb
+    zero3_transient = 0.0
+    zero3_transient_detail = None
     if zero_strategy == 1:
         grad_mem = model_mem_gb
         # Optimizer: dense params sharded across full DP, MoE params across eff_dp_moe
@@ -338,15 +433,29 @@ def calculate_memory_for_micro(
         # ZeRO-2 -- it paid ZeRO-3's 0.8 efficiency multiplier while delivering
         # none of its parameter saving, and so could never be the right choice.
         #
-        # LIMITATION -- this is the paper's resident-memory model and excludes the
-        # transient all-gather buffer that re-materializes the in-flight layer's
-        # parameters during forward/backward (plus any prefetch depth). Real ZeRO-3
-        # peak memory is therefore HIGHER than this; treat the figure as a lower
-        # bound. Modelling it needs a per-layer parameter size and a prefetch
-        # depth, neither of which is currently tracked.
+        # LIMITATION -- param_mem above is the paper's RESIDENT-memory model. A
+        # sharded layer cannot execute, so DeepSpeed all-gathers each module whole
+        # into a transient buffer just before it runs; that buffer is added below
+        # as zero3_transient. What remains unmodelled is activation-side effects of
+        # the gather schedule, so the figure is still not a guaranteed peak.
         param_dense = model_mem_gb * dense_frac / dp
         param_moe = model_mem_gb * moe_frac / eff_dp_moe
         param_mem = param_dense + param_moe
+
+        # Transient all-gather buffer. Constants and TP come from the wildcard
+        # config import, the same way EP is read in calculate_model_memory_gb.
+        zero3_transient_detail = calculate_zero3_transient_gb(
+            variant=variant,
+            experts_per_gpu=experts_per_gpu,
+            param_bytes=param_bytes,
+            vocab=VOCAB,
+            layer_norm=LAYER_NORM,
+            ffn_weight_matrices=FFN_WEIGHT_MATRICES,
+            max_live_params=ZERO3_MAX_LIVE_PARAMS,
+            prefetch_bucket_params=ZERO3_PREFETCH_BUCKET_PARAMS,
+            tp=TP,
+        )
+        zero3_transient = zero3_transient_detail["transient_gb"]
     else:
         raise ValueError(f"Unknown ZeRO strategy: {zero_strategy}")
 
@@ -410,7 +519,12 @@ def calculate_memory_for_micro(
     # --- Total with fragmentation ---
     # param_mem, not model_mem_gb: they differ only under ZeRO-3, which shards the
     # resident parameters. "model" reports what is actually resident on the GPU.
-    raw_total = param_mem + grad_mem + optim_mem + activation_mem + buffer_mem
+    #
+    # zero3_transient is 0.0 for ZeRO-1 and ZeRO-2, which never shard parameters
+    # and so never gather them back.
+    raw_total = (
+        param_mem + grad_mem + optim_mem + activation_mem + buffer_mem + zero3_transient
+    )
     total_mem = raw_total * fragmentation_factor
 
     return {
@@ -420,6 +534,8 @@ def calculate_memory_for_micro(
         "optim": optim_mem,
         "activation": activation_mem,
         "buffer": buffer_mem,
+        "zero3_transient": zero3_transient,
+        "zero3_transient_detail": zero3_transient_detail,
     }
 
 

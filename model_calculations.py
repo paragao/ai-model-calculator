@@ -272,7 +272,7 @@ def run(variants, hardware, *, report=False):
         print(f"{'#' * 140}")
 
         print(
-            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
+            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'AGbuf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
         )
         print(
             f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6} {'-' * 6}"
@@ -301,9 +301,15 @@ def run(variants, hardware, *, report=False):
                 z_label = f"Z{result['best_zero']}"
                 micro_display = result["best_micro"]
 
+                # AGbuf is the ZeRO-3 transient all-gather buffer. Blank rather
+                # than "0.0G" on ZeRO-1/ZeRO-2 rows, which never gather parameters,
+                # so a non-empty cell always means a real ZeRO-3 cost.
+                ag = mb["zero3_transient"]
+                ag_str = f"{ag:>7.1f}G" if ag > 0 else f"{'-':>8}"
+
                 print(
                     f"  {v['name']:<10} {mb['model']:>7.1f}G {mb['grad']:>7.1f}G {mb['optim']:>7.1f}G "
-                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {mb['total']:>7.1f}G "
+                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {ag_str} {mb['total']:>7.1f}G "
                     f"{headroom_str} {util_pct:>6} {z_label:>6} {micro_display:>6}"
                 )
             else:

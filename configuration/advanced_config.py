@@ -37,6 +37,27 @@ ZERO_STRATEGY = [
     {"zero": 3, "eff": 0.8},   # ZeRO-3: All parameters sharded, 20% overhead
 ]
 
+# --- ZeRO-3 transient all-gather buffer -------------------------------------
+#
+# ZeRO-3's resident parameter memory is Psi/Nd, but a layer cannot EXECUTE while
+# sharded: DeepSpeed all-gathers each module's full parameters into a transient
+# buffer just before it runs, and frees them after. That buffer is real peak
+# memory the paper's resident model does not account for.
+#
+# Both values below are DeepSpeed's own documented DEFAULTS, in PARAMETER
+# ELEMENTS (not bytes), from https://www.deepspeed.ai/docs/config-json/:
+#   stage3_max_live_parameters  1e9  "The maximum number of parameters resident
+#                                    per GPU before releasing. Smaller values use
+#                                    less memory, but perform more communication."
+#   stage3_prefetch_bucket_size 5e8  "The size of the fixed buffer for prefetching
+#                                    parameters. Smaller values use less memory,
+#                                    but can increase stalls due to communication."
+#
+# They are config knobs, not physics: a run that lowers them trades memory back
+# for communication, so the modelled buffer describes the DEFAULT configuration.
+ZERO3_MAX_LIVE_PARAMS = 1e9
+ZERO3_PREFETCH_BUCKET_PARAMS = 5e8
+
 # Micro batch sizes to test for memory feasibility
 MICROS = [1, 2, 4, 8, 16]
 
@@ -123,6 +144,14 @@ ATTENTION_FLOPS_FACTOR = 12
 # actual measured 150 GB vs raw calculated ~121 GB → ratio ≈ 1.24x.
 # Accounts for CUDA caching allocator fragmentation, memory alignment, and
 # small transient buffers not explicitly modeled.
+#
+# INTERACTION with ZERO3_MAX_LIVE_PARAMS above -- this factor multiplies the total
+# INCLUDING the now-explicit ZeRO-3 transient all-gather buffer. That is correct if
+# the calibration run used ZeRO-1 or ZeRO-2, which never gather parameters and so
+# contributed no gather buffer to the measured 150 GB. If it used ZeRO-3, part of
+# the 1.24x already absorbed that buffer and ZeRO-3 totals now double-count it.
+# The calibration note does not record the stage, so this is UNRESOLVED; it affects
+# only ZeRO-3 rows, and re-calibrating needs a profiled run with a known stage.
 FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching allocator
 
 # Memory utilization

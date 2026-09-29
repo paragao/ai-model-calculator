@@ -307,3 +307,63 @@ if __name__ == "__main__":
     test_zero3_volume_is_three_psi()
     test_zero_volume_independent_of_dp()
     print("\nAll edge case tests passed! ✓")
+
+
+def _mem(variant, dp, zero_strategy, experts_per_gpu=0, topk=0):
+    """Memory breakdown helper: PP=1, EP=1, one micro-batch, 4K sequence."""
+    layers_per_gpu = variant["layers"]
+    model_mem = calculate_model_memory_gb(
+        variant, layers_per_gpu, experts_per_gpu,
+        PARAM_BYTES, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1
+    )
+    return calculate_memory_for_micro(
+        micro=1, model_mem_gb=model_mem, variant=variant, dp=dp,
+        layers_per_gpu=layers_per_gpu, zero_strategy=zero_strategy, seq_len=4096,
+        topk=topk, param_bytes=PARAM_BYTES,
+        empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
+        selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+        fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
+        nccl_mem_buf=NCCL_MEM_BUF, optim_bytes=OPTIM_BYTES,
+        ep=1, pp=1, vp=1,
+        nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+        fragmentation_factor=FRAGMENTATION_FACTOR,
+        experts_per_gpu=experts_per_gpu,
+    )
+
+
+def test_zero3_transient_buffer_is_dp_invariant():
+    """ZeRO-3's transient all-gather buffer must NOT shrink with DP.
+
+    Resident parameter memory is Psi/Nd and falls as DP grows, but the transient
+    buffer is set by the largest gathered module and DeepSpeed's live-parameter
+    budget, neither of which depends on DP. This is the floor that makes the
+    paper's resident-memory model an underestimate at large DP -- regression guard
+    against reintroducing a /dp divisor here.
+    """
+    transients = []
+    residents = []
+    for dp in (2, 8, 32, 64, 256, 1024):
+        mem = _mem(DENSE_VARIANT, dp, zero_strategy=3)
+        transients.append(mem["zero3_transient"])
+        residents.append(mem["model"])
+
+    assert transients[0] > 0, "ZeRO-3 must carry a transient buffer"
+    for t in transients[1:]:
+        assert abs(t - transients[0]) < 1e-9, (
+            f"Transient buffer varied with DP: {transients}"
+        )
+    # Resident memory, by contrast, must fall as 1/DP.
+    for earlier, later in zip(residents, residents[1:]):
+        assert later < earlier, f"Resident memory did not fall with DP: {residents}"
+
+
+def test_zero1_and_zero2_have_no_transient_buffer():
+    """Only ZeRO-3 shards parameters, so only ZeRO-3 gathers them back."""
+    for zero_strategy in (1, 2):
+        mem = _mem(DENSE_VARIANT, dp=64, zero_strategy=zero_strategy)
+        assert mem["zero3_transient"] == 0.0, (
+            f"ZeRO-{zero_strategy} reported a transient buffer: {mem['zero3_transient']}"
+        )
+        assert mem["zero3_transient_detail"] is None
+    # And ZeRO-3 at the same DP does carry one, so the test above is meaningful.
+    assert _mem(DENSE_VARIANT, dp=64, zero_strategy=3)["zero3_transient"] > 0
