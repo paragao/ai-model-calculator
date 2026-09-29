@@ -329,14 +329,12 @@ def run(variants, hardware, *, report=False):
         for v_name in [v["name"] for v in variants]:
             result = all_results["variants"][v_name][-1]  # Latest result for this hardware
             if result["best_zero"] > 0:
-                z1 = result["viable_micros_z1"]
-                z2 = result["viable_micros_z2"]
+                # Key off best_zero rather than testing z1 then falling through to
+                # z2: a variant that fits only under ZeRO-3 has an EMPTY z2, which
+                # the old two-branch form printed as "[] (ZeRO-2)".
                 best_zero = result["best_zero"]
-
-                if z1:
-                    print(f"  {v_name}: {z1} (ZeRO-1)")
-                else:
-                    print(f"  {v_name}: {z2} (ZeRO-2)")
+                viable = result.get(f"viable_micros_z{best_zero}", [])
+                print(f"  {v_name}: {viable} (ZeRO-{best_zero})")
             else:
                 print(f"  {v_name}: {color_text('None (OOM)', 'red')}")
 

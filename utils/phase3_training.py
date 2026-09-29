@@ -91,6 +91,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         tp=TP
     )
 
+    # Try ZeRO-3, which additionally shards the resident parameters. Reached only
+    # when ZeRO-1 and ZeRO-2 both OOM: it fits strictly more, at 3*Psi per step
+    # against their 2*Psi (see phase 4.2).
+    viable_z3 = calculate_viable_micro_batch_sizes(
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=3,
+        tp=TP
+    )
+
     # Determine best ZeRO strategy and viable micro batch sizes
     if viable_z1:
         zero_config = ZERO_STRATEGY[0]  # ZeRO-1
@@ -98,12 +106,15 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     elif viable_z2:
         zero_config = ZERO_STRATEGY[1]  # ZeRO-2
         viable_micros = viable_z2
+    elif viable_z3:
+        zero_config = ZERO_STRATEGY[2]  # ZeRO-3
+        viable_micros = viable_z3
     else:
         # OOM - cannot fit on this hardware
         return {
             "platforms": [],
             "oom": True,
-            "oom_reason": f"Insufficient memory even with ZeRO-2 (requires >{gpu_mem}GB)"
+            "oom_reason": f"Insufficient memory even with ZeRO-3 (requires >{gpu_mem}GB)"
         }
 
     # MoE layers on this GPU (for all-to-all comm overhead)
