@@ -48,6 +48,7 @@ from utils.phase1_memory import (
 # Import Phase 2: Batch Configuration
 from utils.phase2_batch import (
     analyze_batch_configuration,
+    classify_step_outliers,
     generate_batch_recommendations,
     export_batch_results_csv
 )
@@ -427,29 +428,38 @@ def run(variants, hardware, *, report=False):
                     if config["tokens_per_batch"] < batch_cap:
                         hw_configs.append(config)
 
-                        # Format assessment with color
-                        colored_assessment = format_batch_assessment_with_color(
-                            config["assessment"], config["priority"]
-                        )
+            # Classify only AFTER the whole pair is collected. The assessment is the
+            # step-count spread within this pair -- smallest and largest are the
+            # outliers -- so it cannot be decided while sweeping, which is why the
+            # printing below is a second pass rather than inline in the loop above.
+            classify_step_outliers(hw_configs)
 
-                        # Priority indicator
-                        priority_symbols = ["⭐⭐⭐", "⭐⭐ ", "⭐  ", "   "]
-                        priority_str = priority_symbols[config["priority"]]
+            for config in sorted(hw_configs, key=lambda c: c["steps"]):
+                colored_assessment = format_batch_assessment_with_color(
+                    config["assessment"], config["priority"]
+                )
 
-                        print(
-                            f"  {config['micro']:>6} {config['accum']:>6} "
-                            f"{config['tokens_per_batch'] / 1e6:>10.1f}M {config['steps']:>10,.0f} "
-                            f"{priority_str:>10} {colored_assessment:>35}"
-                        )
+                # Only 1 (reasonable) and 3 (outlier) are produced now.
+                priority_symbols = {1: "⭐⭐ ", 3: "   "}
+                priority_str = priority_symbols.get(config["priority"], "   ")
+
+                print(
+                    f"  {config['micro']:>6} {config['accum']:>6} "
+                    f"{config['tokens_per_batch'] / 1e6:>10.1f}M {config['steps']:>10,.0f} "
+                    f"{priority_str:>10} {colored_assessment:>35}"
+                )
 
             # Store results for this variant/hardware
             batch_results[f"{variant_name} | {hw['name']}"] = hw_configs
 
             # Summary for this variant/hardware
-            optimal_count = len([c for c in hw_configs if c["priority"] == 0])
-            good_count = len([c for c in hw_configs if c["priority"] <= 1])
+            reasonable_count = len([c for c in hw_configs if c["priority"] == 1])
+            outlier_count = len([c for c in hw_configs if c["priority"] == 3])
 
-            print(f"\n  Summary: {optimal_count} optimal, {good_count} good out of {len(hw_configs)} feasible configurations")
+            print(
+                f"\n  Summary: {reasonable_count} reasonable, {outlier_count} outlier "
+                f"out of {len(hw_configs)} feasible configurations"
+            )
 
     # Generate and display batch recommendations
     print(f"\n{'=' * 140}")
