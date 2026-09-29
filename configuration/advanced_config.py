@@ -174,7 +174,29 @@ UPPER_BOUND_HIGH_RANGE = 1_200_000
 MIN_STEPS = 200_000
 MAX_STEPS = 1_200_000
 
+# The step bounds above are CONTIGUOUS and are consumed as half-open intervals by
+# phase2_batch.assess_training_steps, so every step count is classified. They were
+# once all tested strictly on both sides, which left 200_000 / 300_000 / 800_000
+# matching no branch and reported as "unknown".
+#
+# UNRESOLVED -- these bounds DISAGREE with TOKENS_PER_BATCH in project_config:
+#   TOTAL_TOKENS / TOKENS_PER_BATCH = 15e12 / 4e6 = 3,750,000 steps, which is 3.1x
+#   MAX_STEPS. The optimal band instead implies a batch of
+#   TOTAL_TOKENS/UPPER_BOUND_OPTIM_RANGE .. TOTAL_TOKENS/LOWER_BOUND_OPTIM_RANGE
+#   = 18.8M .. 50.0M tokens, i.e. 5x-12x the configured target.
+#   Worse, neither target window is reachable: tokens_per_batch is
+#   dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
+#   absolute number, so priority 0 is never returned at all -- measured 0 hits
+#   across 14,080 swept configs.
+# Fixing it means choosing an intent (a 4M batch, or 300k-800k steps), so it is
+# deliberately not guessed. See the note in assess_training_steps.
+
 # Batch size constraints
+#
+# Applied by the CALLER in model_calculations, not inside phase2_batch, which only
+# reports it as the "exceeds_batch_cap" flag. Inert at PP>=4 -- the largest preset
+# reaches 536.9M at PP=4 -- but live at PP=1 and PP=2, which reach 2147.5M and
+# 1073.7M on 512 p5.
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
 
 # Hardware memory specifications (GB)
