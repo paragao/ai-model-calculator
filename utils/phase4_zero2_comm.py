@@ -204,9 +204,12 @@ def generate_communication_recommendations(comm_results):
             best_dp_by_hw[hw_name] = (best_dp, best_time)
 
     if best_dp_by_hw:
+        # Was "Optimal DP configurations minimize communication: Higher DP = lower
+        # per-GPU communication volume" -- a restatement of the /dp divisor that
+        # has been removed as wrong. Volume per rank rises toward one replica.
         recommendations.append(
-            f"🎯 Optimal DP configurations minimize communication: "
-            f"Higher DP = lower per-GPU communication volume"
+            f"🎯 Raising DP does NOT reduce per-GPU communication: volume per rank is "
+            f"(DP-1)/DP of a replica, approaching 1 as DP grows (ZeRO paper sec 7.2.1)"
         )
 
     # Identify variants with problematic communication
@@ -223,9 +226,14 @@ def generate_communication_recommendations(comm_results):
                         problematic_variants.append(variant_name)
 
     if problematic_variants:
+        # Was "→ Use higher DP or consider ZeRO-1 if memory permits". Both halves
+        # were wrong: higher DP does not lower per-rank volume, and ZeRO-1 moves
+        # the same 2*Psi per step as ZeRO-2 (ZeRO paper sec 7.2.1). What actually
+        # helps is faster interconnect or a smaller resident replica.
         recommendations.append(
-            f"📊 Variants with high communication overhead at low DP: {', '.join(problematic_variants)} "
-            f"→ Use higher DP or consider ZeRO-1 if memory permits"
+            f"📊 Variants with high communication overhead: {', '.join(problematic_variants)} "
+            f"→ ZeRO-1 moves the same volume, and raising DP does not reduce it; look to "
+            f"faster inter-node bandwidth, or to TP/PP to shrink the per-rank replica"
         )
 
     return recommendations

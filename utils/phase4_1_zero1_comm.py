@@ -197,10 +197,17 @@ def generate_zero1_recommendations(zero1_results):
                 f"⚠️  ZeRO-1 communication overhead is high for {high_overhead_configs}/{total_configs} configs (>7ms)"
             )
 
-    # Highlight ZeRO-1 vs ZeRO-2 advantage
+    # ZeRO-1 vs ZeRO-2 communication.
+    #
+    # Was "ZeRO-1 has ~67% less communication than ZeRO-2 (3x vs 2x factor)".
+    # That was a restatement of the old wrong formulas (model_mem * 3 / dp here
+    # against model_mem * 2 / dp in phase 4). Per the ZeRO paper sec 7.2.1 both
+    # stages total 2*Psi per step, so their volumes are EQUAL -- ZeRO-1's real
+    # advantage is the `eff` multiplier in phase 3, not communication.
     recommendations.append(
-        "🚀 ZeRO-1 has ~67% less communication than ZeRO-2 (3x vs 2x factor) "
-        "→ Prefer ZeRO-1 when memory permits for 10% efficiency gain"
+        "⚖️  ZeRO-1 and ZeRO-2 move the SAME 2*Psi per step (ZeRO paper sec 7.2.1) → "
+        "prefer ZeRO-1 for its higher efficiency multiplier and lower resident "
+        "gradient memory pressure, not for less communication"
     )
 
     # Count variants that fit with ZeRO-1
@@ -216,10 +223,16 @@ def generate_zero1_recommendations(zero1_results):
             f"Recommended for best performance (efficiency=1.0 vs 0.9 for ZeRO-2)"
         )
 
-    # DP scaling recommendation
+    # DP scaling.
+    #
+    # Was "Higher DP = lower per-GPU communication volume (linear scaling:
+    # doubling DP halves communication)". That followed from the /dp divisor that
+    # has been removed as wrong: ring collectives move (DP-1)/DP of a replica per
+    # rank, which RISES toward one replica as DP grows.
     recommendations.append(
-        "🎯 Optimal DP configurations: Higher DP = lower per-GPU communication volume "
-        "(linear scaling: doubling DP halves communication)"
+        "🎯 Raising DP does NOT reduce per-GPU communication: volume per rank is "
+        "(DP-1)/DP of a replica, approaching 1 as DP grows → DP buys memory "
+        "headroom, not cheaper collectives"
     )
 
     return recommendations
