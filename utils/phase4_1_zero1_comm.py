@@ -105,10 +105,19 @@ def calculate_zero1_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
         - ag_time_ms: All-gather time in milliseconds
         - overhead_rating: Performance rating (0=excellent, 3=poor)
     """
-    # All-gather volume: optimizer states only
-    # OPTIM_BYTES = 6 (momentum + variance + FP32 master)
-    # PARAM_BYTES = 2 (BF16)
-    # Factor = 6/2 = 3
+    # All-gather volume, as a multiple of parameter memory.
+    #
+    # The factor 3 is HARDCODED and calibrated for BF16. Do not read it as
+    # OPTIM_BYTES / PARAM_BYTES: OPTIM_BYTES is itself a multiplier on parameter
+    # memory (see advanced_config), so that ratio is not a volume factor and the
+    # two would drift apart under FP8.
+    #
+    # OPEN QUESTION, deliberately not changed here: ZeRO-1 all-gathers the updated
+    # PARAMETERS after the optimizer step, which is ~1x parameter memory, not 3x.
+    # A 3x figure is the size of the fp32 optimizer state expressed in parameter-
+    # memory units. Whether this should be 1x or 3x is a modelling decision that
+    # changes every ZeRO-1 communication number, so it needs its own review rather
+    # than a drive-by edit.
     ag_volume_mb = model_mem_gb * 3 / dp_val * 1000
 
     # Communication time at inter-node bandwidth

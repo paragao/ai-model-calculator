@@ -28,6 +28,10 @@ ZERO_STRATEGY = [
 MICROS = [1, 2, 4, 8, 16]
 
 # Gradient accumulation steps to evaluate
+#
+# NOTE: 1 is deliberately absent, so a no-accumulation configuration is never
+# evaluated even though it is valid and is often optimal at large DP width. Add 1
+# here if you need that arm considered.
 GRAD_ACCUM_VALUES = [2, 4, 8]
 
 # Precision-dependent parameter size
@@ -36,13 +40,46 @@ if PRECISION == "BF16":
 else:
     PARAM_BYTES = 1  # 1 byte per parameter for FP8
 
+# KNOWN LIMITATION -- PRECISION affects PARAM_BYTES ONLY, never throughput.
+# phase3_training reads hw["peak_tflops_bf16"] unconditionally and no hardware
+# preset defines peak_tflops_fp8, so setting PRECISION="FP8" halves parameter and
+# activation memory while still computing training time at BF16 throughput. FP8 is
+# roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, so FP8 runs
+# OVERSTATE training time by about 2x. (A10G is Ampere and has no FP8 at all, so
+# FP8 on g5 is not a valid configuration.) Fixing this needs a per-preset
+# peak_tflops_fp8 field plus precision-aware selection in phase3, which belongs
+# with the hardware presets rather than here.
+
 # Model architecture constants
-LAYER_NORM = 2  # Pre- and post-attention layer norms
-FFN_WEIGHT_MATRICES = 3  # Query, key, value projections + FFN matrices
-NUM_EMBEDDINGS_TABLES = 2  # Word embeddings + position embeddings
+LAYER_NORM = 2  # RMSNorm vectors of width d per layer: input + post-attention
+
+# The 3 SwiGLU FFN matrices: gate_proj, up_proj, down_proj. Used as
+# `3 * d * dense_ffn`. NOT the QKV projections -- those are counted separately in
+# each variant's attn_per_layer.
+FFN_WEIGHT_MATRICES = 3
+
+# Input embedding table + output LM head. NOT "word + position" embeddings: every
+# model in the catalog uses RoPE and has no learned positional table. Reduced to
+# 1 for a variant with "tied_embeddings": True, where the LM head IS the input
+# embedding matrix (Llama-3.2-3B is the only such variant).
+NUM_EMBEDDINGS_TABLES = 2
 
 # Optimizer memory footprint
-OPTIM_BYTES = 6  # 2B momentum + 2B variance + 2B FP32 master weights
+#
+# Mixed-precision Adam keeps its state in FP32 REGARDLESS of parameter precision:
+#   fp32 master weights 4 + fp32 momentum 4 + fp32 variance 4 = 12 bytes/param.
+#
+# OPTIM_BYTES is consumed as a MULTIPLIER ON PARAMETER MEMORY, not as bytes per
+# parameter -- see calculate_memory_breakdown: `model_mem_gb * optim_bytes / dp`,
+# where model_mem_gb already carries PARAM_BYTES. So the effective footprint is
+# PARAM_BYTES * OPTIM_BYTES bytes/param, and the multiplier must be derived from
+# PARAM_BYTES to keep that product at 12.
+#
+# A fixed 6 was correct only in BF16 (2 * 6 = 12). Under FP8 it gave 1 * 6 = 6,
+# understating optimizer memory 2x -- the optimizer does not shrink just because
+# the parameters are fp8.
+OPTIM_BYTES_PER_PARAM = 12  # fp32 master + fp32 momentum + fp32 variance
+OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 6.0, FP8 -> 12.0
 
 # Activation memory estimation (empirical multipliers)
 EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
@@ -92,10 +129,14 @@ MAX_STEPS = 1_200_000
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
 
 # Hardware memory specifications (GB)
+#
+# REFERENCE VALUES ONLY -- the calculation always uses the hardware entry's
+# own mem_gb. Six of these eight are referenced nowhere outside this file, so
+# editing one does NOT change any result. All verified against AWS specs.
 H100_MEM_GB = 80    # H100 GPU memory capacity
 H200_MEM_GB = 141   # H200 GPU memory capacity
 B200_MEM_GB = 180   # B200 GPU memory capacity
-B300_MEM_GB = 268   # B300 Ultra GPU memory capacity
+B300_MEM_GB = 268   # B300 Ultra: 268 GB USABLE of 288 raw; AWS states 2.1 TB / 8 GPUs
 GB200_MEM_GB = 186  # GB200 NVL GPU memory: AWS states 13.4 TB HBM3e / 72 GPUs
 A10G_MEM_GB = 24    # A10G GPU memory capacity
 L4_MEM_GB = 24      # L4 GPU memory capacity
