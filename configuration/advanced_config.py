@@ -174,8 +174,142 @@ UPPER_BOUND_HIGH_RANGE = 1_200_000
 MIN_STEPS = 200_000
 MAX_STEPS = 1_200_000
 
+# The step bounds above are CONTIGUOUS and are consumed as half-open intervals by
+# phase2_batch.assess_training_steps, so every step count is classified. They were
+# once all tested strictly on both sides, which left 200_000 / 300_000 / 800_000
+# matching no branch and reported as "unknown".
+#
+# UNRESOLVED -- these bounds DISAGREE with TOKENS_PER_BATCH in project_config:
+#   TOTAL_TOKENS / TOKENS_PER_BATCH = 15e12 / 4e6 = 3,750,000 steps, which is 3.1x
+#   MAX_STEPS. The optimal band instead implies a batch of
+#   TOTAL_TOKENS/UPPER_BOUND_OPTIM_RANGE .. TOTAL_TOKENS/LOWER_BOUND_OPTIM_RANGE
+#   = 18.8M .. 50.0M tokens, i.e. 5x-12x the configured target.
+#   Worse, neither target window is reachable: tokens_per_batch is
+#   dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
+#   absolute number, so priority 0 is never returned at all -- measured 0 hits
+#   across 14,080 swept configs.
+# Fixing it means choosing an intent (a 4M batch, or 300k-800k steps), so it is
+# deliberately not guessed. See the note in assess_training_steps.
+
 # Batch size constraints
+#
+# AUTO-COMPUTED -- see compute_max_tokens_per_batch below. The value here is only
+# the default at the reference configuration, kept so existing callers that import
+# the name keep working. Prefer the function, which takes the actual dp and
+# seq_len.
+#
+# PROVENANCE of the old hard-coded 600e6: none that could be traced. It is
+# inconsistent with this module's own step bounds by 8x --
+# TOTAL_TOKENS / 600e6 = 25,000 steps, which is 8.0x BELOW MIN_STEPS (200,000).
+# That is why it never fired: measured 0 hits across 14,080 swept configs. A cap
+# that admits batches implying 25k steps is not a cap at all when the same module
+# calls anything under 200k steps "too few steps".
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
+
+
+def compute_max_tokens_per_batch(total_tokens, dp, seq_len, min_steps=None):
+    """Largest sensible global batch, derived rather than hard-coded.
+
+    Two independent bounds, and the batch must respect both:
+
+    1. STEP BUDGET (statistical). steps = total_tokens / batch, so requiring at
+       least min_steps optimizer updates caps the batch at total_tokens/min_steps.
+       This is the binding bound in practice.
+    2. PARALLELISM FLOOR (hardware). The smallest batch the topology can even
+       express is dp * seq_len -- one sequence per data-parallel rank, micro=1,
+       accum=1. No cap below this is satisfiable, so it wins when the two cross,
+       and the caller should treat that as "this parallelism cannot hit the step
+       budget" rather than as a usable cap.
+
+    Returned value is max(...) of the two: the step ceiling normally, raised to
+    the floor when the topology is too wide to reach min_steps.
+
+    WHY THIS SHAPE, and what the literature does and does not settle
+    ----------------------------------------------------------------
+    The governing quantity in the literature is the CRITICAL BATCH SIZE -- the
+    point past which a larger batch stops buying proportionally fewer steps.
+    Zhang et al., "How Does Critical Batch Size Scale in Pre-training?"
+    (arXiv:2410.21676, Harvard/Amazon) decouple its drivers and find CBS
+    "scales primarily with data size rather than model size", fitting
+    B* = 22.91 * D^0.47 (D in billions, at context length 512) and
+    B* = 621.341 * N^0.087 -- "barely invariant to model size". So the right
+    independent variable IS the dataset size, which is what this function uses.
+
+    Its absolute constant does NOT transfer to frontier scale, so it is not used
+    here. Extrapolated to D = 15T that law gives 1.08M tokens, which is 15x to
+    58x BELOW what the published frontier runs actually use. It was fitted on
+    85M-1.2B parameter models over <=120B tokens at context 512, two orders of
+    magnitude short of a 15T-token run. Forcing B = k * D^0.47 through the
+    published runs gives k = 112,351 (Llama 2 70B), 171,140 (Llama 3 405B) and
+    689,808 (DeepSeek-V3) -- a ~6x spread -- so any single k would be invented
+    rather than derived. The exponent may well be right; the constant is not
+    available, and closing that gap needs frontier-scale CBS measurements that
+    nobody has published.
+
+    So this function anchors on the step budget, which is the user's own declared
+    intent, and the published runs corroborate that band rather than supply a
+    constant to it. At TOTAL_TOKENS = 15e12 the [MIN_STEPS, MAX_STEPS] window of
+    [200k, 1.2M] implies a batch of 12.5M to 75.0M tokens, and BOTH frontier runs
+    land inside it:
+
+      Llama 3 405B  final batch 16.0M tokens  (arXiv:2407.21783 S3.4.1)
+      DeepSeek-V3   final batch 62.9M tokens  (arXiv:2412.19437 S4.2,
+                                               15360 sequences x 4096)
+
+    Note both runs RAMP the batch and neither holds it constant, which is what
+    reconciles TOKENS_PER_BATCH = 4e6 with MAX_STEPS = 1.2e6: 4M is Llama 3's
+    INITIAL batch, not its steady-state one. Its schedule 4M -> 8M (after 252M
+    tokens) -> 16M (after 2.87T) reconstructs to 1,154,406 steps against the
+    paper's "over 1,200,000", a 3.8% agreement, at a time-averaged 13.5M tokens
+    per step. This engine models a SINGLE fixed batch, so it cannot express a
+    ramp; the band is the honest single-value stand-in for one.
+
+    Args:
+        total_tokens: Training token budget (TOTAL_TOKENS).
+        dp: Data-parallel degree of the configuration being checked.
+        seq_len: Sequence length in tokens.
+        min_steps: Minimum acceptable optimizer steps; defaults to MIN_STEPS.
+
+    Returns:
+        Maximum tokens per batch, in tokens.
+    """
+    if min_steps is None:
+        min_steps = MIN_STEPS
+    if min_steps <= 0:
+        raise ValueError(f"min_steps must be positive, got {min_steps}")
+    if dp <= 0 or seq_len <= 0:
+        raise ValueError(f"dp and seq_len must be positive, got dp={dp}, seq_len={seq_len}")
+
+    step_ceiling = total_tokens / min_steps
+    parallelism_floor = dp * seq_len
+    return max(step_ceiling, parallelism_floor)
+
+
+def describe_batch_budget(total_tokens, dp, seq_len,
+                          min_steps=None, max_steps=None):
+    """The full feasible batch band for a configuration, for reporting.
+
+    Returns a dict with the step-budget band, the parallelism floor, the
+    resulting cap, and whether the topology can reach the step budget at all.
+    """
+    if min_steps is None:
+        min_steps = MIN_STEPS
+    if max_steps is None:
+        max_steps = MAX_STEPS
+
+    floor = dp * seq_len
+    band_low = total_tokens / max_steps
+    band_high = total_tokens / min_steps
+    return {
+        "parallelism_floor": floor,
+        "band_low": band_low,
+        "band_high": band_high,
+        "max_tokens_per_batch": max(band_high, floor),
+        # When the smallest expressible batch already exceeds the step ceiling,
+        # no configuration on this topology can reach min_steps.
+        "floor_exceeds_band": floor > band_high,
+        "implied_steps_at_floor": total_tokens / floor,
+    }
 
 # Hardware memory specifications (GB)
 #

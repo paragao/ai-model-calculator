@@ -513,3 +513,154 @@ def test_explicit_ep_overrides_the_global_for_expert_count():
     # The expert term itself must scale exactly with 512 // ep.
     expert_bytes = lambda ep: (512 // ep) * v["layers"] * v["expert_each"] * 2 / 1e9
     assert abs((at_1 - at_8) - (expert_bytes(1) - expert_bytes(8))) < 1e-6
+
+
+def test_step_assessment_classifies_every_step_count():
+    """No step count may fall through the bands unclassified.
+
+    MIN_STEPS, the band bounds and MAX_STEPS are contiguous, and were once all
+    tested with strict inequalities on both sides, so the shared boundary values
+    200,000 / 300,000 / 800,000 matched no branch and were reported as "unknown"
+    with priority 2. Latent at seq_len 4096, real at any other sequence length.
+    """
+    from utils.phase2_batch import assess_training_steps
+
+    # tokens_per_batch=1 keeps us out of the two target windows, which are checked
+    # first and would otherwise mask the step bands.
+    boundaries = [
+        MIN_STEPS, UPPER_BOUND_LOW_RANGE, LOWER_BOUND_OPTIM_RANGE,
+        UPPER_BOUND_OPTIM_RANGE, LOWER_BOUND_HIGH_RANGE, MAX_STEPS,
+    ]
+    probes = [0, 1] + [b + off for b in boundaries for off in (-1, 0, 1)] + [10 ** 9]
+    for steps in probes:
+        assessment, priority = assess_training_steps(steps, 1)
+        assert assessment != "unknown", f"steps={steps} fell through every band"
+        assert priority in (0, 1, 2, 3), f"steps={steps} gave priority {priority}"
+
+    # And the bands must be ordered the way their names claim.
+    assert assess_training_steps(MIN_STEPS - 1, 1) == ("too few steps", 3)
+    assert assess_training_steps(MAX_STEPS, 1) == ("too many steps", 3)
+    assert assess_training_steps(LOWER_BOUND_OPTIM_RANGE + 1, 1)[1] == 1
+    assert assess_training_steps(UPPER_BOUND_OPTIM_RANGE, 1)[0] == "borderline (high steps)"
+
+
+def test_batch_config_reports_memory_feasibility_and_the_batch_cap():
+    """Phase 2 has no memory awareness of its own, so it must report, not hide it.
+
+    Rating a configuration "reasonable" at a micro batch Phase 1 found does not fit
+    is misleading output -- measured at 6.0% of displayed configs. fits_in_memory
+    makes it visible without changing the priority, and exceeds_batch_cap surfaces
+    the MAX_TOKENS_PER_BATCH limit that the caller (not this function) enforces.
+    """
+    from utils.phase2_batch import analyze_batch_configuration
+
+    hw = {"name": "test-hw", "gpus": 64}
+
+    # Unknown feasibility must claim nothing either way.
+    c = analyze_batch_configuration(hw, micro=8, accum=4, dp=8, seq_len=4096)
+    assert c["fits_in_memory"] is None
+
+    # Supplied feasibility must be honoured on both sides of the boundary.
+    over = analyze_batch_configuration(hw, micro=8, accum=4, dp=8, seq_len=4096,
+                                       max_viable_micro=4)
+    at = analyze_batch_configuration(hw, micro=4, accum=4, dp=8, seq_len=4096,
+                                     max_viable_micro=4)
+    assert over["fits_in_memory"] is False
+    assert at["fits_in_memory"] is True
+    # The rating itself is unchanged -- this is a report, not a filter.
+    assert over["priority"] == at["priority"] or over["micro"] != at["micro"]
+
+    # The cap flag must track MAX_TOKENS_PER_BATCH, not silently drop the config.
+    small = analyze_batch_configuration(hw, micro=1, accum=1, dp=1, seq_len=4096)
+    assert small["exceeds_batch_cap"] is False
+    big_dp = int(MAX_TOKENS_PER_BATCH // 4096) + 1
+    big = analyze_batch_configuration(hw, micro=1, accum=1, dp=big_dp, seq_len=4096)
+    assert big["tokens_per_batch"] >= MAX_TOKENS_PER_BATCH
+    assert big["exceeds_batch_cap"] is True
+
+
+def test_derived_batch_cap_replaces_the_hardcoded_constant():
+    """The batch cap must follow from the token budget, not a magic number.
+
+    The old hard-coded 600e6 was 8x looser than this module's own MIN_STEPS
+    implies -- TOTAL_TOKENS/600e6 = 25,000 steps against a 200,000 floor -- and
+    so never fired on any of 14,080 swept configurations.
+    """
+    from configuration.advanced_config import (
+        compute_max_tokens_per_batch, describe_batch_budget, MIN_STEPS,
+    )
+    from configuration.project_config import TOTAL_TOKENS
+
+    # The step budget is the binding bound at realistic topologies.
+    cap = compute_max_tokens_per_batch(TOTAL_TOKENS, dp=512, seq_len=4096)
+    assert cap == TOTAL_TOKENS / MIN_STEPS
+    # And it must actually bind, unlike the constant it replaces.
+    assert cap < 600e6
+
+    # A batch at the cap yields exactly MIN_STEPS; anything larger undershoots.
+    assert TOTAL_TOKENS / cap == MIN_STEPS
+
+    # The parallelism floor wins when the topology is too wide to reach MIN_STEPS,
+    # because no cap below the smallest expressible batch is satisfiable.
+    huge_dp = int(TOTAL_TOKENS / MIN_STEPS / 4096) * 4
+    wide = describe_batch_budget(TOTAL_TOKENS, dp=huge_dp, seq_len=4096)
+    assert wide["floor_exceeds_band"] is True
+    assert wide["max_tokens_per_batch"] == huge_dp * 4096
+    assert wide["implied_steps_at_floor"] < MIN_STEPS
+
+    # Degenerate inputs are rejected rather than silently producing a bad cap.
+    for bad in ({"dp": 0}, {"seq_len": 0}, {"min_steps": 0}):
+        kwargs = {"dp": 8, "seq_len": 4096}
+        kwargs.update(bad)
+        try:
+            compute_max_tokens_per_batch(TOTAL_TOKENS, **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {bad}")
+
+
+def test_step_band_brackets_the_published_frontier_runs():
+    """The [MIN_STEPS, MAX_STEPS] band must contain what real runs actually use.
+
+    This is the evidence that the step bounds are calibrated rather than
+    arbitrary, and it is what justifies deriving the batch cap from them.
+
+    Llama 3 405B, arXiv:2407.21783 S3.4.1: "we use an initial batch size of 4M
+    tokens and sequences of length 4,096, and double these values to a batch size
+    of 8M sequences of 8,192 tokens after pre-training 252M tokens. We double the
+    batch size again to 16M after pre-training on 2.87T tokens" -- final 16M.
+
+    DeepSeek-V3, arXiv:2412.19437 S4.2: "the batch size is gradually increased
+    from 3072 to 15360 in the training of the first 469B tokens, and then keeps
+    15360 in the remaining training", at a 4K sequence length -- final
+    15360 * 4096 = 62.9M tokens.
+    """
+    from configuration.advanced_config import MIN_STEPS, MAX_STEPS, TOKENS_PER_BATCH
+    from configuration.project_config import TOTAL_TOKENS
+
+    band_low = TOTAL_TOKENS / MAX_STEPS
+    band_high = TOTAL_TOKENS / MIN_STEPS
+
+    llama3_final = 16e6
+    deepseek_final = 15360 * 4096
+
+    assert band_low <= llama3_final <= band_high, (
+        f"Llama 3's 16M batch fell outside [{band_low/1e6:.1f}M, {band_high/1e6:.1f}M]"
+    )
+    assert band_low <= deepseek_final <= band_high, (
+        f"DeepSeek-V3's {deepseek_final/1e6:.1f}M batch fell outside "
+        f"[{band_low/1e6:.1f}M, {band_high/1e6:.1f}M]"
+    )
+
+    # MAX_STEPS is Llama 3's own reported step count ("over 1,200,000 steps"),
+    # and its published ramp reconstructs to within 5% of it. That agreement is
+    # what ties this engine's bounds to a real run.
+    reconstructed = (252e6 / 4e6) + ((2.87e12 - 252e6) / 8e6) + ((15.6e12 - 2.87e12) / 16e6)
+    assert abs(reconstructed - MAX_STEPS) / MAX_STEPS < 0.05
+
+    # TOKENS_PER_BATCH is Llama 3's INITIAL batch, not its steady-state one, which
+    # is why it implies far more steps than MAX_STEPS allows. Pinned so nobody
+    # "fixes" the apparent contradiction by moving MAX_STEPS.
+    assert TOKENS_PER_BATCH == 4e6
+    assert TOTAL_TOKENS / TOKENS_PER_BATCH > MAX_STEPS

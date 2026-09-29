@@ -194,6 +194,10 @@ def generate_report(variants, hardware):
         for v in variants:
             layers_per_gpu = v["layers"] // PP
             result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
+            # Tag with the hardware this result belongs to. The list is appended in
+            # hardware order, but positional indexing is fragile and Phase 2 needs
+            # to look a result up by (variant, hardware) to check batch feasibility.
+            result["hardware"] = hw["name"]
             all_results["variants"][v["name"]].append(result)
 
     recommendations = generate_recommendations(all_results)
@@ -283,6 +287,11 @@ def run(variants, hardware, *, report=False):
 
             # Use the new analyze_variant_memory function
             result = analyze_variant_memory(v, hw, dp, layers_per_gpu, EXPERTS_PER_GPU)
+
+            # Tag with the hardware this result belongs to. The list is appended in
+            # hardware order, but positional indexing is fragile and Phase 2 needs
+            # to look a result up by (variant, hardware) to check batch feasibility.
+            result["hardware"] = hw["name"]
 
             # Store result for later analysis and export
             all_results["variants"][v["name"]].append(result)
@@ -391,15 +400,31 @@ def run(variants, hardware, *, report=False):
 
             hw_configs = []
 
+            # Batch cap derived from the token budget and this topology, rather
+            # than a hard-coded constant. The old 600M value was 8x looser than
+            # MIN_STEPS implies and so never fired on any configuration.
+            batch_cap = compute_max_tokens_per_batch(TOTAL_TOKENS, dp, v_seq_len)
+
+            # Phase 1's verdict for this exact (variant, hardware) pair, so Phase 2
+            # can mark a configuration whose micro batch does not fit. Looked up by
+            # the hardware name tagged onto the result rather than by list position.
+            p1 = next(
+                (r for r in all_results["variants"].get(variant_name, [])
+                 if r.get("hardware") == hw["name"]),
+                None,
+            )
+            max_viable_micro = p1.get("best_micro") if p1 else None
+
             for micro in MICROS:
                 for accum in GRAD_ACCUM_VALUES:
                     # Analyze this configuration (per-variant sequence length)
                     config = analyze_batch_configuration(
-                        hw, micro, accum, dp, seq_len=v_seq_len, variant_name=variant_name
+                        hw, micro, accum, dp, seq_len=v_seq_len, variant_name=variant_name,
+                        max_viable_micro=max_viable_micro,
                     )
 
                     # Only display if tokens per batch is reasonable
-                    if config["tokens_per_batch"] < MAX_TOKENS_PER_BATCH:
+                    if config["tokens_per_batch"] < batch_cap:
                         hw_configs.append(config)
 
                         # Format assessment with color
