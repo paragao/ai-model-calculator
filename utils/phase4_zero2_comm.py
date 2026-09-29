@@ -101,18 +101,17 @@ def calculate_communication_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
     """
     # Reduce-scatter volume per rank, in parameter-memory units.
     #
-    # ZeRO-2 reduce-scatters the GRADIENTS, which are one tensor per parameter and
-    # therefore exactly one parameter replica in size -- not two. In a ring
-    # reduce-scatter each rank sends and receives (DP-1)/DP of a full replica,
-    # which approaches 1.0 as DP grows rather than shrinking with DP.
+    # ZeRO paper (arXiv:1910.02054v3) sec 7.2.1: the gradient scatter-reduce incurs
+    # "communication volume of Psi" -- one parameter replica, since there is one
+    # gradient per parameter. Together with the Psi all-gather that follows, the
+    # step totals 2*Psi, "exactly the same as the baseline DP".
     #
-    # Was `model_mem_gb * 2 / dp_val`: the factor 2 counted model + gradients when
-    # only gradients move, and dividing by DP made communication appear to vanish
-    # as DP grew. At DP=64 the two errors combined understated the volume ~31x.
+    # The paper states Psi; the exact pipelined-ring figure is (DP-1)/DP * Psi,
+    # used here, which approaches Psi as DP grows rather than shrinking with DP.
     #
-    # ZeRO-1 and ZeRO-2 both total 2*Psi bytes per step -- the same as a baseline
-    # data-parallel all-reduce -- and that total is independent of GPU count.
-    # This reduce-scatter contributes Psi and the all-gather the other Psi.
+    # Was `model_mem_gb * 2 / dp_val`: the 2 counted model + gradients when only
+    # gradients move, and the /DP made communication appear to vanish as DP grew --
+    # the two errors combined understated the volume ~31x at DP=64.
     ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
     rs_volume_mb = model_mem_gb * ring_fraction * 1000
 

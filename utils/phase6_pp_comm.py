@@ -73,24 +73,40 @@ def calculate_pp_communication(layers, hidden_dim, seq_len, mbs, gbs, pp, vp, dp
     # Total traffic
     total_traffic_gb = total_sends_per_step * activation_size_bytes / 1e9
 
-    # Pipeline bubble percentage
-    # Interleaved: bubble = (pp-1) / (num_microbatches * vp)
-    # Standard: bubble = (pp-1) / num_microbatches
+    # Pipeline bubble fraction.
+    #
+    # Standard GPipe / 1F1B:  (pp - 1) / (m + pp - 1)
+    # Interleaved (VP = v):   (pp - 1) / (v*m + pp - 1)
+    #
+    # The denominator MUST include the (pp - 1) fill/drain term. The previous form
+    # was (pp - 1) / m, which omits it and is only a large-m approximation -- for
+    # m < pp it returns a bubble ABOVE 100%, which is impossible for a fraction of
+    # idle time. Measured: pp=16, m=8 gave 187.5%, and this value feeds the Phase 3
+    # time estimate directly as a multiplier.
+    #
+    # Interleaving divides the bubble by the virtual-stage count v, which is the
+    # point of the interleaved schedule.
     effective_microbatches = num_microbatches * vp if vp > 1 else num_microbatches
-    pipeline_bubble_pct = ((pp - 1) / effective_microbatches * 100
-                           if effective_microbatches > 0 else 100)
+    denom = effective_microbatches + pp - 1
+    pipeline_bubble_pct = ((pp - 1) / denom * 100) if denom > 0 else 100.0
 
     # Determine communication type
     # PP stages within same node use NVLink; cross-node uses EFA
     is_inter_node = pp > gpus_per_node
     comm_type = "inter-node (EFA)" if is_inter_node else "intra-node (NVLink)"
 
-    # Time per send: inter-node P2P only uses 1-2 of 16 NICs on EFA
-    # Intra-node uses NVLink at much higher effective bandwidth
+    # Time per send. A PP point-to-point send engages only a small fraction of the
+    # node's EFA capacity, because it is one rank talking to one rank rather than a
+    # collective spread across all NICs.
+    #
+    # EFA_PP_EFFICIENCY is EMPIRICAL (0.016). Its two previously stated rationales
+    # were both wrong and are not restated here: "1-2 of 16 NICs" would be 0.0625
+    # or 0.125, and 400 GB/s * 0.016 is 6.4 GB/s, not the "~3.2 GB/s" claimed.
+    # Treat it as a calibration constant, not a derived one.
     if is_inter_node:
-        effective_bw_gbps = inter_node_bw_gb * EFA_PP_EFFICIENCY  # ~3.2 GB/s on EFA
+        effective_bw_gbps = inter_node_bw_gb * EFA_PP_EFFICIENCY
     else:
-        effective_bw_gbps = intra_node_bw_gbps  # e.g., 1800 GB/s NVLink
+        effective_bw_gbps = intra_node_bw_gbps  # full NVLink, e.g. 1800 GB/s
     time_per_send_s = (activation_size_bytes / 1e9) / effective_bw_gbps if effective_bw_gbps > 0 else 0
     time_per_send_us = time_per_send_s * 1e6
 

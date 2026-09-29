@@ -107,20 +107,25 @@ def calculate_zero1_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
     """
     # All-gather volume per rank, in parameter-memory units.
     #
-    # ZeRO-1 all-gathers the updated PARAMETERS after the optimizer step, so the
-    # quantity moved is one parameter replica -- NOT the fp32 optimizer state.
-    # In a ring all-gather each rank already holds 1/DP of the result, so it must
-    # send and receive (DP-1)/DP of a full replica. That approaches 1.0 as DP
-    # grows; it does NOT shrink with DP.
+    # ZeRO paper (arXiv:1910.02054v3) sec 7.1 and 7.2.1, verbatim:
+    #   "Both reduce-scatter and all-gather ... results in a total data movement of
+    #    Psi elements (for a data with Psi elements) for each. Therefore, the
+    #    standard DP incurs 2*Psi data movement during each training step."
+    #   "instead of an all-reduce, ZeRO only requires a scatter-reduce operation on
+    #    the gradients, incurring communication volume of Psi. After each process
+    #    updates the partition of the parameters that it is responsible for, an
+    #    all-gather is performed ... This also incurs a communication volume of Psi.
+    #    So the total communication volume per training step is Psi+Psi=2*Psi,
+    #    exactly the same as the baseline DP."
     #
-    # Was `model_mem_gb * 3 / dp_val`, which was wrong twice over: the factor 3
-    # was the fp32 optimizer state expressed in parameter-memory units (not the
-    # all-gathered quantity), and dividing by DP made communication appear to
-    # vanish as DP grew. At DP=64 that understated the volume 21x.
+    # So this all-gather moves ONE parameter replica per process. The paper states
+    # Psi; the exact pipelined-ring figure is (DP-1)/DP * Psi, used here, which
+    # approaches Psi as DP grows. It does NOT shrink with DP.
     #
-    # ZeRO-1 and ZeRO-2 both total 2*Psi bytes per step -- the same as a baseline
-    # data-parallel all-reduce -- and that total is independent of GPU count.
-    # Reduce-scatter contributes Psi and this all-gather the other Psi.
+    # Was `model_mem_gb * 3 / dp_val`, wrong twice over: the 3 was the fp32
+    # optimizer state expressed in parameter-memory units rather than the quantity
+    # all-gathered, and the /DP made communication appear to vanish as DP grew --
+    # 21x understated at DP=64.
     ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
     ag_volume_mb = model_mem_gb * ring_fraction * 1000
 

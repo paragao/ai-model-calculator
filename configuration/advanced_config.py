@@ -18,6 +18,14 @@ from .project_config import PRECISION
 TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
 
 # ZeRO optimization strategies with efficiency multipliers
+#
+# KNOWN GAP -- there is no ZeRO-3 communication phase. Phase 4 models ZeRO-2
+# (reduce-scatter) and Phase 4.1 models ZeRO-1 (all-gather), but ZeRO-3's extra
+# parameter all-gathers are not modelled anywhere. The ZeRO paper
+# (arXiv:1910.02054v3 sec 7.2.2) puts ZeRO-3 at 3*Psi per step against 2*Psi for
+# ZeRO-1/2, i.e. 1.5x baseline DP -- so selecting ZeRO-3 gets its memory saving
+# with none of its communication cost. The `eff` multipliers below are the only
+# thing standing in for it, and they are empirical rather than derived.
 ZERO_STRATEGY = [
     {"zero": 1, "eff": 1.0},   # ZeRO-1: Optimizer states sharded, best efficiency
     {"zero": 2, "eff": 0.9},   # ZeRO-2: Optimizer + gradients sharded, 10% overhead
