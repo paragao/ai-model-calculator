@@ -10,8 +10,10 @@ Instance specifications:
 - p5en.48xlarge:     8x H200 SXM 141GB,  3200 Gbps EFAv3 = 400 GB/s, 900 GB/s NVLink, 989 BF16 TFLOPS/GPU
 - p6-b200.48xlarge:  8x B200 180GB,      3200 Gbps EFAv4 = 400 GB/s, 1800 GB/s NVLink5, 2250 BF16 TFLOPS/GPU
 - p6-b300.48xlarge:  8x B300 Ultra 268GB, 6400 Gbps EFAv4 = 800 GB/s, 1800 GB/s NVLink5, 2250 BF16 TFLOPS/GPU
-- p6e-gb200.36xlarge: 4x GB200 NVL 185GB, 3200 Gbps EFAv4 = 400 GB/s, 900 GB/s NVLink, 2500 BF16 TFLOPS/GPU
-  (reference specs only -- not present in HARDWARE below; pass it via --hardware)
+- p6e-gb200 UltraServer: 72x GB200 NVL 186GB in ONE NVLink domain,
+                     28800 Gbps EFAv4 = 3600 GB/s per UltraServer, 1800 GB/s NVLink5,
+                     2500 BF16 TFLOPS/GPU. A "node" is the UltraServer (72 GPUs),
+                     NOT the 4-GPU p6e-gb200.36xlarge instance -- see the block below.
 - g5.48xlarge:       8x A10G 24GB,       100 Gbps ENA   = 12.5 GB/s, 64 GB/s PCIe, 35 BF16 TFLOPS/GPU
 - g6.48xlarge:       8x L4 24GB,         100 Gbps ENA   = 12.5 GB/s, 64 GB/s PCIe, 121 BF16 TFLOPS/GPU
 - g6e.48xlarge:      8x L40S 48GB,       400 Gbps ENA   = 50 GB/s, 64 GB/s PCIe, 366 BF16 TFLOPS/GPU
@@ -65,6 +67,28 @@ HARDWARE = [
     {"name": "128 p6-b300", "gpus": 1024, "nodes": 128, "mem_gb": 268, "label": "1024_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
     {"name": "256 p6-b300", "gpus": 2048, "nodes": 256, "mem_gb": 268, "label": "2048_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
     {"name": "512 p6-b300", "gpus": 4096, "nodes": 512, "mem_gb": 268, "label": "4096_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
+    # =============================================
+    # p6e-gb200 UltraServer (GB200 NVL72, 186 GB/GPU)
+    #
+    # A "node" here is ONE ULTRASERVER, not one EC2 instance. The UltraServer
+    # u-p6e-gb200x72 is 18 x p6e-gb200.36xlarge (4 GPUs each) = 72 GPUs sharing
+    # ONE NVLink domain, so gpus_per_node must be 72: a PP of up to 72 stays on
+    # NVLink. Modelling a node as the 4-GPU instance would wrongly push any
+    # PP > 4 onto EFA, which is ~36x slower per send.
+    #
+    # Verified against AWS: 72 Blackwell GPUs in one NVLink domain, 360 PFLOPS
+    # dense FP8 (no sparsity), 13.4 TB HBM3e, up to 28.8 Tbps EFAv4.
+    #   mem_gb           13.4 TB / 72          = 186 GB per GPU
+    #   peak_tflops_bf16 360 PFLOPS FP8 / 72   = 5000 TFLOPS FP8 -> 2500 BF16
+    #   inter_node_bw_gb 28800 Gbps / 8        = 3600 GB/s per UltraServer
+    #                    (= 50 GB/s per GPU, the same ratio as p5's 3200/8)
+    #   intra_node_bw_gbps NVLink5 bidirectional, as for B200/B300
+    # https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-p6e-gb200-ultraservers-gpu-performance-ec2
+    # =============================================
+    {"name": "1 p6e-gb200", "gpus": 72, "nodes": 1, "mem_gb": 186, "label": "72_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    {"name": "2 p6e-gb200", "gpus": 144, "nodes": 2, "mem_gb": 186, "label": "144_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    {"name": "4 p6e-gb200", "gpus": 288, "nodes": 4, "mem_gb": 186, "label": "288_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    {"name": "8 p6e-gb200", "gpus": 576, "nodes": 8, "mem_gb": 186, "label": "576_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # =============================================
     # g5.48xlarge (A10G, 24 GB)
     # =============================================
