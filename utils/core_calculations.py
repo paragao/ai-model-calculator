@@ -308,7 +308,13 @@ def calculate_memory_for_micro(
         moe_frac = 0.0
         dense_frac = 1.0
 
-    # Calculate gradient and optimizer memory based on ZeRO strategy
+    # Calculate parameter, gradient and optimizer memory based on ZeRO strategy.
+    #
+    # param_mem is the RESIDENT parameter memory. ZeRO-1 and ZeRO-2 keep a full
+    # replica on every rank; only ZeRO-3 (Pos+g+p) partitions it. ZeRO paper
+    # (arXiv:1910.02054v3) sec 5.3: "With parameter partitioning, we reduce the
+    # memory consumption of an Psi parameter model from 16*Psi to 16*Psi/Nd."
+    param_mem = model_mem_gb
     if zero_strategy == 1:
         grad_mem = model_mem_gb
         # Optimizer: dense params sharded across full DP, MoE params across eff_dp_moe
@@ -325,6 +331,22 @@ def calculate_memory_for_micro(
         optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
         optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
         optim_mem = optim_dense + optim_moe
+        # Parameters are sharded too, using the same dense/MoE split as the
+        # optimizer above: MoE experts are only replicated within dp/ep ranks.
+        #
+        # Was absent entirely, so ZeRO-3 total memory came out BYTE-IDENTICAL to
+        # ZeRO-2 -- it paid ZeRO-3's 0.8 efficiency multiplier while delivering
+        # none of its parameter saving, and so could never be the right choice.
+        #
+        # LIMITATION -- this is the paper's resident-memory model and excludes the
+        # transient all-gather buffer that re-materializes the in-flight layer's
+        # parameters during forward/backward (plus any prefetch depth). Real ZeRO-3
+        # peak memory is therefore HIGHER than this; treat the figure as a lower
+        # bound. Modelling it needs a per-layer parameter size and a prefetch
+        # depth, neither of which is currently tracked.
+        param_dense = model_mem_gb * dense_frac / dp
+        param_moe = model_mem_gb * moe_frac / eff_dp_moe
+        param_mem = param_dense + param_moe
     else:
         raise ValueError(f"Unknown ZeRO strategy: {zero_strategy}")
 
@@ -386,12 +408,14 @@ def calculate_memory_for_micro(
     buffer_mem = a2a_buf + moe_dispatch_buf + nccl_workspace + pp_buf
 
     # --- Total with fragmentation ---
-    raw_total = model_mem_gb + grad_mem + optim_mem + activation_mem + buffer_mem
+    # param_mem, not model_mem_gb: they differ only under ZeRO-3, which shards the
+    # resident parameters. "model" reports what is actually resident on the GPU.
+    raw_total = param_mem + grad_mem + optim_mem + activation_mem + buffer_mem
     total_mem = raw_total * fragmentation_factor
 
     return {
         "total": total_mem,
-        "model": model_mem_gb,
+        "model": param_mem,
         "grad": grad_mem,
         "optim": optim_mem,
         "activation": activation_mem,
