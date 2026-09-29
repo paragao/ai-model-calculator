@@ -145,13 +145,20 @@ ATTENTION_FLOPS_FACTOR = 12
 # Accounts for CUDA caching allocator fragmentation, memory alignment, and
 # small transient buffers not explicitly modeled.
 #
-# INTERACTION with ZERO3_MAX_LIVE_PARAMS above -- this factor multiplies the total
-# INCLUDING the now-explicit ZeRO-3 transient all-gather buffer. That is correct if
-# the calibration run used ZeRO-1 or ZeRO-2, which never gather parameters and so
-# contributed no gather buffer to the measured 150 GB. If it used ZeRO-3, part of
-# the 1.24x already absorbed that buffer and ZeRO-3 totals now double-count it.
-# The calibration note does not record the stage, so this is UNRESOLVED; it affects
-# only ZeRO-3 rows, and re-calibrating needs a profiled run with a known stage.
+# INTERACTION with ZERO3_MAX_LIVE_PARAMS above -- RESOLVED, no double-count.
+# This factor multiplies the total INCLUDING the explicit ZeRO-3 transient
+# all-gather buffer, which would double-count if the calibration run had itself
+# been a ZeRO-3 run. It was not:
+#   1. utils/validate_moe_memory.py, the harness that reproduces the measured
+#      150 GB, pins zero_strategy=1 explicitly.
+#   2. That config is PP=8, EP=8, TP=1 on 64 GPUs, so DP = 64/(8*1*1*8) = 1.
+#      At DP=1 every ZeRO /dp divisor is a no-op and ZeRO-1 and ZeRO-2 are
+#      byte-identical (124.2 GB raw for both), so no stage shards anything and a
+#      real run at that width would not be gathering parameters either.
+#   3. zero3_transient is therefore 0.00 GB for the calibration config, so the
+#      1.24x was fitted to a raw total containing NONE of that buffer.
+# For scale, had the calibration been ZeRO-3 the buffer would have contributed
+# 2.00 GB of a 124.2 GB raw total, i.e. 1.6% -- so even the worst case was small.
 FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching allocator
 
 # Memory utilization
