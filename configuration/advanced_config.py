@@ -19,13 +19,18 @@ TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
 
 # ZeRO optimization strategies with efficiency multipliers
 #
-# KNOWN GAP -- there is no ZeRO-3 communication phase. Phase 4 models ZeRO-2
-# (reduce-scatter) and Phase 4.1 models ZeRO-1 (all-gather), but ZeRO-3's extra
-# parameter all-gathers are not modelled anywhere. The ZeRO paper
-# (arXiv:1910.02054v3 sec 7.2.2) puts ZeRO-3 at 3*Psi per step against 2*Psi for
-# ZeRO-1/2, i.e. 1.5x baseline DP -- so selecting ZeRO-3 gets its memory saving
-# with none of its communication cost. The `eff` multipliers below are the only
-# thing standing in for it, and they are empirical rather than derived.
+# Communication for all three stages is now modelled: phase 4 covers ZeRO-2
+# (gradient reduce-scatter), phase 4.1 covers ZeRO-1 (parameter all-gather), and
+# phase 4.2 covers ZeRO-3 (two parameter all-gathers plus the gradient
+# reduce-scatter). Per the ZeRO paper (arXiv:1910.02054v3 sec 7.2.1-7.2.2),
+# ZeRO-1 and ZeRO-2 each total 2*Psi per step -- the same as baseline DP -- while
+# ZeRO-3 totals 3*Psi, a fixed 1.5x.
+#
+# The `eff` multipliers below are EMPIRICAL and are not derived from those
+# volumes. They are a separate, coarser knob applied to training time in phase 3;
+# the per-stage volumes in phases 4/4.1/4.2 are the physics. Note the ordering
+# below is consistent with the paper (ZeRO-3 costs more than ZeRO-1/2), but the
+# specific 0.9 and 0.8 values are uncalibrated.
 ZERO_STRATEGY = [
     {"zero": 1, "eff": 1.0},   # ZeRO-1: Optimizer states sharded, best efficiency
     {"zero": 2, "eff": 0.9},   # ZeRO-2: Optimizer + gradients sharded, 10% overhead
