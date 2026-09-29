@@ -105,13 +105,21 @@ def analyze_batch_configuration(hw, micro, accum, dp, seq_len=None, variant_name
         - assessment: Assessment string
         - priority: Priority level (0-3, lower is better)
         - hardware: Hardware name
-        - exceeds_batch_cap: True when tokens_per_batch is at or above
-          MAX_TOKENS_PER_BATCH. This function does NOT drop such a configuration --
+        - exceeds_batch_cap: True when tokens_per_batch is at or above the cap
+          DERIVED for this configuration by compute_max_tokens_per_batch, i.e.
+          max(TOTAL_TOKENS / MIN_STEPS, dp * seq_len) -- not the fixed
+          MAX_TOKENS_PER_BATCH constant, which is 8x looser than MIN_STEPS implies
+          and so never fired. This function does NOT drop such a configuration --
           the cap is applied by the caller in model_calculations, so it is reported
           here rather than enforced, and a caller that omits the filter would
-          otherwise surface it silently. Inert at PP>=4 (max 536.9M against the
-          600M cap on 512 p5) but live at PP=1 and PP=2, which reach 2147.5M and
-          1073.7M.
+          otherwise surface it silently.
+
+          Consequence worth knowing when reading the CSV: because the default
+          pipeline DOES filter, every exported row is already under the cap, so
+          this column is uniformly False there (max exported batch 67.1M against a
+          75.0M cap). It carries information only for a caller that skips the
+          filter. Over the full sweep 352 of 14,080 configs exceed the derived cap;
+          against the old fixed 600e6 constant, zero did.
         - fits_in_memory: True/False when max_viable_micro was supplied, else None
     """
     if seq_len is None:
@@ -130,7 +138,9 @@ def analyze_batch_configuration(hw, micro, accum, dp, seq_len=None, variant_name
         "steps": steps,
         "assessment": assessment,
         "priority": priority,
-        "exceeds_batch_cap": tokens_per_batch >= MAX_TOKENS_PER_BATCH,
+        "exceeds_batch_cap": tokens_per_batch >= compute_max_tokens_per_batch(
+            TOTAL_TOKENS, dp, seq_len
+        ),
         "fits_in_memory": None if max_viable_micro is None else micro <= max_viable_micro,
     }
 
@@ -212,7 +222,8 @@ def export_batch_results_csv(batch_results, filename):
 
     with open(filename, 'w', newline='') as f:
         fieldnames = ['variant', 'hardware', 'seq_len', 'micro_batch', 'grad_accum',
-                      'tokens_per_batch_M', 'training_steps', 'assessment', 'priority']
+                      'tokens_per_batch_M', 'training_steps', 'assessment', 'priority',
+                      'fits_in_memory', 'exceeds_batch_cap']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -227,7 +238,16 @@ def export_batch_results_csv(batch_results, filename):
                     'tokens_per_batch_M': config['tokens_per_batch'] / 1e6,
                     'training_steps': int(config['steps']),
                     'assessment': config['assessment'],
-                    'priority': config['priority']
+                    'priority': config['priority'],
+                    # Both may be absent or None: fits_in_memory is None when the
+                    # caller did not supply Phase 1's max viable micro, and an
+                    # empty cell must stay distinguishable from False. Writing ''
+                    # rather than coercing to a bool keeps "not assessed" and
+                    # "assessed, does not fit" apart in the export.
+                    'fits_in_memory': ('' if config.get('fits_in_memory') is None
+                                       else config['fits_in_memory']),
+                    'exceeds_batch_cap': ('' if config.get('exceeds_batch_cap') is None
+                                          else config['exceeds_batch_cap'])
                 }
                 writer.writerow(row)
     print(f"\n✅ Exported batch analysis to {filename}")
