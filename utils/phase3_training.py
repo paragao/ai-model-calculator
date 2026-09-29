@@ -50,6 +50,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     peak_tflops = hw["peak_tflops_bf16"]
     gpu_mem = hw["mem_gb"]
 
+    # Hybrid-attention models (Qwen3.5) interleave linear attention with full
+    # attention: full_attention_interval=4 means layer_types repeats
+    # [linear, linear, linear, full]. Linear attention is O(seq_len), so only
+    # the full-attention layers belong in the O(seq_len^2) FLOPs term.
+    # Absent or 1 => every layer is full attention (all other variants).
+    interval = variant.get("full_attention_interval", 1) or 1
+    full_attention_layers = variant["layers"] // interval if interval > 1 else variant["layers"]
+
     # Try ZeRO-1 first (better efficiency)
     viable_z1 = calculate_viable_micro_batch_sizes(
         variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=1,
@@ -116,6 +124,11 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
                 # Inputs needed for overhead (bubble + exposed comm) estimation
                 "dp": dp,
                 "layers": variant["layers"],
+                # Layers carrying FULL (quadratic) attention. Hybrid models
+                # interleave linear attention, which is O(seq_len) and must not
+                # enter the O(seq_len^2) term. full_attention_interval=4 means
+                # 1 full layer per 4 (Qwen3.5); absent means every layer is full.
+                "full_attention_layers": full_attention_layers,
                 "layers_per_gpu": layers_per_gpu,
                 "moe_layers_per_gpu": moe_layers_per_gpu,
                 "pp": PP,
@@ -235,7 +248,9 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
         platform["tok_batch"],
         bubble_fraction=bubble_fraction,
         exposed_comm_ms_per_step=exposed_comm_ms,
-        layers=platform["layers"],
+        # Only full-attention layers contribute the O(seq_len^2) term; linear
+        # attention is O(seq_len) and is already covered by the 6ND term.
+        layers=platform.get("full_attention_layers") or platform["layers"],
         hidden_dim=platform["hidden_dim"],
         seq_len=platform["seq_len"],
         attention_flops_factor=ATTENTION_FLOPS_FACTOR,

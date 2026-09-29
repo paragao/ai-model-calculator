@@ -29,10 +29,16 @@ def calculate_model_memory_gb(
         layers_per_gpu: Number of layers per GPU (total_layers // PP)
         experts_per_gpu: Number of experts per GPU (N_EXPERTS // EP)
         param_bytes: Bytes per parameter (2 for BF16, 1 for FP8)
-        vocab: Vocabulary size
+        vocab: Vocabulary size. Used only as a FALLBACK -- a variant carrying
+            its own "vocab" key overrides it, because the global default is
+            correct for just the Qwen3 family (Llama-3.x 128256,
+            Llama-4 202048, Qwen2.5 152064, Qwen3.5 248320, DeepSeek 129280).
         layer_norm: Layer norm constant (typically 2)
         ffn_weight_matrices: FFN weight matrices constant (typically 3)
-        num_embeddings_tables: Number of embedding tables (typically 2)
+        num_embeddings_tables: Number of embedding tables (typically 2:
+            input embedding + output LM head). Reduced to 1 for a variant
+            with "tied_embeddings": True, where the LM head IS the input
+            embedding matrix and counting it twice overstates the model.
         tp: Tensor parallelism degree (default 1). TP shards attention,
             FFN, expert, and embedding weights across tp GPUs.
 
@@ -42,6 +48,17 @@ def calculate_model_memory_gb(
     d = variant["d"]
     layers = variant["layers"]
     moe_layers = layers - variant["dense_layers"]
+
+    # experts_per_gpu arrives as the GLOBAL N_EXPERTS // EP, which is right only
+    # for models that actually have N_EXPERTS experts. A variant declaring its
+    # own count overrides it, because the global is wrong in both directions:
+    # Llama-4-Scout has 16 experts (global 128 overstates routed memory 8x),
+    # while Qwen3.5-397B has 512 and DeepSeek 256 (understated 4x and 2x).
+    # Note moe_layer_params in the catalog already reflects the true count, but
+    # it is metadata -- the memory path below uses expert_each * experts_per_gpu.
+    variant_experts = variant.get("num_experts")
+    if variant_experts and EP > 0:
+        experts_per_gpu = max(1, variant_experts // EP)
 
     # When using pipeline parallelism, only a fraction of MoE layers are on this GPU.
     # Approximate: distribute MoE layers proportionally to total layers.
@@ -63,7 +80,8 @@ def calculate_model_memory_gb(
         * variant["dense_ffn"]
         * param_bytes
     )
-    embed_mem = num_embeddings_tables * vocab * d * param_bytes
+    embed_tables = 1 if variant.get("tied_embeddings") else num_embeddings_tables
+    embed_mem = embed_tables * variant.get("vocab", vocab) * d * param_bytes
 
     # TP shards attention, FFN, expert, and embedding weights across tp GPUs.
     # Layer norm and router weights are small and replicated (not sharded).

@@ -24,6 +24,7 @@ Derived fields are computed using:
 LLAMA_DENSE_VARIANTS = [
     {
         "name": "Llama-3.1-8B",
+        "vocab": 128_256,
         "layers": 32,
         "d": 4096,
         "expert_ffn": 0,
@@ -44,6 +45,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.1-70B",
+        "vocab": 128_256,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -64,6 +66,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.1-405B",
+        "vocab": 128_256,
         "layers": 126,
         "d": 16384,
         "expert_ffn": 0,
@@ -84,6 +87,8 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.2-3B",
+        "vocab": 128_256,
+        "tied_embeddings": True,
         "layers": 28,
         "d": 3072,
         "expert_ffn": 0,
@@ -104,6 +109,7 @@ LLAMA_DENSE_VARIANTS = [
     },
     {
         "name": "Llama-3.3-70B",
+        "vocab": 128_256,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -129,8 +135,23 @@ LLAMA_DENSE_VARIANTS = [
 # ============================================================================
 
 LLAMA4_MOE_VARIANTS = [
+    # Both Llama-4 variants are multimodal (Llama4ForConditionalGeneration with a
+    # vision_config: 34 layers, hidden 1408, intermediate 5632, plus a 4096-dim
+    # projector). That tower is ~0.87 B parameters and this text-only engine does
+    # NOT model it, so published totals sit slightly ABOVE what is computed here:
+    #   Scout    107.77 B computed + 0.87 B vision = 108.64 B vs 109.0 published
+    #   Maverick 400.71 B computed + 0.87 B vision = 401.58 B vs 400.0 published
+    # Both are within rounding of the published figures, so the text accounting
+    # below is considered reconciled. Do not "close" the residual by inflating
+    # the text parameters.
+    #
+    # Also not modelled: non-uniform attention (no_rope_layers alternates
+    # 1,1,1,0 and attention_chunk_size is 8192 with cache_implementation hybrid).
     {
         "name": "Llama-4-Scout-17B-16E",
+        "vocab": 202_048,
+        "num_experts": 16,
+        "topk": 1,
         "layers": 48,
         "d": 5120,
         "expert_ffn": 8192,
@@ -142,15 +163,25 @@ LLAMA4_MOE_VARIANTS = [
         "active_params_B": 17.0,
         "attn_per_layer": 62_914_560,
         "expert_each": 125_829_120,
-        "shared_each": 0,
+        # Every Llama4TextMoe layer carries a shared_expert alongside the routed
+        # ones, sized at intermediate_size (8192), so 3 * 5120 * 8192. Was 0.
+        # NOTE: intermediate_size_mlp (16384) is VESTIGIAL for Scout --
+        # interleave_moe_layer_step=1 and moe_layers lists all 48 layers, so no
+        # dense MLP layer exists. Do not attribute the shortfall to it.
+        # https://huggingface.co/unsloth/Llama-4-Scout-17B-16E-Instruct/raw/main/config.json
+        "shared_each": 125_829_120,
         "router_each": 81_920,
-        "moe_layer_params": 2_013_347_840,
+        # 16 * 125_829_120 + 125_829_120 (shared) + 81_920 (router)
+        "moe_layer_params": 2_139_176_960,
         "dense_layer_params": 314_572_800,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
         "seq_len": 4096,
     },
     {
         "name": "Llama-4-Maverick-17B-128E",
+        "vocab": 202_048,
+        "num_experts": 128,
+        "topk": 1,
         "layers": 48,
         "d": 5120,
         "expert_ffn": 8192,
@@ -162,9 +193,13 @@ LLAMA4_MOE_VARIANTS = [
         "active_params_B": 17.0,
         "attn_per_layer": 62_914_560,
         "expert_each": 125_829_120,
-        "shared_each": 0,
+        # Shared expert per MoE layer, sized at intermediate_size (8192). Was 0.
+        # Maverick has interleave_moe_layer_step=2, so 24 MoE layers carry this
+        # and the other 24 are dense layers using intermediate_size_mlp (16384).
+        "shared_each": 125_829_120,
         "router_each": 655_360,
-        "moe_layer_params": 16_106_782_720,
+        # 128 * 125_829_120 + 125_829_120 (shared) + 655_360 (router)
+        "moe_layer_params": 16_232_611_840,
         "dense_layer_params": 314_572_800,
         "valid_pp": [1, 2, 3, 4, 6, 8, 12, 16, 24, 48],
         "seq_len": 4096,
@@ -178,6 +213,7 @@ LLAMA4_MOE_VARIANTS = [
 QWEN25_DENSE_VARIANTS = [
     {
         "name": "Qwen2.5-7B",
+        "vocab": 152_064,
         "layers": 28,
         "d": 3584,
         "expert_ffn": 0,
@@ -198,6 +234,7 @@ QWEN25_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen2.5-32B",
+        "vocab": 152_064,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -218,6 +255,7 @@ QWEN25_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen2.5-72B",
+        "vocab": 152_064,
         "layers": 80,
         "d": 8192,
         "expert_ffn": 0,
@@ -245,6 +283,7 @@ QWEN25_DENSE_VARIANTS = [
 QWEN3_DENSE_VARIANTS = [
     {
         "name": "Qwen3-8B",
+        "vocab": 151_936,
         "layers": 36,
         "d": 4096,
         "expert_ffn": 0,
@@ -266,6 +305,7 @@ QWEN3_DENSE_VARIANTS = [
     },
     {
         "name": "Qwen3-32B",
+        "vocab": 151_936,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -297,6 +337,9 @@ QWEN3_DENSE_VARIANTS = [
 QWEN3_MOE_VARIANTS = [
     {
         "name": "Qwen3-30B-A3B",
+        "vocab": 151_936,
+        "num_experts": 128,
+        "topk": 8,
         "layers": 48,
         "d": 2048,
         "expert_ffn": 768,
@@ -318,6 +361,9 @@ QWEN3_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3-235B-A22B",
+        "vocab": 151_936,
+        "num_experts": 128,
+        "topk": 8,
         "layers": 94,
         "d": 4096,
         "expert_ffn": 1536,
@@ -351,22 +397,27 @@ QWEN3_MOE_VARIANTS = [
 # linear_num_value_heads 48).
 #
 # Consequences of the simplification:
-#   - attn_per_layer is applied to all 64 layers, overstating attention memory.
-#   - the Phase 3 O(seq_len^2) attention term is applied to all 64 layers, but
-#     linear attention is O(seq_len), so long-context time is overstated and
-#     the error grows with context length.
+#   - attn_per_layer is applied to all layers, overstating attention memory.
+#     A linear-attention layer is NOT negligible: its GDN projections come to
+#     roughly 86% of a full-attention layer, so this is a modest overstatement,
+#     not a 4x one. Filling it in needs the verified GDN parameter count.
+#   - FIXED: the Phase 3 O(seq_len^2) term now counts only full-attention
+#     layers, via "full_attention_interval": 4 below. It previously applied to
+#     every layer, overstating long-context time by 54% at 32K and 141% at 128K.
 #
-# Also unmodelled: Qwen3.5 uses vocab_size 248320 (not the 151936 default in
-# project_config.py) and is multimodal (Qwen3_5ForConditionalGeneration with a
-# vision_config). head_dim 256 below IS correct, verified against
+# Qwen3.5 is also multimodal (Qwen3_5ForConditionalGeneration with a
+# vision_config), which this text-only engine does not model. vocab_size 248320
+# is now carried per-variant below. head_dim 256 IS correct, verified against
 # https://huggingface.co/Qwen/Qwen3.5-27B/raw/main/config.json
 #
-# Treat Qwen3.5 output as an upper bound on attention cost, not an estimate.
+# Treat Qwen3.5 attention MEMORY as an upper bound; its time estimate is sound.
 # ============================================================================
 
 QWEN35_DENSE_VARIANTS = [
     {
         "name": "Qwen3.5-27B",
+        "vocab": 248_320,
+        "full_attention_interval": 4,
         "layers": 64,
         "d": 5120,
         "expert_ffn": 0,
@@ -395,6 +446,10 @@ QWEN35_DENSE_VARIANTS = [
 QWEN35_MOE_VARIANTS = [
     {
         "name": "Qwen3.5-35B-A3B",
+        "vocab": 248_320,
+        "num_experts": 256,
+        "topk": 8,
+        "full_attention_interval": 4,
         "layers": 40,
         "d": 2048,
         "expert_ffn": 512,
@@ -416,6 +471,10 @@ QWEN35_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3.5-122B-A10B",
+        "vocab": 248_320,
+        "num_experts": 256,
+        "topk": 8,
+        "full_attention_interval": 4,
         "layers": 48,
         "d": 3072,
         "expert_ffn": 1024,
@@ -437,6 +496,10 @@ QWEN35_MOE_VARIANTS = [
     },
     {
         "name": "Qwen3.5-397B-A17B",
+        "vocab": 248_320,
+        "num_experts": 512,
+        "topk": 10,
+        "full_attention_interval": 4,
         "layers": 60,
         "d": 4096,
         "expert_ffn": 1024,
@@ -475,6 +538,9 @@ QWEN35_MOE_VARIANTS = [
 DEEPSEEK_VARIANTS = [
     {
         "name": "DeepSeek-V3",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
@@ -500,6 +566,9 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V3.1",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
@@ -525,6 +594,9 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V3.2",
+        "vocab": 129_280,
+        "num_experts": 256,
+        "topk": 8,
         "layers": 61,
         "d": 7168,
         "expert_ffn": 2048,
