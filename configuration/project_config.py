@@ -29,6 +29,14 @@ TIME_ESTIMATE_HIGH_MULTIPLIER = 1.25  # Pessimistic time estimate multiplier
 
 # Batch size matching tolerance
 MARGIN = 0.02  # Tolerance for matching target batch sizes (2% = 0.02)
+# NOTE: MARGIN now has NO code consumer. Its only use was the priority-0
+# "tokens_per_batch matches TOKENS_PER_BATCH within MARGIN" check in Phase 2, which
+# was unreachable (0 of 14,080 configurations) and was removed when batch
+# assessment became relative -- see phase2_batch.classify_step_outliers. Left in
+# place rather than deleted because removing a public config constant is a separate
+# decision; widening it would not revive the old check, since an exact
+# dp*micro*accum*seq_len product still cannot be made to land on an arbitrary
+# absolute target.
 
 # Derived values (automatically calculated)
 EXPERTS_PER_GPU = N_EXPERTS // EP if EP > 0 else 0  # Number of experts per GPU

@@ -164,7 +164,32 @@ FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching alloc
 # Memory utilization
 GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory
 
-# Training step boundaries (for assessing batch size quality)
+# Training step boundaries
+#
+# NO LONGER USED TO CLASSIFY BATCH CONFIGURATIONS. Phase 2 used to score each
+# configuration against these bands plus a priority-0 "matches TOKENS_PER_BATCH"
+# check; both were unusable and were replaced by a RELATIVE rule
+# (phase2_batch.classify_step_outliers): Phase 2 now reports the step count a
+# configuration implies and marks only the smallest and largest step counts within
+# a (variant, hardware) pair as outliers.
+#
+# Why the absolute bands went:
+#   - The priority-0 target check was UNREACHABLE. tokens_per_batch is
+#     dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
+#     absolute number: 0 hits across 14,080 swept configurations, so priority 0 was
+#     never returned and the optimal_configs list was always empty.
+#   - The bands DISAGREED with TOKENS_PER_BATCH. TOTAL_TOKENS / TOKENS_PER_BATCH =
+#     3,750,000 steps, 3.1x MAX_STEPS, while the optimal band implied a batch of
+#     18.8M-50.0M tokens, 5x-12x the configured target.
+#   - The verdict was useless in practice: 80.8% of configurations landed in "too
+#     many steps". Switching to the relative rule moved 10,076 of those to
+#     "reasonable" without anything about them changing -- which is the point, but
+#     also means "reasonable" now asserts only "not extreme among its siblings".
+#
+# STILL LIVE: MIN_STEPS is the step ceiling in compute_max_tokens_per_batch below,
+# and MIN_STEPS/MAX_STEPS bound the reported band in describe_batch_budget. The four
+# LOWER_/UPPER_BOUND_* constants are now unused by Phase 2; they are left in place
+# rather than deleted because removing them is a separate decision.
 LOWER_BOUND_OPTIM_RANGE = 300_000
 UPPER_BOUND_OPTIM_RANGE = 800_000
 LOWER_BOUND_LOW_RANGE = 200_000
@@ -173,23 +198,6 @@ LOWER_BOUND_HIGH_RANGE = 800_000
 UPPER_BOUND_HIGH_RANGE = 1_200_000
 MIN_STEPS = 200_000
 MAX_STEPS = 1_200_000
-
-# The step bounds above are CONTIGUOUS and are consumed as half-open intervals by
-# phase2_batch.assess_training_steps, so every step count is classified. They were
-# once all tested strictly on both sides, which left 200_000 / 300_000 / 800_000
-# matching no branch and reported as "unknown".
-#
-# UNRESOLVED -- these bounds DISAGREE with TOKENS_PER_BATCH in project_config:
-#   TOTAL_TOKENS / TOKENS_PER_BATCH = 15e12 / 4e6 = 3,750,000 steps, which is 3.1x
-#   MAX_STEPS. The optimal band instead implies a batch of
-#   TOTAL_TOKENS/UPPER_BOUND_OPTIM_RANGE .. TOTAL_TOKENS/LOWER_BOUND_OPTIM_RANGE
-#   = 18.8M .. 50.0M tokens, i.e. 5x-12x the configured target.
-#   Worse, neither target window is reachable: tokens_per_batch is
-#   dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
-#   absolute number, so priority 0 is never returned at all -- measured 0 hits
-#   across 14,080 swept configs.
-# Fixing it means choosing an intent (a 4M batch, or 300k-800k steps), so it is
-# deliberately not guessed. See the note in assess_training_steps.
 
 # Batch size constraints
 #
