@@ -74,6 +74,13 @@ from utils.phase4_1_zero1_comm import (
     export_zero1_results_csv
 )
 
+# Import Phase 4.2: ZeRO-3 Communication
+from utils.phase4_2_zero3_comm import (
+    analyze_zero3_communication_overhead,
+    generate_zero3_recommendations,
+    export_zero3_results_csv
+)
+
 # Import Phase 5: All-to-All Communication
 from utils.phase5_alltoall_comm import (
     analyze_alltoall_communication,
@@ -265,7 +272,7 @@ def run(variants, hardware, *, report=False):
         print(f"{'#' * 140}")
 
         print(
-            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
+            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'AGbuf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
         )
         print(
             f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6} {'-' * 6}"
@@ -294,9 +301,15 @@ def run(variants, hardware, *, report=False):
                 z_label = f"Z{result['best_zero']}"
                 micro_display = result["best_micro"]
 
+                # AGbuf is the ZeRO-3 transient all-gather buffer. Blank rather
+                # than "0.0G" on ZeRO-1/ZeRO-2 rows, which never gather parameters,
+                # so a non-empty cell always means a real ZeRO-3 cost.
+                ag = mb["zero3_transient"]
+                ag_str = f"{ag:>7.1f}G" if ag > 0 else f"{'-':>8}"
+
                 print(
                     f"  {v['name']:<10} {mb['model']:>7.1f}G {mb['grad']:>7.1f}G {mb['optim']:>7.1f}G "
-                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {mb['total']:>7.1f}G "
+                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {ag_str} {mb['total']:>7.1f}G "
                     f"{headroom_str} {util_pct:>6} {z_label:>6} {micro_display:>6}"
                 )
             else:
@@ -322,14 +335,12 @@ def run(variants, hardware, *, report=False):
         for v_name in [v["name"] for v in variants]:
             result = all_results["variants"][v_name][-1]  # Latest result for this hardware
             if result["best_zero"] > 0:
-                z1 = result["viable_micros_z1"]
-                z2 = result["viable_micros_z2"]
+                # Key off best_zero rather than testing z1 then falling through to
+                # z2: a variant that fits only under ZeRO-3 has an EMPTY z2, which
+                # the old two-branch form printed as "[] (ZeRO-2)".
                 best_zero = result["best_zero"]
-
-                if z1:
-                    print(f"  {v_name}: {z1} (ZeRO-1)")
-                else:
-                    print(f"  {v_name}: {z2} (ZeRO-2)")
+                viable = result.get(f"viable_micros_z{best_zero}", [])
+                print(f"  {v_name}: {viable} (ZeRO-{best_zero})")
             else:
                 print(f"  {v_name}: {color_text('None (OOM)', 'red')}")
 
@@ -704,6 +715,105 @@ def run(variants, hardware, *, report=False):
     # Export Phase 4.1 results
     export_zero1_results_csv(zero1_results, "phase4_1_zero1_comm_results.csv")
     print(f"\n📊 Phase 4.1 (ZeRO-1) results exported to: phase4_1_zero1_comm_results.csv")
+
+    # ============================================================================
+    # PHASE 4.2: ZeRO-3 Communication Overhead Analysis
+    # ============================================================================
+    print(f"\n\n{'=' * 140}")
+    print("ZeRO-3 COMMUNICATION OVERHEAD ANALYSIS")
+    print("=" * 140)
+    print(
+        "  ZeRO paper sec 7.2.2: parameter partitioning costs 3*Psi per step vs 2*Psi "
+        "for ZeRO-1/ZeRO-2 and baseline DP (1.5x)."
+    )
+
+    # Collect results for recommendations
+    zero3_results = {
+        "hardware": {},  # hw_name -> {variant_name -> analysis results}
+    }
+
+    for hw in hardware:
+        total_gpus = hw["gpus"]
+        inter_node_bw = hw["inter_node_bw_gb"]
+        dp = total_gpus // (TP * PP * CP)
+
+        # Generate DP values to analyze, matching phases 4 and 4.1
+        dp_values = []
+        dp_test = max(64, dp // 8)
+        while dp_test <= dp:
+            dp_values.append(dp_test)
+            dp_test *= 2
+        if dp not in dp_values:
+            dp_values.append(dp)
+
+        print(f"\n{'#' * 140}")
+        print(f"# {hw['name']} (DP={dp}, inter-node BW={inter_node_bw} GB/s)")
+        print(f"{'#' * 140}")
+        print(f"  Analyzing DP values: {dp_values}")
+
+        # Store hardware results
+        hw_results = {}
+
+        for v in variants:
+            d = v["d"]
+            layers = v["layers"]
+            layers_per_gpu = layers // PP
+
+            # Analyze ZeRO-3 communication overhead for this variant
+            analysis = analyze_zero3_communication_overhead(
+                v, hw, dp_values, layers_per_gpu, EXPERTS_PER_GPU
+            )
+
+            # Store results
+            hw_results[v["name"]] = analysis
+
+            # Only display if variant fits with ZeRO-3
+            if not analysis["viable"]:
+                continue
+
+            # Print variant header
+            print(
+                f"\n  Variant {v['name']} (d={d}, {layers} layers, "
+                f"model={analysis['model_mem_gb']:.1f} GB/GPU, "
+                f"viable micro={analysis['viable_micros']}):"
+            )
+
+            # Display communication metrics for each DP value. The colour mapping
+            # is a pure rating->colour function, so the ZeRO-1 formatter is reused
+            # rather than duplicated.
+            for metrics in analysis["comm_metrics"]:
+                time_str = format_zero1_time_with_color(
+                    metrics["total_time_ms"], metrics["overhead_rating"]
+                )
+                print(
+                    f"    DP={metrics['dp']:>4}: fwd all-gather = {metrics['fwd_ag_volume_mb']:>5.0f} MB, "
+                    f"bwd all-gather = {metrics['bwd_ag_volume_mb']:>5.0f} MB, "
+                    f"reduce-scatter = {metrics['rs_volume_mb']:>5.0f} MB, "
+                    f"total = {metrics['total_volume_mb']:>6.0f} MB/step "
+                    f"({metrics['baseline_ratio']:.2f}x baseline DP), {time_str} at {inter_node_bw} GB/s"
+                )
+
+        zero3_results["hardware"][hw["name"]] = hw_results
+
+        # Check if any variants fit with ZeRO-3 on this hardware
+        any_viable = any(result["viable"] for result in hw_results.values())
+        if not any_viable:
+            print(f"  ⚠️  No variants fit with ZeRO-3 on this hardware ({hw['mem_gb']} GB/GPU insufficient)")
+
+    # Generate and display recommendations
+    print(f"\n{'=' * 140}")
+    print("💡 ZeRO-3 COMMUNICATION RECOMMENDATIONS")
+    print(f"{'=' * 140}")
+    zero3_recommendations = generate_zero3_recommendations(zero3_results)
+    if zero3_recommendations:
+        for rec in zero3_recommendations:
+            print(f"  {rec}")
+    else:
+        print("  ✅ All ZeRO-3 communication patterns look optimal!")
+
+    # Export Phase 4.2 results
+    export_zero3_results_csv(zero3_results, "phase4_2_zero3_comm_results.csv")
+    print(f"\n📊 Phase 4.2 (ZeRO-3) results exported to: phase4_2_zero3_comm_results.csv")
 
     # ============================================================================
     # PHASE 5: All-to-all Communication Volumes (Intra-node)

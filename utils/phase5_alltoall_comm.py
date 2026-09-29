@@ -219,10 +219,22 @@ def calculate_moe_all_to_all(layers_per_gpu, hidden_dim, seq_len, mbs, gbs, dp, 
     Returns:
         dict with per-layer, per-step, and bandwidth metrics
     """
-    # Per-layer A2A volume: each token sends hidden_dim to topk experts
-    # Forward: tokens dispatched to experts + gathered back
-    a2a_per_layer_fwd_bytes = seq_len * mbs * topk * hidden_dim * dtype_bytes
-    a2a_per_layer_bwd_bytes = a2a_per_layer_fwd_bytes  # symmetric
+    # Per-layer A2A volume.
+    #
+    # An MoE layer performs TWO all-to-all collectives per direction:
+    #   dispatch  -- each token is routed to its topk experts
+    #   combine   -- the topk expert outputs come back to the token's own rank
+    # Each moves tokens * topk * hidden * dtype_bytes. The backward pass mirrors
+    # both, so a layer costs FOUR such transfers per micro-batch.
+    #
+    # The previous formula counted one transfer forward and one backward, while its
+    # comment already said "dispatched to experts + gathered back" -- so the comment
+    # described dispatch+combine but the arithmetic omitted the second, understating
+    # A2A volume and time 2x.
+    tokens = seq_len * mbs
+    a2a_one_transfer_bytes = tokens * topk * hidden_dim * dtype_bytes
+    a2a_per_layer_fwd_bytes = 2 * a2a_one_transfer_bytes   # dispatch + combine
+    a2a_per_layer_bwd_bytes = a2a_per_layer_fwd_bytes      # symmetric
     a2a_per_layer_bytes = a2a_per_layer_fwd_bytes + a2a_per_layer_bwd_bytes
 
     # Per micro-batch: across all MoE layers on this GPU
@@ -250,9 +262,16 @@ def calculate_moe_all_to_all(layers_per_gpu, hidden_dim, seq_len, mbs, gbs, dp, 
     a2a_per_microbatch_ms = a2a_per_layer_ms * layers_per_gpu
     a2a_per_step_ms = a2a_per_microbatch_ms * num_microbatches
 
-    # Bandwidth utilization
+    # Bandwidth "utilization".
+    #
+    # This is NOT a measurement. a2a_per_layer_ms was computed as
+    # bytes / effective_a2a_bw, so recovering bytes / time necessarily returns
+    # effective_a2a_bw again, and dividing by peak_bw just restates ep_efficiency.
+    # It is therefore always (ep-1)/ep -- 87.5% at EP=8 for every model, every
+    # platform and every batch size. Kept for output compatibility, but read it as
+    # the modelled ring-A2A efficiency, not as achieved bandwidth.
     peak_bw = intra_node_bw_gbps if is_intra_node else inter_node_bw_gb
-    achieved_bw_gbps = (a2a_per_layer_bytes / 1e9) / (a2a_per_layer_ms / 1000) if a2a_per_layer_ms > 0 else 0
+    achieved_bw_gbps = effective_a2a_bw
     bw_utilization_pct = (achieved_bw_gbps / peak_bw * 100) if peak_bw > 0 else 0
 
     return {

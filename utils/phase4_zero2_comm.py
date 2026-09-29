@@ -99,11 +99,25 @@ def calculate_communication_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
         - rs_time_ms: Reduce-scatter time in milliseconds
         - overhead_rating: Performance rating (0=excellent, 3=poor)
     """
-    # Reduce-scatter volume: model + gradients = 2x model memory / DP
-    rs_volume_mb = model_mem_gb * 2 / dp_val * 1000
+    # Reduce-scatter volume per rank, in parameter-memory units.
+    #
+    # ZeRO paper (arXiv:1910.02054v3) sec 7.2.1: the gradient scatter-reduce incurs
+    # "communication volume of Psi" -- one parameter replica, since there is one
+    # gradient per parameter. Together with the Psi all-gather that follows, the
+    # step totals 2*Psi, "exactly the same as the baseline DP".
+    #
+    # The paper states Psi; the exact pipelined-ring figure is (DP-1)/DP * Psi,
+    # used here, which approaches Psi as DP grows rather than shrinking with DP.
+    #
+    # Was `model_mem_gb * 2 / dp_val`: the 2 counted model + gradients when only
+    # gradients move, and the /DP made communication appear to vanish as DP grew --
+    # the two errors combined understated the volume ~31x at DP=64.
+    ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
+    rs_volume_mb = model_mem_gb * ring_fraction * 1000
 
-    # Communication time at inter-node bandwidth
-    rs_time_ms = model_mem_gb * 2 / dp_val / inter_node_bw_gb * 1000
+    # Communication time at inter-node bandwidth, derived from the volume above
+    # so the two cannot drift apart.
+    rs_time_ms = rs_volume_mb / inter_node_bw_gb if inter_node_bw_gb else 0.0
 
     # Assign overhead rating based on communication time
     # These thresholds are heuristics based on typical compute times
@@ -190,9 +204,12 @@ def generate_communication_recommendations(comm_results):
             best_dp_by_hw[hw_name] = (best_dp, best_time)
 
     if best_dp_by_hw:
+        # Was "Optimal DP configurations minimize communication: Higher DP = lower
+        # per-GPU communication volume" -- a restatement of the /dp divisor that
+        # has been removed as wrong. Volume per rank rises toward one replica.
         recommendations.append(
-            f"🎯 Optimal DP configurations minimize communication: "
-            f"Higher DP = lower per-GPU communication volume"
+            f"🎯 Raising DP does NOT reduce per-GPU communication: volume per rank is "
+            f"(DP-1)/DP of a replica, approaching 1 as DP grows (ZeRO paper sec 7.2.1)"
         )
 
     # Identify variants with problematic communication
@@ -209,9 +226,14 @@ def generate_communication_recommendations(comm_results):
                         problematic_variants.append(variant_name)
 
     if problematic_variants:
+        # Was "→ Use higher DP or consider ZeRO-1 if memory permits". Both halves
+        # were wrong: higher DP does not lower per-rank volume, and ZeRO-1 moves
+        # the same 2*Psi per step as ZeRO-2 (ZeRO paper sec 7.2.1). What actually
+        # helps is faster interconnect or a smaller resident replica.
         recommendations.append(
-            f"📊 Variants with high communication overhead at low DP: {', '.join(problematic_variants)} "
-            f"→ Use higher DP or consider ZeRO-1 if memory permits"
+            f"📊 Variants with high communication overhead: {', '.join(problematic_variants)} "
+            f"→ ZeRO-1 moves the same volume, and raising DP does not reduce it; look to "
+            f"faster inter-node bandwidth, or to TP/PP to shrink the per-rank replica"
         )
 
     return recommendations

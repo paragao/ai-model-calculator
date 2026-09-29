@@ -105,11 +105,29 @@ def calculate_zero1_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
         - ag_time_ms: All-gather time in milliseconds
         - overhead_rating: Performance rating (0=excellent, 3=poor)
     """
-    # All-gather volume: optimizer states only
-    # OPTIM_BYTES = 6 (momentum + variance + FP32 master)
-    # PARAM_BYTES = 2 (BF16)
-    # Factor = 6/2 = 3
-    ag_volume_mb = model_mem_gb * 3 / dp_val * 1000
+    # All-gather volume per rank, in parameter-memory units.
+    #
+    # ZeRO paper (arXiv:1910.02054v3) sec 7.1 and 7.2.1, verbatim:
+    #   "Both reduce-scatter and all-gather ... results in a total data movement of
+    #    Psi elements (for a data with Psi elements) for each. Therefore, the
+    #    standard DP incurs 2*Psi data movement during each training step."
+    #   "instead of an all-reduce, ZeRO only requires a scatter-reduce operation on
+    #    the gradients, incurring communication volume of Psi. After each process
+    #    updates the partition of the parameters that it is responsible for, an
+    #    all-gather is performed ... This also incurs a communication volume of Psi.
+    #    So the total communication volume per training step is Psi+Psi=2*Psi,
+    #    exactly the same as the baseline DP."
+    #
+    # So this all-gather moves ONE parameter replica per process. The paper states
+    # Psi; the exact pipelined-ring figure is (DP-1)/DP * Psi, used here, which
+    # approaches Psi as DP grows. It does NOT shrink with DP.
+    #
+    # Was `model_mem_gb * 3 / dp_val`, wrong twice over: the 3 was the fp32
+    # optimizer state expressed in parameter-memory units rather than the quantity
+    # all-gathered, and the /DP made communication appear to vanish as DP grew --
+    # 21x understated at DP=64.
+    ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
+    ag_volume_mb = model_mem_gb * ring_fraction * 1000
 
     # Communication time at inter-node bandwidth
     ag_time_ms = ag_volume_mb / inter_node_bw_gb
@@ -179,10 +197,17 @@ def generate_zero1_recommendations(zero1_results):
                 f"⚠️  ZeRO-1 communication overhead is high for {high_overhead_configs}/{total_configs} configs (>7ms)"
             )
 
-    # Highlight ZeRO-1 vs ZeRO-2 advantage
+    # ZeRO-1 vs ZeRO-2 communication.
+    #
+    # Was "ZeRO-1 has ~67% less communication than ZeRO-2 (3x vs 2x factor)".
+    # That was a restatement of the old wrong formulas (model_mem * 3 / dp here
+    # against model_mem * 2 / dp in phase 4). Per the ZeRO paper sec 7.2.1 both
+    # stages total 2*Psi per step, so their volumes are EQUAL -- ZeRO-1's real
+    # advantage is the `eff` multiplier in phase 3, not communication.
     recommendations.append(
-        "🚀 ZeRO-1 has ~67% less communication than ZeRO-2 (3x vs 2x factor) "
-        "→ Prefer ZeRO-1 when memory permits for 10% efficiency gain"
+        "⚖️  ZeRO-1 and ZeRO-2 move the SAME 2*Psi per step (ZeRO paper sec 7.2.1) → "
+        "prefer ZeRO-1 for its higher efficiency multiplier and lower resident "
+        "gradient memory pressure, not for less communication"
     )
 
     # Count variants that fit with ZeRO-1
@@ -198,10 +223,16 @@ def generate_zero1_recommendations(zero1_results):
             f"Recommended for best performance (efficiency=1.0 vs 0.9 for ZeRO-2)"
         )
 
-    # DP scaling recommendation
+    # DP scaling.
+    #
+    # Was "Higher DP = lower per-GPU communication volume (linear scaling:
+    # doubling DP halves communication)". That followed from the /dp divisor that
+    # has been removed as wrong: ring collectives move (DP-1)/DP of a replica per
+    # rank, which RISES toward one replica as DP grows.
     recommendations.append(
-        "🎯 Optimal DP configurations: Higher DP = lower per-GPU communication volume "
-        "(linear scaling: doubling DP halves communication)"
+        "🎯 Raising DP does NOT reduce per-GPU communication: volume per rank is "
+        "(DP-1)/DP of a replica, approaching 1 as DP grows → DP buys memory "
+        "headroom, not cheaper collectives"
     )
 
     return recommendations

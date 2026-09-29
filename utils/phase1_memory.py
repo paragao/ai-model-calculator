@@ -13,7 +13,8 @@ from configuration.advanced_config import *
 from .core_calculations import (
     calculate_model_memory_gb,
     calculate_memory_for_micro,
-    calculate_viable_micro_batch_sizes
+    calculate_viable_micro_batch_sizes,
+    calculate_zero3_transient_gb,
 )
 
 # Import formatting utilities
@@ -116,12 +117,42 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     suggestions = []
 
     # Suggestion 1: Try ZeRO-3 if not already tried
+    #
+    # NOTE -- the only in-tree caller (analyze_variant_memory) passes
+    # attempted_zero_strategies=[1, 2, 3], so this branch is currently unreachable
+    # from the calculator itself and fires only for an external caller using the
+    # [1, 2] default. Flagged rather than removed; the arithmetic below is still
+    # corrected because wrong advice is worse than unreachable advice.
     if 3 not in attempted_zero_strategies:
-        # ZeRO-3 shards model parameters too
-        potential_savings = model_mem_gb * (1 - 1/dp) if dp > 1 else model_mem_gb * 0.5
-        suggestions.append(
-            f"Use ZeRO-3 to shard model parameters (could save ~{potential_savings:.1f}G)"
-        )
+        # ZeRO-3 shards resident parameters to Psi/Nd, but adds back the transient
+        # all-gather buffer, which does NOT shrink with DP. Quote the NET saving:
+        # at large DP with a small model the buffer can exceed the resident saving,
+        # in which case ZeRO-3 costs memory rather than saving it.
+        resident_saving = model_mem_gb * (1 - 1/dp) if dp > 1 else model_mem_gb * 0.5
+        transient = calculate_zero3_transient_gb(
+            variant=variant,
+            experts_per_gpu=experts_per_gpu,
+            param_bytes=PARAM_BYTES,
+            vocab=VOCAB,
+            layer_norm=LAYER_NORM,
+            ffn_weight_matrices=FFN_WEIGHT_MATRICES,
+            max_live_params=ZERO3_MAX_LIVE_PARAMS,
+            prefetch_bucket_params=ZERO3_PREFETCH_BUCKET_PARAMS,
+            tp=TP,
+        )["transient_gb"]
+        net_saving = resident_saving - transient
+        if net_saving > 0:
+            suggestions.append(
+                f"Use ZeRO-3 to shard model parameters (could save ~{net_saving:.1f}G "
+                f"net: {resident_saving:.1f}G resident less {transient:.1f}G "
+                f"transient all-gather buffer)"
+            )
+        else:
+            suggestions.append(
+                f"ZeRO-3 would NOT help here: its {transient:.1f}G transient "
+                f"all-gather buffer exceeds the {resident_saving:.1f}G it saves on "
+                f"resident parameters at DP={dp}"
+            )
 
     # Suggestion 2: Reduce layers
     if shortage > 0:
@@ -172,7 +203,10 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         dict with:
         - viable_micros_z1: List of viable micro batch sizes for ZeRO-1
         - viable_micros_z2: List of viable micro batch sizes for ZeRO-2
-        - best_zero: Optimal ZeRO strategy (1, 2, or -1 for OOM)
+        - viable_micros_z3: List of viable micro batch sizes for ZeRO-3
+        - best_zero: Optimal ZeRO strategy (1, 2, 3, or -1 for OOM). Strategies
+            are tried in ascending order, so the lowest-communication strategy
+            that fits wins; 3 means only parameter sharding made it fit.
         - best_micro: Largest viable micro batch size
         - memory_breakdown: Dict with model/grad/optim/activation/buffer memory
         - efficiency_metrics: Dict with utilization/efficiency stats
@@ -200,6 +234,15 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         tp=TP
     )
 
+    # Try ZeRO-3, which additionally shards the resident parameters. Only reached
+    # when ZeRO-1 and ZeRO-2 both OOM: it fits strictly more than they do, but
+    # costs 3*Psi per step against their 2*Psi (see phase 4.2), so it is a last
+    # resort rather than a default.
+    viable_z3 = calculate_viable_micro_batch_sizes(
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=3,
+        tp=TP
+    )
+
     # Determine best ZeRO strategy and micro batch size
     if viable_z1:
         best_zero = 1
@@ -207,6 +250,9 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     elif viable_z2:
         best_zero = 2
         best_micro = max(viable_z2)
+    elif viable_z3:
+        best_zero = 3
+        best_micro = max(viable_z3)
     else:
         # OOM - generate diagnostics
         best_zero = -1
@@ -214,12 +260,13 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
 
         oom_diagnostics = diagnose_oom(
             variant, hw, dp, layers_per_gpu, experts_per_gpu,
-            attempted_zero_strategies=[1, 2]
+            attempted_zero_strategies=[1, 2, 3]
         )
 
         return {
             "viable_micros_z1": viable_z1,
             "viable_micros_z2": viable_z2,
+            "viable_micros_z3": viable_z3,
             "best_zero": best_zero,
             "best_micro": best_micro,
             "memory_breakdown": None,
@@ -258,6 +305,7 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     return {
         "viable_micros_z1": viable_z1,
         "viable_micros_z2": viable_z2,
+        "viable_micros_z3": viable_z3,
         "best_zero": best_zero,
         "best_micro": best_micro,
         "memory_breakdown": memory_breakdown,
@@ -314,9 +362,23 @@ def generate_recommendations(all_results):
             )
 
         # Check if using suboptimal ZeRO strategy
+        #
+        # NOTE -- this condition is UNREACHABLE: strategies are tried in ascending
+        # order, so a non-empty viable_micros_z1 forces best_zero to 1 and it can
+        # never be 2 here. Left in place rather than deleted because removing it
+        # changes no output; flagged so it is not mistaken for live logic.
         if best_config and best_config["best_zero"] == 2 and best_config["viable_micros_z1"]:
             recommendations.append(
                 f"💡 Variant {variant_name}: Using ZeRO-2 but ZeRO-1 available - consider hardware with more memory for 10% efficiency gain"
+            )
+
+        # ZeRO-3 fits strictly more than ZeRO-1/ZeRO-2 but costs 3*Psi per step
+        # against their 2*Psi (ZeRO paper sec 7.2.2, modelled in phase 4.2), so
+        # falling back to it is worth surfacing rather than passing silently.
+        if best_config and best_config["best_zero"] == 3:
+            recommendations.append(
+                f"⚠️  Variant {variant_name}: Fits only with ZeRO-3 (parameter sharding) - "
+                f"expect 1.5x the communication volume of ZeRO-1/ZeRO-2; see phase 4.2"
             )
 
         # Check throughput
@@ -342,6 +404,7 @@ def export_results_csv(results, filename):
         fieldnames = [
             'variant', 'hardware', 'zero_strategy', 'micro_batch',
             'model_gb', 'grad_gb', 'optim_gb', 'activation_gb', 'buffer_gb',
+            'zero3_transient_gb',
             'total_gb', 'gpu_capacity_gb', 'headroom_gb', 'utilization_pct',
             'memory_efficiency', 'status'
         ]
@@ -385,6 +448,7 @@ def export_results_csv(results, filename):
                         'optim_gb': mb["optim"],
                         'activation_gb': mb["activation"],
                         'buffer_gb': mb["buffer"],
+                        'zero3_transient_gb': mb["zero3_transient"],
                         'total_gb': mb["total"],
                         'gpu_capacity_gb': mb["total"] + em["wasted_headroom"],
                         'headroom_gb': em["wasted_headroom"],

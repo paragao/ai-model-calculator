@@ -18,17 +18,55 @@ from .project_config import PRECISION
 TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
 
 # ZeRO optimization strategies with efficiency multipliers
+#
+# Communication for all three stages is now modelled: phase 4 covers ZeRO-2
+# (gradient reduce-scatter), phase 4.1 covers ZeRO-1 (parameter all-gather), and
+# phase 4.2 covers ZeRO-3 (two parameter all-gathers plus the gradient
+# reduce-scatter). Per the ZeRO paper (arXiv:1910.02054v3 sec 7.2.1-7.2.2),
+# ZeRO-1 and ZeRO-2 each total 2*Psi per step -- the same as baseline DP -- while
+# ZeRO-3 totals 3*Psi, a fixed 1.5x.
+#
+# The `eff` multipliers below are EMPIRICAL and are not derived from those
+# volumes. They are a separate, coarser knob applied to training time in phase 3;
+# the per-stage volumes in phases 4/4.1/4.2 are the physics. Note the ordering
+# below is consistent with the paper (ZeRO-3 costs more than ZeRO-1/2), but the
+# specific 0.9 and 0.8 values are uncalibrated.
 ZERO_STRATEGY = [
     {"zero": 1, "eff": 1.0},   # ZeRO-1: Optimizer states sharded, best efficiency
     {"zero": 2, "eff": 0.9},   # ZeRO-2: Optimizer + gradients sharded, 10% overhead
     {"zero": 3, "eff": 0.8},   # ZeRO-3: All parameters sharded, 20% overhead
 ]
 
+# --- ZeRO-3 transient all-gather buffer -------------------------------------
+#
+# ZeRO-3's resident parameter memory is Psi/Nd, but a layer cannot EXECUTE while
+# sharded: DeepSpeed all-gathers each module's full parameters into a transient
+# buffer just before it runs, and frees them after. That buffer is real peak
+# memory the paper's resident model does not account for.
+#
+# Both values below are DeepSpeed's own documented DEFAULTS, in PARAMETER
+# ELEMENTS (not bytes), from https://www.deepspeed.ai/docs/config-json/:
+#   stage3_max_live_parameters  1e9  "The maximum number of parameters resident
+#                                    per GPU before releasing. Smaller values use
+#                                    less memory, but perform more communication."
+#   stage3_prefetch_bucket_size 5e8  "The size of the fixed buffer for prefetching
+#                                    parameters. Smaller values use less memory,
+#                                    but can increase stalls due to communication."
+#
+# They are config knobs, not physics: a run that lowers them trades memory back
+# for communication, so the modelled buffer describes the DEFAULT configuration.
+ZERO3_MAX_LIVE_PARAMS = 1e9
+ZERO3_PREFETCH_BUCKET_PARAMS = 5e8
+
 # Micro batch sizes to test for memory feasibility
 MICROS = [1, 2, 4, 8, 16]
 
 # Gradient accumulation steps to evaluate
-GRAD_ACCUM_VALUES = [2, 4, 8]
+#
+# 1 means no accumulation, which is valid and is often optimal at large DP width
+# where the global batch is already big enough without it. It was previously
+# absent, so that arm was never evaluated.
+GRAD_ACCUM_VALUES = [1, 2, 4, 8]
 
 # Precision-dependent parameter size
 if PRECISION == "BF16":
@@ -36,13 +74,46 @@ if PRECISION == "BF16":
 else:
     PARAM_BYTES = 1  # 1 byte per parameter for FP8
 
+# KNOWN LIMITATION -- PRECISION affects PARAM_BYTES ONLY, never throughput.
+# phase3_training reads hw["peak_tflops_bf16"] unconditionally and no hardware
+# preset defines peak_tflops_fp8, so setting PRECISION="FP8" halves parameter and
+# activation memory while still computing training time at BF16 throughput. FP8 is
+# roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, so FP8 runs
+# OVERSTATE training time by about 2x. (A10G is Ampere and has no FP8 at all, so
+# FP8 on g5 is not a valid configuration.) Fixing this needs a per-preset
+# peak_tflops_fp8 field plus precision-aware selection in phase3, which belongs
+# with the hardware presets rather than here.
+
 # Model architecture constants
-LAYER_NORM = 2  # Pre- and post-attention layer norms
-FFN_WEIGHT_MATRICES = 3  # Query, key, value projections + FFN matrices
-NUM_EMBEDDINGS_TABLES = 2  # Word embeddings + position embeddings
+LAYER_NORM = 2  # RMSNorm vectors of width d per layer: input + post-attention
+
+# The 3 SwiGLU FFN matrices: gate_proj, up_proj, down_proj. Used as
+# `3 * d * dense_ffn`. NOT the QKV projections -- those are counted separately in
+# each variant's attn_per_layer.
+FFN_WEIGHT_MATRICES = 3
+
+# Input embedding table + output LM head. NOT "word + position" embeddings: every
+# model in the catalog uses RoPE and has no learned positional table. Reduced to
+# 1 for a variant with "tied_embeddings": True, where the LM head IS the input
+# embedding matrix (Llama-3.2-3B is the only such variant).
+NUM_EMBEDDINGS_TABLES = 2
 
 # Optimizer memory footprint
-OPTIM_BYTES = 6  # 2B momentum + 2B variance + 2B FP32 master weights
+#
+# Mixed-precision Adam keeps its state in FP32 REGARDLESS of parameter precision:
+#   fp32 master weights 4 + fp32 momentum 4 + fp32 variance 4 = 12 bytes/param.
+#
+# OPTIM_BYTES is consumed as a MULTIPLIER ON PARAMETER MEMORY, not as bytes per
+# parameter -- see calculate_memory_breakdown: `model_mem_gb * optim_bytes / dp`,
+# where model_mem_gb already carries PARAM_BYTES. So the effective footprint is
+# PARAM_BYTES * OPTIM_BYTES bytes/param, and the multiplier must be derived from
+# PARAM_BYTES to keep that product at 12.
+#
+# A fixed 6 was correct only in BF16 (2 * 6 = 12). Under FP8 it gave 1 * 6 = 6,
+# understating optimizer memory 2x -- the optimizer does not shrink just because
+# the parameters are fp8.
+OPTIM_BYTES_PER_PARAM = 12  # fp32 master + fp32 momentum + fp32 variance
+OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 6.0, FP8 -> 12.0
 
 # Activation memory estimation (empirical multipliers)
 EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
@@ -73,6 +144,14 @@ ATTENTION_FLOPS_FACTOR = 12
 # actual measured 150 GB vs raw calculated ~121 GB → ratio ≈ 1.24x.
 # Accounts for CUDA caching allocator fragmentation, memory alignment, and
 # small transient buffers not explicitly modeled.
+#
+# INTERACTION with ZERO3_MAX_LIVE_PARAMS above -- this factor multiplies the total
+# INCLUDING the now-explicit ZeRO-3 transient all-gather buffer. That is correct if
+# the calibration run used ZeRO-1 or ZeRO-2, which never gather parameters and so
+# contributed no gather buffer to the measured 150 GB. If it used ZeRO-3, part of
+# the 1.24x already absorbed that buffer and ZeRO-3 totals now double-count it.
+# The calibration note does not record the stage, so this is UNRESOLVED; it affects
+# only ZeRO-3 rows, and re-calibrating needs a profiled run with a known stage.
 FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching allocator
 
 # Memory utilization
@@ -92,10 +171,14 @@ MAX_STEPS = 1_200_000
 MAX_TOKENS_PER_BATCH = 600e6  # Maximum tokens per batch (600M)
 
 # Hardware memory specifications (GB)
+#
+# REFERENCE VALUES ONLY -- the calculation always uses the hardware entry's
+# own mem_gb. Six of these eight are referenced nowhere outside this file, so
+# editing one does NOT change any result. All verified against AWS specs.
 H100_MEM_GB = 80    # H100 GPU memory capacity
 H200_MEM_GB = 141   # H200 GPU memory capacity
 B200_MEM_GB = 180   # B200 GPU memory capacity
-B300_MEM_GB = 268   # B300 Ultra GPU memory capacity
+B300_MEM_GB = 268   # B300 Ultra: 268 GB USABLE of 288 raw; AWS states 2.1 TB / 8 GPUs
 GB200_MEM_GB = 186  # GB200 NVL GPU memory: AWS states 13.4 TB HBM3e / 72 GPUs
 A10G_MEM_GB = 24    # A10G GPU memory capacity
 L4_MEM_GB = 24      # L4 GPU memory capacity

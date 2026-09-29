@@ -47,7 +47,28 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         - oom_reason: str explaining why OOM occurred
     """
     total_gpus = hw["gpus"]
-    peak_tflops = hw["peak_tflops_bf16"]
+
+    # Peak throughput must follow PRECISION. Previously this always read
+    # peak_tflops_bf16, so an FP8 run halved its memory while still computing
+    # time at BF16 throughput -- overstating FP8 training time ~2x.
+    # A10G (g5) is Ampere and has NO FP8 support, so peak_tflops_fp8 is 0 there
+    # and an FP8 run on it is not a valid configuration.
+    if PRECISION == "BF16":
+        peak_tflops = hw["peak_tflops_bf16"]
+    else:
+        peak_tflops = hw.get("peak_tflops_fp8") or 0
+        if not peak_tflops:
+            if "peak_tflops_fp8" in hw:
+                reason = (
+                    f"{hw['name']} has no FP8 support (peak_tflops_fp8 is 0 -- "
+                    f"A10G/Ampere lacks FP8 tensor cores)."
+                )
+            else:
+                reason = (
+                    f"{hw['name']} does not define peak_tflops_fp8, which is "
+                    f"required when PRECISION is FP8. Add it to the hardware entry."
+                )
+            return {"platforms": [], "oom": True, "oom_reason": reason}
     gpu_mem = hw["mem_gb"]
 
     # Hybrid-attention models (Qwen3.5) interleave linear attention with full
@@ -70,6 +91,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         tp=TP
     )
 
+    # Try ZeRO-3, which additionally shards the resident parameters. Reached only
+    # when ZeRO-1 and ZeRO-2 both OOM: it fits strictly more, at 3*Psi per step
+    # against their 2*Psi (see phase 4.2).
+    viable_z3 = calculate_viable_micro_batch_sizes(
+        variant, gpu_mem, dp, layers_per_gpu, experts_per_gpu, zero_strategy=3,
+        tp=TP
+    )
+
     # Determine best ZeRO strategy and viable micro batch sizes
     if viable_z1:
         zero_config = ZERO_STRATEGY[0]  # ZeRO-1
@@ -77,12 +106,15 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     elif viable_z2:
         zero_config = ZERO_STRATEGY[1]  # ZeRO-2
         viable_micros = viable_z2
+    elif viable_z3:
+        zero_config = ZERO_STRATEGY[2]  # ZeRO-3
+        viable_micros = viable_z3
     else:
         # OOM - cannot fit on this hardware
         return {
             "platforms": [],
             "oom": True,
-            "oom_reason": f"Insufficient memory even with ZeRO-2 (requires >{gpu_mem}GB)"
+            "oom_reason": f"Insufficient memory even with ZeRO-3 (requires >{gpu_mem}GB)"
         }
 
     # MoE layers on this GPU (for all-to-all comm overhead)

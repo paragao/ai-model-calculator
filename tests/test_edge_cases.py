@@ -11,6 +11,9 @@ from configuration.advanced_config import *
 from configuration.variants_config import LLAMA_DENSE_VARIANTS, QWEN3_MOE_VARIANTS
 from utils.core_calculations import calculate_model_memory_gb, calculate_memory_for_micro
 from utils.phase6_pp_comm import calculate_pp_communication
+from utils.phase4_zero2_comm import calculate_communication_metrics
+from utils.phase4_1_zero1_comm import calculate_zero1_metrics
+from utils.phase4_2_zero3_comm import calculate_zero3_metrics
 
 # Test variants
 DENSE_VARIANT = next(v for v in LLAMA_DENSE_VARIANTS if v["name"] == "Llama-3.1-8B")
@@ -237,6 +240,59 @@ def test_vp4_pp8_total_memory_difference():
     print(f"  ✓ VP=4, PP=8 total: +{diff:.1f} GB over VP=1")
 
 
+def test_zero3_volume_is_three_psi():
+    """ZeRO-3 must total 3*Psi per step, i.e. exactly 1.5x baseline DP's 2*Psi.
+
+    Pins ZeRO paper (arXiv:1910.02054v3) sec 7.2.2: the two parameter all-gathers
+    plus the gradient reduce-scatter sum to 3*Psi, "which is 1.5x compared to the
+    baseline". Each collective must equal the single collective ZeRO-1/ZeRO-2 pay.
+    """
+    model_mem_gb, bw = 141.107, 400.0
+    for dp in (8, 16, 64, 256):
+        z1 = calculate_zero1_metrics(model_mem_gb, dp, bw)
+        z2 = calculate_communication_metrics(model_mem_gb, dp, bw)
+        z3 = calculate_zero3_metrics(model_mem_gb, dp, bw)
+        one_replica = z1["ag_volume_mb"]
+        # ZeRO-1's all-gather and ZeRO-2's reduce-scatter are both one replica
+        assert abs(z2["rs_volume_mb"] - one_replica) < 1e-6, \
+            f"DP={dp}: ZeRO-2 RS {z2['rs_volume_mb']} != one replica {one_replica}"
+        # Each of ZeRO-3's three collectives is one replica
+        for key in ("fwd_ag_volume_mb", "bwd_ag_volume_mb", "rs_volume_mb"):
+            assert abs(z3[key] - one_replica) < 1e-6, \
+                f"DP={dp}: ZeRO-3 {key} {z3[key]} != one replica {one_replica}"
+        # Total is 3*Psi and the ratio to baseline 2*Psi is exactly 1.5
+        assert abs(z3["total_volume_mb"] - 3 * one_replica) < 1e-6, \
+            f"DP={dp}: ZeRO-3 total {z3['total_volume_mb']} != 3x {one_replica}"
+        assert abs(z3["baseline_ratio"] - 1.5) < 1e-9, \
+            f"DP={dp}: baseline ratio {z3['baseline_ratio']} != 1.5"
+    print("  ✓ ZeRO-3 volume = 3*Psi = 1.5x baseline DP at every DP")
+
+
+def test_zero_volume_independent_of_dp():
+    """ZeRO-DP volume per rank must NOT shrink as DP grows.
+
+    Regression guard. All three phases previously divided by DP, which made
+    communication appear to vanish at scale (21x understated for ZeRO-1 and 31x
+    for ZeRO-2 at DP=64). Ring collectives move (DP-1)/DP of a replica per rank,
+    which RISES toward 1 as DP grows, so volume must be non-decreasing in DP.
+    """
+    model_mem_gb, bw = 141.107, 400.0
+    dps = [8, 16, 32, 64, 128, 256]
+    series = {
+        "zero1_ag": [calculate_zero1_metrics(model_mem_gb, d, bw)["ag_volume_mb"] for d in dps],
+        "zero2_rs": [calculate_communication_metrics(model_mem_gb, d, bw)["rs_volume_mb"] for d in dps],
+        "zero3_total": [calculate_zero3_metrics(model_mem_gb, d, bw)["total_volume_mb"] for d in dps],
+    }
+    for name, vols in series.items():
+        for prev, nxt, d_prev, d_next in zip(vols, vols[1:], dps, dps[1:]):
+            assert nxt >= prev, \
+                f"{name}: volume fell from {prev:.0f} MB at DP={d_prev} to {nxt:.0f} MB at DP={d_next}"
+        # And it must stay bounded by one replica per collective, never exceed it
+        assert vols[-1] < model_mem_gb * 1000 * (3 if name == "zero3_total" else 1) + 1e-6, \
+            f"{name}: volume {vols[-1]:.0f} MB exceeds its replica bound"
+    print("  ✓ ZeRO-1/2/3 volume is non-decreasing in DP (no /DP bug)")
+
+
 if __name__ == "__main__":
     print("Running edge case tests...")
     test_dense_model_no_moe_overhead()
@@ -248,4 +304,66 @@ if __name__ == "__main__":
     test_vp4_pp8_adds_activation_overhead()
     test_vp2_more_activation_than_vp4()
     test_vp4_pp8_total_memory_difference()
+    test_zero3_volume_is_three_psi()
+    test_zero_volume_independent_of_dp()
     print("\nAll edge case tests passed! ✓")
+
+
+def _mem(variant, dp, zero_strategy, experts_per_gpu=0, topk=0):
+    """Memory breakdown helper: PP=1, EP=1, one micro-batch, 4K sequence."""
+    layers_per_gpu = variant["layers"]
+    model_mem = calculate_model_memory_gb(
+        variant, layers_per_gpu, experts_per_gpu,
+        PARAM_BYTES, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1
+    )
+    return calculate_memory_for_micro(
+        micro=1, model_mem_gb=model_mem, variant=variant, dp=dp,
+        layers_per_gpu=layers_per_gpu, zero_strategy=zero_strategy, seq_len=4096,
+        topk=topk, param_bytes=PARAM_BYTES,
+        empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
+        selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+        fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
+        nccl_mem_buf=NCCL_MEM_BUF, optim_bytes=OPTIM_BYTES,
+        ep=1, pp=1, vp=1,
+        nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+        fragmentation_factor=FRAGMENTATION_FACTOR,
+        experts_per_gpu=experts_per_gpu,
+    )
+
+
+def test_zero3_transient_buffer_is_dp_invariant():
+    """ZeRO-3's transient all-gather buffer must NOT shrink with DP.
+
+    Resident parameter memory is Psi/Nd and falls as DP grows, but the transient
+    buffer is set by the largest gathered module and DeepSpeed's live-parameter
+    budget, neither of which depends on DP. This is the floor that makes the
+    paper's resident-memory model an underestimate at large DP -- regression guard
+    against reintroducing a /dp divisor here.
+    """
+    transients = []
+    residents = []
+    for dp in (2, 8, 32, 64, 256, 1024):
+        mem = _mem(DENSE_VARIANT, dp, zero_strategy=3)
+        transients.append(mem["zero3_transient"])
+        residents.append(mem["model"])
+
+    assert transients[0] > 0, "ZeRO-3 must carry a transient buffer"
+    for t in transients[1:]:
+        assert abs(t - transients[0]) < 1e-9, (
+            f"Transient buffer varied with DP: {transients}"
+        )
+    # Resident memory, by contrast, must fall as 1/DP.
+    for earlier, later in zip(residents, residents[1:]):
+        assert later < earlier, f"Resident memory did not fall with DP: {residents}"
+
+
+def test_zero1_and_zero2_have_no_transient_buffer():
+    """Only ZeRO-3 shards parameters, so only ZeRO-3 gathers them back."""
+    for zero_strategy in (1, 2):
+        mem = _mem(DENSE_VARIANT, dp=64, zero_strategy=zero_strategy)
+        assert mem["zero3_transient"] == 0.0, (
+            f"ZeRO-{zero_strategy} reported a transient buffer: {mem['zero3_transient']}"
+        )
+        assert mem["zero3_transient_detail"] is None
+    # And ZeRO-3 at the same DP does carry one, so the test above is meaningful.
+    assert _mem(DENSE_VARIANT, dp=64, zero_strategy=3)["zero3_transient"] > 0
