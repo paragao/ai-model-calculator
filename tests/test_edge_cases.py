@@ -421,3 +421,95 @@ def test_hybrid_attention_uses_per_layer_type_counts():
         FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1,
     )
     assert low < got < high, f"hybrid {got} not between {low} and {high}"
+
+
+# Published parameter counts, from each model's own model card / config. These are
+# the external anchor: the engine driven at ep=1 (every expert on one rank, i.e.
+# the FULL model) must land near them, or the catalog has drifted.
+#
+# DeepSeek-V4 is deliberately ABSENT -- it has no public config, carries no
+# per-variant fields, and there is nothing to reconcile it against.
+PUBLISHED_TOTAL_B = {
+    "Llama-3.1-8B": 8.03,
+    "Llama-3.1-70B": 70.6,
+    "Llama-3.1-405B": 405.0,
+    "Llama-3.2-3B": 3.21,
+    "Llama-4-Scout-17B-16E": 109.0,
+    "Llama-4-Maverick-17B-128E": 400.0,
+    "Qwen3-30B-A3B": 30.5,
+    "Qwen3-235B-A22B": 235.0,
+    "Qwen3.5-27B": 27.0,
+    "Qwen3.5-35B-A3B": 35.0,
+    "Qwen3.5-122B-A10B": 122.0,
+    "Qwen3.5-397B-A17B": 397.0,
+    "DeepSeek-V3": 671.0,
+    "DeepSeek-V3.1": 671.0,
+    "DeepSeek-V3.2": 671.0,
+}
+
+
+def test_catalog_reconciles_against_published_parameter_counts():
+    """The engine at ep=1 must reproduce each variant's published size.
+
+    ep=1 places every expert on one rank, so calculate_model_memory_gb returns the
+    FULL model rather than a per-GPU shard -- the only form comparable to a
+    published count. This is the guard that would have caught the two Qwen3.5
+    errors: linear-attention layers charged at the full-attention count, and
+    attn_per_layer missing the attn_output_gate doubling of q_proj. Together those
+    put Qwen3.5-27B at 24.35 B against a published 27 B, and the catalog's own
+    total_params_B agreed with them, so nothing internal disagreed.
+
+    3% tolerance: the multimodal families (Llama-4, Qwen3.5) carry vision towers a
+    text-only engine correctly does not model, which leaves a real sub-1% shortfall.
+    """
+    from configuration.variants_config import VARIANTS
+
+    checked = 0
+    failures = []
+    for v in VARIANTS:
+        published = PUBLISHED_TOTAL_B.get(v["name"])
+        if published is None:
+            continue
+        model_mem_gb = calculate_model_memory_gb(
+            v, v["layers"], 0, 2, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES,
+            NUM_EMBEDDINGS_TABLES, tp=1, ep=1,
+        )
+        derived_b = model_mem_gb * 1e9 / 2 / 1e9  # param_bytes=2 -> element count
+        delta_pct = (derived_b - published) / published * 100
+        if abs(delta_pct) > 3.0:
+            failures.append(
+                f"{v['name']}: engine {derived_b:.2f}B vs published {published}B "
+                f"({delta_pct:+.2f}%)"
+            )
+        checked += 1
+
+    assert checked >= 15, f"expected to check at least 15 variants, checked {checked}"
+    assert not failures, "catalog drifted from published sizes:\n  " + "\n  ".join(failures)
+
+
+def test_explicit_ep_overrides_the_global_for_expert_count():
+    """calculate_model_memory_gb must honour an explicit ep, not the global EP.
+
+    The expert override re-derives experts_per_gpu from the variant's own
+    num_experts, and previously did so using the module-global EP unconditionally,
+    which silently discarded the experts_per_gpu argument and made the function
+    undrivable at any other EP -- so a full-model reconciliation was impossible.
+    """
+    from configuration.variants_config import VARIANTS
+
+    v = next(x for x in VARIANTS if x["name"] == "Qwen3.5-397B-A17B")
+    assert v["num_experts"] == 512
+
+    def mem(ep):
+        return calculate_model_memory_gb(
+            v, v["layers"], 0, 2, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES,
+            NUM_EMBEDDINGS_TABLES, tp=1, ep=ep,
+        )
+
+    # Expert memory dominates, so halving EP should roughly double the total.
+    at_1, at_8, at_16 = mem(1), mem(8), mem(16)
+    assert at_1 > at_8 > at_16, f"not monotonic in ep: {at_1}, {at_8}, {at_16}"
+
+    # The expert term itself must scale exactly with 512 // ep.
+    expert_bytes = lambda ep: (512 // ep) * v["layers"] * v["expert_each"] * 2 / 1e9
+    assert abs((at_1 - at_8) - (expert_bytes(1) - expert_bytes(8))) < 1e-6

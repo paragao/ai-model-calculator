@@ -20,6 +20,7 @@ def calculate_model_memory_gb(
     ffn_weight_matrices,
     num_embeddings_tables,
     tp=1,
+    ep=None,
 ):
     """
     Calculate model memory in GB for a given variant.
@@ -41,6 +42,14 @@ def calculate_model_memory_gb(
             embedding matrix and counting it twice overstates the model.
         tp: Tensor parallelism degree (default 1). TP shards attention,
             FFN, expert, and embedding weights across tp GPUs.
+        ep: Expert parallelism degree used to re-derive experts_per_gpu from a
+            variant's own "num_experts". Defaults to the global EP. Pass it
+            explicitly to drive this function at an EP other than the configured
+            one -- notably ep=1, which places every expert on one rank and so
+            returns the FULL model size, the form that can be reconciled against
+            a published parameter count. Without this the global EP was applied
+            unconditionally and the experts_per_gpu argument was silently
+            discarded for any variant declaring num_experts.
 
     Returns:
         float: Model memory in GB
@@ -57,8 +66,9 @@ def calculate_model_memory_gb(
     # Note moe_layer_params in the catalog already reflects the true count, but
     # it is metadata -- the memory path below uses expert_each * experts_per_gpu.
     variant_experts = variant.get("num_experts")
-    if variant_experts and EP > 0:
-        experts_per_gpu = max(1, variant_experts // EP)
+    effective_ep = EP if ep is None else ep
+    if variant_experts and effective_ep > 0:
+        experts_per_gpu = max(1, variant_experts // effective_ep)
 
     # When using pipeline parallelism, only a fraction of MoE layers are on this GPU.
     # Approximate: distribute MoE layers proportionally to total layers.
