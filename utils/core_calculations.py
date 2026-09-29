@@ -20,6 +20,7 @@ def calculate_model_memory_gb(
     ffn_weight_matrices,
     num_embeddings_tables,
     tp=1,
+    ep=None,
 ):
     """
     Calculate model memory in GB for a given variant.
@@ -41,6 +42,14 @@ def calculate_model_memory_gb(
             embedding matrix and counting it twice overstates the model.
         tp: Tensor parallelism degree (default 1). TP shards attention,
             FFN, expert, and embedding weights across tp GPUs.
+        ep: Expert parallelism degree used to re-derive experts_per_gpu from a
+            variant's own "num_experts". Defaults to the global EP. Pass it
+            explicitly to drive this function at an EP other than the configured
+            one -- notably ep=1, which places every expert on one rank and so
+            returns the FULL model size, the form that can be reconciled against
+            a published parameter count. Without this the global EP was applied
+            unconditionally and the experts_per_gpu argument was silently
+            discarded for any variant declaring num_experts.
 
     Returns:
         float: Model memory in GB
@@ -57,8 +66,9 @@ def calculate_model_memory_gb(
     # Note moe_layer_params in the catalog already reflects the true count, but
     # it is metadata -- the memory path below uses expert_each * experts_per_gpu.
     variant_experts = variant.get("num_experts")
-    if variant_experts and EP > 0:
-        experts_per_gpu = max(1, variant_experts // EP)
+    effective_ep = EP if ep is None else ep
+    if variant_experts and effective_ep > 0:
+        experts_per_gpu = max(1, variant_experts // effective_ep)
 
     # When using pipeline parallelism, only a fraction of MoE layers are on this GPU.
     # Approximate: distribute MoE layers proportionally to total layers.
@@ -67,7 +77,31 @@ def calculate_model_memory_gb(
     if layers > 0 and moe_layers > 0:
         moe_layers_per_gpu = int(layers_per_gpu * moe_layers / layers)
 
-    attn_mem = layers_per_gpu * variant["attn_per_layer"] * param_bytes
+    # Attention memory, split by LAYER TYPE for a hybrid-attention model.
+    #
+    # A hybrid family such as Qwen3.5 repeats [linear, linear, linear, full] --
+    # full_attention_interval=4 -- and a Gated DeltaNet "linear_attention" layer
+    # has a completely different weight set from a gated full-attention layer. It
+    # is NOT smaller: measured against the published configs, a GDN layer is
+    # 1.10x to 1.24x a full-attention layer, so charging every layer at
+    # attn_per_layer UNDERSTATES a hybrid model's attention memory.
+    #
+    # A variant carrying "linear_attn_per_layer" is hybrid and is split here.
+    # Without it every layer is full attention, which is right for all the
+    # uniform-attention families.
+    linear_per_layer = variant.get("linear_attn_per_layer")
+    interval = variant.get("full_attention_interval", 1) or 1
+    if linear_per_layer and interval > 1:
+        # Apportion this GPU's layers over the repeating pattern, the same way
+        # moe_layers_per_gpu is apportioned above.
+        full_attn_layers_per_gpu = layers_per_gpu // interval
+        linear_attn_layers_per_gpu = layers_per_gpu - full_attn_layers_per_gpu
+        attn_mem = (
+            full_attn_layers_per_gpu * variant["attn_per_layer"]
+            + linear_attn_layers_per_gpu * linear_per_layer
+        ) * param_bytes
+    else:
+        attn_mem = layers_per_gpu * variant["attn_per_layer"] * param_bytes
     routed_mem = experts_per_gpu * moe_layers_per_gpu * variant["expert_each"] * param_bytes
     shared_mem = moe_layers_per_gpu * variant["shared_each"] * param_bytes
     router_mem = moe_layers_per_gpu * variant["router_each"] * param_bytes
@@ -151,20 +185,32 @@ def calculate_zero3_transient_gb(
             (variant["attn_per_layer"] + ffn_weight_matrices * d * variant["dense_ffn"]) / tp
             + layer_norm * d
         )
+        # On a hybrid family the linear-attention layer is a DIFFERENT and
+        # typically LARGER gathered unit (1.10x-1.24x full attention), so it can
+        # be the one that sets the floor.
+        if variant.get("linear_attn_per_layer"):
+            units["dense_linear_attn_layer"] = (
+                (variant["linear_attn_per_layer"]
+                 + ffn_weight_matrices * d * variant["dense_ffn"]) / tp
+                + layer_norm * d
+            )
 
     # An MoE layer: attention + this rank's experts + shared expert + router.
     # experts_per_gpu is used (not the global expert count) because EP has already
     # placed only that many experts on this rank -- ZeRO-3 gathers the rank's set.
     if is_moe:
-        units["moe_layer"] = (
-            (
-                variant["attn_per_layer"]
-                + experts_per_gpu * variant["expert_each"]
-                + variant.get("shared_each", 0)
-            ) / tp
-            + variant.get("router_each", 0)
-            + layer_norm * d
+        moe_body = (
+            experts_per_gpu * variant["expert_each"] + variant.get("shared_each", 0)
         )
+        units["moe_layer"] = (
+            (variant["attn_per_layer"] + moe_body) / tp
+            + variant.get("router_each", 0) + layer_norm * d
+        )
+        if variant.get("linear_attn_per_layer"):
+            units["moe_linear_attn_layer"] = (
+                (variant["linear_attn_per_layer"] + moe_body) / tp
+                + variant.get("router_each", 0) + layer_norm * d
+            )
 
     # One embedding table. For a small model this EXCEEDS a transformer layer --
     # Llama-3.2-3B's 128256 x 3072 table is larger than any of its 28 layers --

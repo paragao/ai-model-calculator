@@ -388,29 +388,51 @@ QWEN3_MOE_VARIANTS = [
 # ============================================================================
 # Qwen3.5 Dense Models
 #
-# LIMITATION: Qwen3.5 is a HYBRID attention family and these entries model it
-# as uniform full attention, which it is not. Qwen3.5-27B's config.json sets
-# full_attention_interval = 4 with a 3:1 layer_types pattern -- three Gated
-# DeltaNet "linear_attention" layers per one "full_attention" layer -- so of 64
-# layers only 16 use full attention and 48 use linear attention with their own
-# shapes (linear_key_head_dim 128, linear_num_key_heads 16,
-# linear_num_value_heads 48).
+# LIMITATION now fixed -- these entries once modelled Qwen3.5 as uniform full
+# attention, which it is not:
+#   - FIXED: the Phase 3 O(seq_len^2) term counts only full-attention layers,
+#     via "full_attention_interval": 4 below. It previously applied to every
+#     layer, overstating long-context time by 54% at 32K and 141% at 128K.
 #
-# Consequences of the simplification:
-#   - attn_per_layer is applied to all layers, overstating attention memory.
-#     A linear-attention layer is NOT negligible: its GDN projections come to
-#     roughly 86% of a full-attention layer, so this is a modest overstatement,
-#     not a 4x one. Filling it in needs the verified GDN parameter count.
-#   - FIXED: the Phase 3 O(seq_len^2) term now counts only full-attention
-#     layers, via "full_attention_interval": 4 below. It previously applied to
-#     every layer, overstating long-context time by 54% at 32K and 141% at 128K.
+# RESOLVED: Qwen3.5 is a HYBRID attention family and is now modelled as one.
+# full_attention_interval = 4 gives a 3:1 layer_types pattern -- three Gated
+# DeltaNet "linear_attention" layers per one gated "full_attention" layer -- so
+# of Qwen3.5-27B's 64 layers, 16 are full attention and 48 are linear.
+#
+# Both halves are now counted from the published configs:
+#   - "attn_per_layer" is the FULL-attention layer.
+#   - "linear_attn_per_layer" is the Gated DeltaNet layer, applied to the
+#     (layers - layers//interval) linear layers by calculate_model_memory_gb.
+#
+# A GDN layer is NOT smaller than a full-attention layer. Measured:
+#     variant              full_attn      GDN     GDN/full
+#     Qwen3.5-27B        104,857,600  115,876,064   1.105x
+#     Qwen3.5-35B-A3B     27,262,976   33,718,464   1.237x
+#     Qwen3.5-122B-A10B   78,643,200   88,523,008   1.126x
+#     Qwen3.5-397B-A17B  104,857,600  118,014,208   1.125x
+# An earlier note in this file estimated 86% and called the old uniform treatment
+# an OVERSTATEMENT. Both were wrong: it was an understatement.
+#
+# GDN weights, per transformers' Qwen3NextGatedDeltaNet, with
+# key_dim = linear_num_key_heads * linear_key_head_dim and
+# value_dim = linear_num_value_heads * linear_value_head_dim:
+#     in_proj_qkvz  d * (key_dim*2 + value_dim*2)   q, k, v and the z gate
+#     in_proj_ba    d * (linear_num_value_heads*2)  beta and alpha gates
+#     conv1d        (key_dim*2 + value_dim) * linear_conv_kernel_dim  depthwise
+#     out_proj      value_dim * d
+#     plus RMSNormGated, A_log and dt_bias, which are negligible
+#
+# The FULL-attention layer was ALSO wrong before: "attn_output_gate": true
+# DOUBLES q_proj (num_attention_heads * head_dim * 2), which the old values
+# omitted -- they were 1.43x to 1.47x too small. Fixing both moved
+# total_params_B from 24.35 to 26.90 for the 27B, and all four now reconcile to
+# within 1% of their published sizes (-0.39%, -0.97%, +0.09%, -0.16%).
 #
 # Qwen3.5 is also multimodal (Qwen3_5ForConditionalGeneration with a
-# vision_config), which this text-only engine does not model. vocab_size 248320
-# is now carried per-variant below. head_dim 256 IS correct, verified against
+# vision_config: depth 27, hidden 1152), which this text-only engine does not
+# model -- that is the residual under 1%. Do NOT close it by inflating text
+# parameters. vocab_size 248320 and head_dim 256 verified against
 # https://huggingface.co/Qwen/Qwen3.5-27B/raw/main/config.json
-#
-# Treat Qwen3.5 attention MEMORY as an upper bound; its time estimate is sound.
 # ============================================================================
 
 QWEN35_DENSE_VARIANTS = [
@@ -426,9 +448,10 @@ QWEN35_DENSE_VARIANTS = [
         "kv_heads": 4,
         "head_dim": 256,
         "dense_layers": 64,
-        "total_params_B": 24.35,
-        "active_params_B": 24.35,
-        "attn_per_layer": 73_400_320,
+        "total_params_B": 26.9,
+        "active_params_B": 26.9,
+        "attn_per_layer": 104_857_600,
+        "linear_attn_per_layer": 115_876_064,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -458,9 +481,10 @@ QWEN35_MOE_VARIANTS = [
         "kv_heads": 2,
         "head_dim": 256,
         "dense_layers": 0,
-        "total_params_B": 34.13,
-        "active_params_B": 2.93,
-        "attn_per_layer": 18_874_368,
+        "total_params_B": 34.66,
+        "active_params_B": 3.45,
+        "attn_per_layer": 27_262_976,
+        "linear_attn_per_layer": 33_718_464,
         "expert_each": 3_145_728,
         "shared_each": 3_145_728,
         "router_each": 524_288,
@@ -483,9 +507,10 @@ QWEN35_MOE_VARIANTS = [
         "kv_heads": 2,
         "head_dim": 256,
         "dense_layers": 0,
-        "total_params_B": 120.55,
-        "active_params_B": 8.21,
-        "attn_per_layer": 53_477_376,
+        "total_params_B": 122.11,
+        "active_params_B": 9.77,
+        "attn_per_layer": 78_643_200,
+        "linear_attn_per_layer": 88_523_008,
         "expert_each": 9_437_184,
         "shared_each": 9_437_184,
         "router_each": 786_432,
@@ -508,9 +533,10 @@ QWEN35_MOE_VARIANTS = [
         "kv_heads": 2,
         "head_dim": 256,
         "dense_layers": 0,
-        "total_params_B": 393.74,
-        "active_params_B": 14.74,
-        "attn_per_layer": 71_303_168,
+        "total_params_B": 396.35,
+        "active_params_B": 17.35,
+        "attn_per_layer": 104_857_600,
+        "linear_attn_per_layer": 118_014_208,
         "expert_each": 12_582_912,
         "shared_each": 12_582_912,
         "router_each": 2_097_152,
