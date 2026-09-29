@@ -400,6 +400,11 @@ def run(variants, hardware, *, report=False):
 
             hw_configs = []
 
+            # Batch cap derived from the token budget and this topology, rather
+            # than a hard-coded constant. The old 600M value was 8x looser than
+            # MIN_STEPS implies and so never fired on any configuration.
+            batch_cap = compute_max_tokens_per_batch(TOTAL_TOKENS, dp, v_seq_len)
+
             # Phase 1's verdict for this exact (variant, hardware) pair, so Phase 2
             # can mark a configuration whose micro batch does not fit. Looked up by
             # the hardware name tagged onto the result rather than by list position.
@@ -419,7 +424,7 @@ def run(variants, hardware, *, report=False):
                     )
 
                     # Only display if tokens per batch is reasonable
-                    if config["tokens_per_batch"] < MAX_TOKENS_PER_BATCH:
+                    if config["tokens_per_batch"] < batch_cap:
                         hw_configs.append(config)
 
                         # Format assessment with color
