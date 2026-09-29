@@ -99,11 +99,26 @@ def calculate_communication_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
         - rs_time_ms: Reduce-scatter time in milliseconds
         - overhead_rating: Performance rating (0=excellent, 3=poor)
     """
-    # Reduce-scatter volume: model + gradients = 2x model memory / DP
-    rs_volume_mb = model_mem_gb * 2 / dp_val * 1000
+    # Reduce-scatter volume per rank, in parameter-memory units.
+    #
+    # ZeRO-2 reduce-scatters the GRADIENTS, which are one tensor per parameter and
+    # therefore exactly one parameter replica in size -- not two. In a ring
+    # reduce-scatter each rank sends and receives (DP-1)/DP of a full replica,
+    # which approaches 1.0 as DP grows rather than shrinking with DP.
+    #
+    # Was `model_mem_gb * 2 / dp_val`: the factor 2 counted model + gradients when
+    # only gradients move, and dividing by DP made communication appear to vanish
+    # as DP grew. At DP=64 the two errors combined understated the volume ~31x.
+    #
+    # ZeRO-1 and ZeRO-2 both total 2*Psi bytes per step -- the same as a baseline
+    # data-parallel all-reduce -- and that total is independent of GPU count.
+    # This reduce-scatter contributes Psi and the all-gather the other Psi.
+    ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
+    rs_volume_mb = model_mem_gb * ring_fraction * 1000
 
-    # Communication time at inter-node bandwidth
-    rs_time_ms = model_mem_gb * 2 / dp_val / inter_node_bw_gb * 1000
+    # Communication time at inter-node bandwidth, derived from the volume above
+    # so the two cannot drift apart.
+    rs_time_ms = rs_volume_mb / inter_node_bw_gb if inter_node_bw_gb else 0.0
 
     # Assign overhead rating based on communication time
     # These thresholds are heuristics based on typical compute times

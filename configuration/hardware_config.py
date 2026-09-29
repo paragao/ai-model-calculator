@@ -42,31 +42,31 @@ HARDWARE = [
     # =============================================
     # p5.48xlarge (H100 SXM, 80 GB)
     # =============================================
-    {"name": "64 p5", "gpus": 512, "nodes": 64, "mem_gb": 80, "label": "512_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "128 p5", "gpus": 1024, "nodes": 128, "mem_gb": 80, "label": "1024_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "256 p5", "gpus": 2048, "nodes": 256, "mem_gb": 80, "label": "2048_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "512 p5", "gpus": 4096, "nodes": 512, "mem_gb": 80, "label": "4096_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
+    {"name": "64 p5", "gpus": 512, "nodes": 64, "mem_gb": 80, "label": "512_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "128 p5", "gpus": 1024, "nodes": 128, "mem_gb": 80, "label": "1024_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "256 p5", "gpus": 2048, "nodes": 256, "mem_gb": 80, "label": "2048_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "512 p5", "gpus": 4096, "nodes": 512, "mem_gb": 80, "label": "4096_H100", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
     # =============================================
     # p5en.48xlarge (H200 SXM, 141 GB)
     # =============================================
-    {"name": "64 p5en", "gpus": 512, "nodes": 64, "mem_gb": 141, "label": "512_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "128 p5en", "gpus": 1024, "nodes": 128, "mem_gb": 141, "label": "1024_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "256 p5en", "gpus": 2048, "nodes": 256, "mem_gb": 141, "label": "2048_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
-    {"name": "512 p5en", "gpus": 4096, "nodes": 512, "mem_gb": 141, "label": "4096_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989},
+    {"name": "64 p5en", "gpus": 512, "nodes": 64, "mem_gb": 141, "label": "512_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "128 p5en", "gpus": 1024, "nodes": 128, "mem_gb": 141, "label": "1024_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "256 p5en", "gpus": 2048, "nodes": 256, "mem_gb": 141, "label": "2048_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
+    {"name": "512 p5en", "gpus": 4096, "nodes": 512, "mem_gb": 141, "label": "4096_H200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 900, "peak_tflops_bf16": 989, "peak_tflops_fp8": 1979},
     # =============================================
     # p6-b200.48xlarge (B200, 180 GB)
     # =============================================
-    {"name": "64 p6-b200", "gpus": 512, "nodes": 64, "mem_gb": 180, "label": "512_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "128 p6-b200", "gpus": 1024, "nodes": 128, "mem_gb": 180, "label": "1024_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "256 p6-b200", "gpus": 2048, "nodes": 256, "mem_gb": 180, "label": "2048_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "512 p6-b200", "gpus": 4096, "nodes": 512, "mem_gb": 180, "label": "4096_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
+    {"name": "64 p6-b200", "gpus": 512, "nodes": 64, "mem_gb": 180, "label": "512_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "128 p6-b200", "gpus": 1024, "nodes": 128, "mem_gb": 180, "label": "1024_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "256 p6-b200", "gpus": 2048, "nodes": 256, "mem_gb": 180, "label": "2048_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "512 p6-b200", "gpus": 4096, "nodes": 512, "mem_gb": 180, "label": "4096_B200", "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
     # =============================================
     # p6-b300.48xlarge (B300 Ultra, 268 GB)
     # =============================================
-    {"name": "64 p6-b300", "gpus": 512, "nodes": 64, "mem_gb": 268, "label": "512_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "128 p6-b300", "gpus": 1024, "nodes": 128, "mem_gb": 268, "label": "1024_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "256 p6-b300", "gpus": 2048, "nodes": 256, "mem_gb": 268, "label": "2048_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
-    {"name": "512 p6-b300", "gpus": 4096, "nodes": 512, "mem_gb": 268, "label": "4096_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
+    {"name": "64 p6-b300", "gpus": 512, "nodes": 64, "mem_gb": 268, "label": "512_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "128 p6-b300", "gpus": 1024, "nodes": 128, "mem_gb": 268, "label": "1024_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "256 p6-b300", "gpus": 2048, "nodes": 256, "mem_gb": 268, "label": "2048_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
+    {"name": "512 p6-b300", "gpus": 4096, "nodes": 512, "mem_gb": 268, "label": "4096_B300", "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250, "peak_tflops_fp8": 4500},
     # =============================================
     # p6e-gb200 UltraServer (GB200 NVL72, 186 GB/GPU)
     #
@@ -85,29 +85,29 @@ HARDWARE = [
     #   intra_node_bw_gbps NVLink5 bidirectional, as for B200/B300
     # https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-p6e-gb200-ultraservers-gpu-performance-ec2
     # =============================================
-    {"name": "1 p6e-gb200", "gpus": 72, "nodes": 1, "mem_gb": 186, "label": "72_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
-    {"name": "2 p6e-gb200", "gpus": 144, "nodes": 2, "mem_gb": 186, "label": "144_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
-    {"name": "4 p6e-gb200", "gpus": 288, "nodes": 4, "mem_gb": 186, "label": "288_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
-    {"name": "8 p6e-gb200", "gpus": 576, "nodes": 8, "mem_gb": 186, "label": "576_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    {"name": "1 p6e-gb200", "gpus": 72, "nodes": 1, "mem_gb": 186, "label": "72_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500, "peak_tflops_fp8": 5000},
+    {"name": "2 p6e-gb200", "gpus": 144, "nodes": 2, "mem_gb": 186, "label": "144_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500, "peak_tflops_fp8": 5000},
+    {"name": "4 p6e-gb200", "gpus": 288, "nodes": 4, "mem_gb": 186, "label": "288_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500, "peak_tflops_fp8": 5000},
+    {"name": "8 p6e-gb200", "gpus": 576, "nodes": 8, "mem_gb": 186, "label": "576_GB200", "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500, "peak_tflops_fp8": 5000},
     # =============================================
     # g5.48xlarge (A10G, 24 GB)
     # =============================================
-    {"name": "1 g5", "gpus": 8, "nodes": 1, "mem_gb": 24, "label": "8_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35},
-    {"name": "4 g5", "gpus": 32, "nodes": 4, "mem_gb": 24, "label": "32_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35},
-    {"name": "8 g5", "gpus": 64, "nodes": 8, "mem_gb": 24, "label": "64_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35},
-    {"name": "16 g5", "gpus": 128, "nodes": 16, "mem_gb": 24, "label": "128_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35},
+    {"name": "1 g5", "gpus": 8, "nodes": 1, "mem_gb": 24, "label": "8_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35, "peak_tflops_fp8": 0},
+    {"name": "4 g5", "gpus": 32, "nodes": 4, "mem_gb": 24, "label": "32_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35, "peak_tflops_fp8": 0},
+    {"name": "8 g5", "gpus": 64, "nodes": 8, "mem_gb": 24, "label": "64_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35, "peak_tflops_fp8": 0},
+    {"name": "16 g5", "gpus": 128, "nodes": 16, "mem_gb": 24, "label": "128_A10G", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 35, "peak_tflops_fp8": 0},
     # =============================================
     # g6.48xlarge (L4, 24 GB)
     # =============================================
-    {"name": "1 g6", "gpus": 8, "nodes": 1, "mem_gb": 24, "label": "8_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121},
-    {"name": "4 g6", "gpus": 32, "nodes": 4, "mem_gb": 24, "label": "32_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121},
-    {"name": "8 g6", "gpus": 64, "nodes": 8, "mem_gb": 24, "label": "64_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121},
-    {"name": "16 g6", "gpus": 128, "nodes": 16, "mem_gb": 24, "label": "128_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121},
+    {"name": "1 g6", "gpus": 8, "nodes": 1, "mem_gb": 24, "label": "8_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121, "peak_tflops_fp8": 242},
+    {"name": "4 g6", "gpus": 32, "nodes": 4, "mem_gb": 24, "label": "32_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121, "peak_tflops_fp8": 242},
+    {"name": "8 g6", "gpus": 64, "nodes": 8, "mem_gb": 24, "label": "64_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121, "peak_tflops_fp8": 242},
+    {"name": "16 g6", "gpus": 128, "nodes": 16, "mem_gb": 24, "label": "128_L4", "inter_node_bw_gb": 12.5, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 121, "peak_tflops_fp8": 242},
     # =============================================
     # g6e.48xlarge (L40S, 48 GB)
     # =============================================
-    {"name": "1 g6e", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366},
-    {"name": "4 g6e", "gpus": 32, "nodes": 4, "mem_gb": 48, "label": "32_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366},
-    {"name": "8 g6e", "gpus": 64, "nodes": 8, "mem_gb": 48, "label": "64_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366},
-    {"name": "16 g6e", "gpus": 128, "nodes": 16, "mem_gb": 48, "label": "128_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366},
+    {"name": "1 g6e", "gpus": 8, "nodes": 1, "mem_gb": 48, "label": "8_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "peak_tflops_fp8": 733},
+    {"name": "4 g6e", "gpus": 32, "nodes": 4, "mem_gb": 48, "label": "32_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "peak_tflops_fp8": 733},
+    {"name": "8 g6e", "gpus": 64, "nodes": 8, "mem_gb": 48, "label": "64_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "peak_tflops_fp8": 733},
+    {"name": "16 g6e", "gpus": 128, "nodes": 16, "mem_gb": 48, "label": "128_L40S", "inter_node_bw_gb": 50, "intra_node_bw_gbps": 64, "peak_tflops_bf16": 366, "peak_tflops_fp8": 733},
 ]

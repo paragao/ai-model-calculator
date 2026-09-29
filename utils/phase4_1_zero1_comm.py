@@ -105,20 +105,24 @@ def calculate_zero1_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
         - ag_time_ms: All-gather time in milliseconds
         - overhead_rating: Performance rating (0=excellent, 3=poor)
     """
-    # All-gather volume, as a multiple of parameter memory.
+    # All-gather volume per rank, in parameter-memory units.
     #
-    # The factor 3 is HARDCODED and calibrated for BF16. Do not read it as
-    # OPTIM_BYTES / PARAM_BYTES: OPTIM_BYTES is itself a multiplier on parameter
-    # memory (see advanced_config), so that ratio is not a volume factor and the
-    # two would drift apart under FP8.
+    # ZeRO-1 all-gathers the updated PARAMETERS after the optimizer step, so the
+    # quantity moved is one parameter replica -- NOT the fp32 optimizer state.
+    # In a ring all-gather each rank already holds 1/DP of the result, so it must
+    # send and receive (DP-1)/DP of a full replica. That approaches 1.0 as DP
+    # grows; it does NOT shrink with DP.
     #
-    # OPEN QUESTION, deliberately not changed here: ZeRO-1 all-gathers the updated
-    # PARAMETERS after the optimizer step, which is ~1x parameter memory, not 3x.
-    # A 3x figure is the size of the fp32 optimizer state expressed in parameter-
-    # memory units. Whether this should be 1x or 3x is a modelling decision that
-    # changes every ZeRO-1 communication number, so it needs its own review rather
-    # than a drive-by edit.
-    ag_volume_mb = model_mem_gb * 3 / dp_val * 1000
+    # Was `model_mem_gb * 3 / dp_val`, which was wrong twice over: the factor 3
+    # was the fp32 optimizer state expressed in parameter-memory units (not the
+    # all-gathered quantity), and dividing by DP made communication appear to
+    # vanish as DP grew. At DP=64 that understated the volume 21x.
+    #
+    # ZeRO-1 and ZeRO-2 both total 2*Psi bytes per step -- the same as a baseline
+    # data-parallel all-reduce -- and that total is independent of GPU count.
+    # Reduce-scatter contributes Psi and this all-gather the other Psi.
+    ring_fraction = (dp_val - 1) / dp_val if dp_val > 1 else 0.0
+    ag_volume_mb = model_mem_gb * ring_fraction * 1000
 
     # Communication time at inter-node bandwidth
     ag_time_ms = ag_volume_mb / inter_node_bw_gb

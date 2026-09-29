@@ -29,10 +29,10 @@ MICROS = [1, 2, 4, 8, 16]
 
 # Gradient accumulation steps to evaluate
 #
-# NOTE: 1 is deliberately absent, so a no-accumulation configuration is never
-# evaluated even though it is valid and is often optimal at large DP width. Add 1
-# here if you need that arm considered.
-GRAD_ACCUM_VALUES = [2, 4, 8]
+# 1 means no accumulation, which is valid and is often optimal at large DP width
+# where the global batch is already big enough without it. It was previously
+# absent, so that arm was never evaluated.
+GRAD_ACCUM_VALUES = [1, 2, 4, 8]
 
 # Precision-dependent parameter size
 if PRECISION == "BF16":
