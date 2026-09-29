@@ -367,3 +367,57 @@ def test_zero1_and_zero2_have_no_transient_buffer():
         assert mem["zero3_transient_detail"] is None
     # And ZeRO-3 at the same DP does carry one, so the test above is meaningful.
     assert _mem(DENSE_VARIANT, dp=64, zero_strategy=3)["zero3_transient"] > 0
+
+
+def test_hybrid_attention_uses_per_layer_type_counts():
+    """A hybrid family charges linear layers at their GDN count, not full attention.
+
+    Qwen3.5 repeats [linear, linear, linear, full] (full_attention_interval=4), and
+    a Gated DeltaNet layer is LARGER than a gated full-attention layer -- 1.10x to
+    1.24x measured against the published configs. Charging every layer at
+    attn_per_layer therefore understates a hybrid model, and charging every layer
+    at linear_attn_per_layer would overstate it. Pin the split so neither returns.
+    """
+    from configuration.variants_config import QWEN35_DENSE_VARIANTS
+
+    v = next(x for x in QWEN35_DENSE_VARIANTS if x["name"] == "Qwen3.5-27B")
+    assert v["full_attention_interval"] == 4
+    assert v["linear_attn_per_layer"] > v["attn_per_layer"], (
+        "GDN layer must be larger than a full-attention layer for this family"
+    )
+
+    layers = v["layers"]
+    got = calculate_model_memory_gb(
+        v, layers, 0, PARAM_BYTES, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES,
+        NUM_EMBEDDINGS_TABLES, tp=1,
+    )
+
+    n_full = layers // v["full_attention_interval"]
+    n_linear = layers - n_full
+    assert (n_full, n_linear) == (16, 48)
+
+    d = v["d"]
+    expected_bytes = (
+        n_full * v["attn_per_layer"]
+        + n_linear * v["linear_attn_per_layer"]
+        + layers * FFN_WEIGHT_MATRICES * d * v["dense_ffn"]
+        + NUM_EMBEDDINGS_TABLES * v["vocab"] * d
+        + layers * LAYER_NORM * d
+    ) * PARAM_BYTES
+    assert abs(got - expected_bytes / 1e9) < 1e-6, f"{got} != {expected_bytes / 1e9}"
+
+    # And it must sit between the two uniform treatments, not equal either.
+    uniform_full = dict(v)
+    uniform_full.pop("linear_attn_per_layer")
+    low = calculate_model_memory_gb(
+        uniform_full, layers, 0, PARAM_BYTES, 151936, LAYER_NORM,
+        FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1,
+    )
+    uniform_linear = dict(v)
+    uniform_linear["attn_per_layer"] = v["linear_attn_per_layer"]
+    uniform_linear.pop("linear_attn_per_layer")
+    high = calculate_model_memory_gb(
+        uniform_linear, layers, 0, PARAM_BYTES, 151936, LAYER_NORM,
+        FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1,
+    )
+    assert low < got < high, f"hybrid {got} not between {low} and {high}"
