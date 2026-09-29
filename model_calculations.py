@@ -481,10 +481,10 @@ def run(variants, hardware, *, report=False):
 
             # Print table header
             print(
-                f"\n  {'Platform':<28} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'GBS':>8} {'Tok/batch':>10} {'Steps':>8} {'Bubble%':>8} {'Comm%':>7} {'Rel Speed':>10} {'Est. Time':>12}"
+                f"\n  {'Platform':<28} {'GPUs':>6} {'ZeRO':>5} {'micro':>6} {'accum':>6} {'SeqLen':>7} {'GBS':>8} {'Tok/batch':>10} {'Steps':>8} {'Bubble%':>8} {'Comm%':>7} {'Rel Speed':>10} {'Est. Time':>12}"
             )
             print(
-                f"  {'-' * 28} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 10} {'-' * 12}"
+                f"  {'-' * 28} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 10} {'-' * 12}"
             )
 
             # Calculate and display metrics for each platform
@@ -501,7 +501,7 @@ def run(variants, hardware, *, report=False):
 
                 print(
                     f"  {p['name']:<28} {p['gpus']:>6} {'Z' + str(p['zero']):>5} "
-                    f"{p['micro']:>6} {p['accum']:>6} {p['gbs']:>8,} {p['tok_batch'] / 1e6:>8.1f}M "
+                    f"{p['micro']:>6} {p['accum']:>6} {p['seq_len']:>7,} {p['gbs']:>8,} {p['tok_batch'] / 1e6:>8.1f}M "
                     f"{p['steps']:>8,} {metrics['bubble_pct']:>7.1f}% {metrics['comm_overhead_pct']:>6.1f}% "
                     f"{metrics['rel_speed']:>9.1f}x {time_str}"
                 )
@@ -804,7 +804,9 @@ def run(variants, hardware, *, report=False):
                     dtype_bytes=PARAM_BYTES,
                     inter_node_bw_gb=inter_node_bw,
                     intra_node_bw_gbps=hw["intra_node_bw_gbps"],
-                    gpus_per_node=8,
+                    gpus_per_node=(
+                        hw["gpus"] // hw["nodes"] if hw.get("nodes") else 8
+                    ),
                 )
 
                 print(f"\n  {v['name']} (d={v['d']}, MBS={best_micro}):")

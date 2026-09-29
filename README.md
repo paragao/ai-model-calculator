@@ -2,7 +2,7 @@
 
 Analyze GPU memory, batch configuration, training time, and communication overhead for LLM training on AWS hardware.
 
-Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSeek V3/V3.1/V3.2/V4, Qwen3-MoE, Llama 4 Scout/Maverick) on AWS GPU instances (p5/H100, p5en/H200, p6-b200/B200, p6-b300/B300 Ultra, p6e-gb200/GB200 NVL).
+Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSeek V3/V3.1/V3.2/V4, Qwen3-MoE, Llama 4 Scout/Maverick) on AWS GPU instances (p5/H100, p5en/H200, p6-b200/B200, p6-b300/B300 Ultra). Other platforms, including p6e-gb200/GB200 NVL, can be supplied with `--hardware`.
 
 ## Modes of Operation
 
@@ -167,6 +167,16 @@ https://github.com/paragao/ai-model-calc-power.git
 git clone https://github.com/paragao/ai-model-calc-skill.git ~/.quickwork/profiles/federate-prod/skills/ai-model-calc
 ```
 
+### As a Claude Code Skill
+
+Clone into your personal skills directory (or `.claude/skills/` inside a project to scope it to that repo):
+
+```bash
+git clone https://github.com/paragao/ai-model-calc-cc-skill.git ~/.claude/skills/ai-model-calc
+```
+
+The skill shells out to this calculator, so clone the tool itself as well and tell the skill where it lives.
+
 ## Configuration
 
 Edit `configuration/project_config.py` before running:
@@ -187,16 +197,19 @@ Edit `configuration/project_config.py` before running:
 
 ## Supported Hardware
 
+Built-in cluster presets (28 in total), selectable with `--hw-name`. Preset names are `"<nodes> <platform>"` — for example `--hw-name "128 p5en"`. Node counts are 64, 128, 256 and 512 for p5/p5en/p6-b200/p6-b300, and 1, 4, 8 and 16 for g5/g6/g6e:
+
 | Platform | GPU | Memory | Peak BF16 TFLOPS |
 |----------|-----|--------|-----------------|
 | p5.48xlarge | H100 SXM | 80 GB | 989 |
 | p5en.48xlarge | H200 SXM | 141 GB | 989 |
 | p6-b200.48xlarge | B200 | 180 GB | 2,250 |
 | p6-b300.48xlarge | B300 Ultra | 268 GB | 3,375 |
-| p6e-gb200.36xlarge | GB200 NVL | 185 GB | 2,500 |
 | g5.48xlarge | A10G | 24 GB | 35 |
 | g6.48xlarge | L4 | 24 GB | 121 |
 | g6e.48xlarge | L40S | 48 GB | 366 |
+
+`p6e-gb200.36xlarge` (GB200 NVL, 185 GB, 2,500 peak BF16 TFLOPS, 4 GPUs per node) is **not** a built-in preset. Supply it with `--hardware your_hardware.json`; see `hardware_variant_template.json` for the required fields.
 
 ## Repository Structure
 
@@ -229,3 +242,4 @@ tests/                          # Edge case tests
 
 - [Kiro Power](https://github.com/paragao/ai-model-calc-power) — AI IDE integration
 - [Amazon Quick Skill](https://github.com/paragao/ai-model-calc-skill) — Desktop AI assistant integration
+- [Claude Code Skill](https://github.com/paragao/ai-model-calc-cc-skill) — Claude Code / terminal agent integration

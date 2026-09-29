@@ -33,7 +33,7 @@ LLAMA_DENSE_VARIANTS = [
         "dense_layers": 32,
         "total_params_B": 8.03,
         "active_params_B": 8.03,
-        "attn_per_layer": 37_748_736,
+        "attn_per_layer": 41_943_040,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -73,7 +73,7 @@ LLAMA_DENSE_VARIANTS = [
         "dense_layers": 126,
         "total_params_B": 405.0,
         "active_params_B": 405.0,
-        "attn_per_layer": 603_979_776,
+        "attn_per_layer": 570_425_344,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -248,18 +248,19 @@ QWEN3_DENSE_VARIANTS = [
         "layers": 36,
         "d": 4096,
         "expert_ffn": 0,
-        "dense_ffn": 11008,
+        "dense_ffn": 12288,  # config.json intermediate_size=12288 (was 11008)
+                             # https://huggingface.co/Qwen/Qwen3-8B/raw/main/config.json
         "q_heads": 32,
         "kv_heads": 8,
         "dense_layers": 36,
         "total_params_B": 8.04,
         "active_params_B": 8.04,
-        "attn_per_layer": 37_748_736,
+        "attn_per_layer": 41_943_040,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
         "moe_layer_params": 0,
-        "dense_layer_params": 173_015_040,
+        "dense_layer_params": 192_937_984,  # 41_943_040 + 3 * 4096 * 12288
         "valid_pp": [1, 2, 3, 4, 6, 9, 12, 18, 36],
         "seq_len": 4096,
     },
@@ -271,10 +272,14 @@ QWEN3_DENSE_VARIANTS = [
         "dense_ffn": 25600,
         "q_heads": 64,
         "kv_heads": 8,
+        # Qwen3-32B sets head_dim explicitly to 128 in its config.json; it is
+        # NOT d // q_heads (which would give 80). Verified against
+        # https://huggingface.co/Qwen/Qwen3-32B/raw/main/config.json
+        "head_dim": 128,
         "dense_layers": 64,
         "total_params_B": 30.5,
         "active_params_B": 30.5,
-        "attn_per_layer": 58_982_400,
+        "attn_per_layer": 94_371_840,
         "expert_each": 0,
         "shared_each": 0,
         "router_each": 0,
@@ -298,6 +303,7 @@ QWEN3_MOE_VARIANTS = [
         "dense_ffn": 6144,
         "q_heads": 32,
         "kv_heads": 4,
+        "head_dim": 128,
         "dense_layers": 0,
         "total_params_B": 30.53,
         "active_params_B": 3.35,
@@ -318,6 +324,7 @@ QWEN3_MOE_VARIANTS = [
         "dense_ffn": 12288,
         "q_heads": 64,
         "kv_heads": 4,
+        "head_dim": 128,
         "dense_layers": 0,
         "total_params_B": 235.09,
         "active_params_B": 22.19,
@@ -334,6 +341,27 @@ QWEN3_MOE_VARIANTS = [
 
 # ============================================================================
 # Qwen3.5 Dense Models
+#
+# LIMITATION: Qwen3.5 is a HYBRID attention family and these entries model it
+# as uniform full attention, which it is not. Qwen3.5-27B's config.json sets
+# full_attention_interval = 4 with a 3:1 layer_types pattern -- three Gated
+# DeltaNet "linear_attention" layers per one "full_attention" layer -- so of 64
+# layers only 16 use full attention and 48 use linear attention with their own
+# shapes (linear_key_head_dim 128, linear_num_key_heads 16,
+# linear_num_value_heads 48).
+#
+# Consequences of the simplification:
+#   - attn_per_layer is applied to all 64 layers, overstating attention memory.
+#   - the Phase 3 O(seq_len^2) attention term is applied to all 64 layers, but
+#     linear attention is O(seq_len), so long-context time is overstated and
+#     the error grows with context length.
+#
+# Also unmodelled: Qwen3.5 uses vocab_size 248320 (not the 151936 default in
+# project_config.py) and is multimodal (Qwen3_5ForConditionalGeneration with a
+# vision_config). head_dim 256 below IS correct, verified against
+# https://huggingface.co/Qwen/Qwen3.5-27B/raw/main/config.json
+#
+# Treat Qwen3.5 output as an upper bound on attention cost, not an estimate.
 # ============================================================================
 
 QWEN35_DENSE_VARIANTS = [
@@ -345,6 +373,7 @@ QWEN35_DENSE_VARIANTS = [
         "dense_ffn": 17408,
         "q_heads": 24,
         "kv_heads": 4,
+        "head_dim": 256,
         "dense_layers": 64,
         "total_params_B": 24.35,
         "active_params_B": 24.35,
@@ -372,6 +401,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 16,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 34.13,
         "active_params_B": 2.93,
@@ -392,6 +422,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 32,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 120.55,
         "active_params_B": 8.21,
@@ -412,6 +443,7 @@ QWEN35_MOE_VARIANTS = [
         "dense_ffn": 0,
         "q_heads": 32,
         "kv_heads": 2,
+        "head_dim": 256,
         "dense_layers": 0,
         "total_params_B": 393.74,
         "active_params_B": 14.74,
@@ -428,6 +460,16 @@ QWEN35_MOE_VARIANTS = [
 
 # ============================================================================
 # DeepSeek MoE Models
+#
+# NOTE: attn_per_layer for these variants is NOT reproducible from the generic
+# 2 * d * (q_heads + kv_heads) * head_dim formula in
+# utils/calculate_variant_fields.py. DeepSeek uses Multi-head Latent Attention
+# (MLA), which compresses KV into a low-rank latent projection, so the standard
+# Q/K/V/O parameter count does not apply. Solving the generic formula against
+# the stored value yields a non-integer head_dim (~51), which is the signature
+# of that mismatch rather than a typo. Do not "correct" these to the formula
+# output -- doing so would replace MLA accounting with dense-attention
+# accounting and overstate DeepSeek V3/V3.1/V3.2 attention memory by ~10%.
 # ============================================================================
 
 DEEPSEEK_VARIANTS = [
@@ -444,9 +486,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,
@@ -464,9 +511,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,
@@ -484,9 +536,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,

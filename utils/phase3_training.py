@@ -125,6 +125,7 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
                 "seq_len": seq_len,
                 "inter_node_bw_gb": hw["inter_node_bw_gb"],
                 "intra_node_bw_gbps": hw["intra_node_bw_gbps"],
+                "nodes": hw["nodes"],
             })
 
     if not platforms:
@@ -154,6 +155,14 @@ def calculate_platform_overhead(platform):
     Returns:
         tuple: (bubble_fraction, exposed_comm_ms_per_step)
     """
+    # GPUs per node comes from the hardware entry, not a fixed 8. It decides
+    # whether PP (phase 6) and EP (phase 5) traffic is treated as intra-node
+    # NVLink or inter-node EFA, and those differ by ~3 orders of magnitude, so
+    # assuming 8 on a platform with another density (GB200 NVL is 4) picks the
+    # wrong link. Fall back to 8 only when nodes is missing or zero.
+    nodes = platform.get("nodes") or 0
+    gpus_per_node = platform["gpus"] // nodes if nodes > 0 else 8
+
     pp_metrics = calculate_pp_communication(
         layers=platform["layers_per_gpu"] * platform["pp"],
         hidden_dim=platform["hidden_dim"],
@@ -167,7 +176,7 @@ def calculate_platform_overhead(platform):
         dtype_bytes=PARAM_BYTES,
         inter_node_bw_gb=platform["inter_node_bw_gb"],
         intra_node_bw_gbps=platform["intra_node_bw_gbps"],
-        gpus_per_node=8,
+        gpus_per_node=gpus_per_node,
     )
     bubble_fraction = pp_metrics["pipeline_bubble_pct"] / 100.0
     exposed_comm_ms = pp_metrics["estimated_pp_time_ms"]
@@ -187,7 +196,7 @@ def calculate_platform_overhead(platform):
             dtype_bytes=PARAM_BYTES,
             intra_node_bw_gbps=platform["intra_node_bw_gbps"],
             inter_node_bw_gb=platform["inter_node_bw_gb"],
-            gpus_per_node=8,
+            gpus_per_node=gpus_per_node,
         )
         exposed_comm_ms += A2A_EXPOSED_FRACTION * a2a["a2a_per_step_ms"]
 
@@ -396,7 +405,7 @@ def export_training_results_csv(training_results, filename):
 
     with open(filename, 'w', newline='') as f:
         fieldnames = [
-            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'gbs',
+            'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'seq_len', 'gbs',
             'tok_batch', 'steps', 'est_months', 'rel_speed', 'months_low',
             'months_high', 'bubble_pct', 'comm_overhead_pct', 'efficiency_rating'
         ]
@@ -412,6 +421,7 @@ def export_training_results_csv(training_results, filename):
                     'zero': platform['zero'],
                     'micro': platform['micro'],
                     'accum': platform['accum'],
+                    'seq_len': platform.get('seq_len', ''),
                     'gbs': platform.get('gbs', ''),
                     'tok_batch': platform['tok_batch'],
                     'steps': platform['steps'],
