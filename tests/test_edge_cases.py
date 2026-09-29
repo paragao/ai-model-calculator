@@ -664,3 +664,72 @@ def test_step_band_brackets_the_published_frontier_runs():
     # "fixes" the apparent contradiction by moving MAX_STEPS.
     assert TOKENS_PER_BATCH == 4e6
     assert TOTAL_TOKENS / TOKENS_PER_BATCH > MAX_STEPS
+
+
+def test_phase2_csv_export_carries_feasibility_fields():
+    """The Phase 2 CSV must export fits_in_memory and exceeds_batch_cap.
+
+    These two fields are the whole point of the memory-feasibility audit, but the
+    CSV is what feeds the report/dashboard integration -- so a flag that is
+    computed, warned about on stdout, and then dropped at the export boundary is
+    invisible to every downstream consumer. That is precisely what shipped: the
+    fields were added to the returned dict and the fieldnames list was not
+    updated, which csv.DictWriter does not complain about for a MISSING key.
+
+    Also pins the tri-state encoding. fits_in_memory is None when the caller did
+    not supply Phase 1's verdict, and "not assessed" must stay distinguishable
+    from "assessed, does not fit" -- so None exports as an empty cell, not False.
+    """
+    import csv
+    import os
+    import tempfile
+    from utils.phase2_batch import analyze_batch_configuration, export_batch_results_csv
+
+    hw = {"name": "64 p5", "gpus": 64, "mem_gb": 80}
+
+    # micro 2 and 4 fit under max_viable_micro=4; 8 and 16 do not.
+    assessed = [
+        analyze_batch_configuration(hw, micro, 4, dp=8, seq_len=4096,
+                                    variant_name="TestModel", max_viable_micro=4)
+        for micro in (2, 4, 8, 16)
+    ]
+    # No Phase 1 verdict supplied, so fits_in_memory must stay None.
+    unassessed = [
+        analyze_batch_configuration({"name": "unassessed"}, micro, 4, dp=8,
+                                    seq_len=4096, variant_name="TestModel")
+        for micro in (2, 8)
+    ]
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmpdir, "phase2.csv")
+        export_batch_results_csv({"a": assessed, "b": unassessed}, path)
+
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+
+        assert rows, "export produced no rows"
+
+        # The columns must exist at all -- this is the regression that shipped.
+        for field in ("fits_in_memory", "exceeds_batch_cap"):
+            assert field in rows[0], f"CSV export dropped the {field} column"
+
+        assessed_rows = [r for r in rows if r["hardware"] == "64 p5"]
+        assert len(assessed_rows) == 4
+        for r in assessed_rows:
+            expected = "True" if int(r["micro_batch"]) <= 4 else "False"
+            assert r["fits_in_memory"] == expected, (
+                f"micro={r['micro_batch']} exported {r['fits_in_memory']}, "
+                f"expected {expected}"
+            )
+
+        # An unassessed row must be blank, NOT False -- otherwise a consumer
+        # cannot tell "no Phase 1 data" from "definitely does not fit".
+        unassessed_rows = [r for r in rows if r["hardware"] == "unassessed"]
+        assert len(unassessed_rows) == 2
+        assert all(r["fits_in_memory"] == "" for r in unassessed_rows), (
+            "unassessed rows must export an empty cell, not a coerced False"
+        )
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
