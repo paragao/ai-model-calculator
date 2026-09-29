@@ -248,7 +248,8 @@ QWEN3_DENSE_VARIANTS = [
         "layers": 36,
         "d": 4096,
         "expert_ffn": 0,
-        "dense_ffn": 11008,
+        "dense_ffn": 12288,  # config.json intermediate_size=12288 (was 11008)
+                             # https://huggingface.co/Qwen/Qwen3-8B/raw/main/config.json
         "q_heads": 32,
         "kv_heads": 8,
         "dense_layers": 36,
@@ -259,7 +260,7 @@ QWEN3_DENSE_VARIANTS = [
         "shared_each": 0,
         "router_each": 0,
         "moe_layer_params": 0,
-        "dense_layer_params": 173_015_040,
+        "dense_layer_params": 192_937_984,  # 41_943_040 + 3 * 4096 * 12288
         "valid_pp": [1, 2, 3, 4, 6, 9, 12, 18, 36],
         "seq_len": 4096,
     },
@@ -485,9 +486,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,
@@ -505,9 +511,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,
@@ -525,9 +536,14 @@ DEEPSEEK_VARIANTS = [
         "active_params_B": 36.7,
         "attn_per_layer": 187_105_280,
         "expert_each": 44_040_192,
-        "shared_each": 396_361_728,
+        # Shared expert is sized at moe_intermediate_size (2048), NOT intermediate_size
+        # (18432, which applies only to the 3 dense layers): 3 * 7168 * 2048.
+        # config.json: n_shared_experts=1, moe_intermediate_size=2048
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        "shared_each": 44_040_192,
         "router_each": 1_835_008,
-        "moe_layer_params": 11_672_485_888,
+        # 256 * 44_040_192 + 44_040_192 (shared) + 1_835_008 (router)
+        "moe_layer_params": 11_320_164_352,
         "dense_layer_params": 583_467_008,
         "valid_pp": [1, 61],
         "seq_len": 4096,
