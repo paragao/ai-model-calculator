@@ -573,6 +573,71 @@ def test_step_outliers_are_the_extreme_step_values_and_everything_is_classified(
     classify_step_outliers(three)
     assert [c["priority"] for c in three] == [3, 1, 3]
 
+
+def test_absurd_step_check_is_absolute_and_stays_quiet_on_the_structural_case():
+    """The absolute sanity check the relative outlier rule structurally cannot give.
+
+    classify_step_outliers judges a configuration only against its siblings, so a
+    pair whose ENTIRE range is outside published practice still reports its middle
+    as "reasonable" -- measured: Llama-3.1-8B on "1 g5" calls 57.2M-1.83B steps
+    reasonable. This check is a SEPARATE axis, keyed to the smallest batch any
+    published frontier run used at any point (Llama 3 405B's ramp-start 4M,
+    arXiv:2407.21783 S3.4.1), so it makes a statement about the published envelope
+    rather than about optimality.
+
+    The subtle part, and the reason this test exists, is the threshold. Every
+    micro x accum grid contains micro=1/accum=1, the smallest expressible batch and
+    so the most steps, which makes "at least one absurd configuration" nearly
+    structural -- 572 of 704 pairs. Warning there would reproduce the exact failure
+    of the bands this replaced. So the pair-level line fires only when the pair's
+    LARGEST reasonable batch is itself absurd.
+    """
+    from configuration.advanced_config import compute_absurd_step_ceiling
+    from configuration.project_config import TOTAL_TOKENS
+    from utils.phase2_batch import (classify_step_outliers,
+                                    generate_batch_recommendations)
+
+    ceiling = compute_absurd_step_ceiling(TOTAL_TOKENS)
+
+    # Provenance: the ceiling is total tokens divided by the ramp-start batch, and
+    # is LOOSER than MAX_STEPS -- it is a credibility floor, not a quality target.
+    from configuration.advanced_config import TOKENS_PER_BATCH, MAX_STEPS
+    assert ceiling == TOTAL_TOKENS / TOKENS_PER_BATCH
+    assert ceiling > MAX_STEPS, "an absurdity floor must be looser than the old band"
+
+    def pair(step_values):
+        cfgs = [
+            {"steps": s, "micro": 1, "accum": 1, "hardware": "hw",
+             "tokens_per_batch": TOTAL_TOKENS / s,
+             "steps_absurd": s > ceiling}
+            for s in step_values
+        ]
+        return classify_step_outliers(cfgs)
+
+    def lines(step_values):
+        return generate_batch_recommendations({"V | hw": pair(step_values)})
+
+    # 1. Wholly absurd -> escalated. Every value above the ceiling.
+    out = lines([c * ceiling for c in (2, 4, 8, 16)])
+    assert any(r.startswith("🚨") for r in out), out
+    assert "no configuration in this pair is credible" in " ".join(out)
+
+    # 2. Best reasonable absurd, but not all absurd -> warn, not escalate.
+    #    Largest batch = fewest steps, so the smallest step value is the best pick.
+    #    Make it an outlier so the best REASONABLE one is still above the ceiling.
+    out = lines([ceiling * 0.5, ceiling * 2, ceiling * 4, ceiling * 8])
+    assert not any(r.startswith("🚨") for r in out), out
+    assert any("even the largest reasonable batch" in r for r in out), out
+
+    # 3. Best reasonable is credible -> SILENT, even though absurd configs exist.
+    #    This is the structural 81% case that must not produce a warning.
+    out = lines([ceiling * 0.2, ceiling * 0.5, ceiling * 0.9, ceiling * 50])
+    assert not any(r.startswith("🚨") for r in out), out
+    assert not any("published practice" in r for r in out), (
+        "a pair whose best reasonable batch is credible must emit no absolute "
+        f"warning, or the check degenerates into flagging 4 pairs in 5: {out}"
+    )
+
     # Empty input must not raise.
     assert classify_step_outliers([]) == []
 
@@ -780,8 +845,18 @@ def test_phase2_csv_export_carries_feasibility_fields():
         assert rows, "export produced no rows"
 
         # The columns must exist at all -- this is the regression that shipped.
-        for field in ("fits_in_memory", "exceeds_batch_cap"):
+        # steps_absurd is the same class of defect one round later: computed in the
+        # row dict, warned about on stdout, and absent from fieldnames.
+        for field in ("fits_in_memory", "exceeds_batch_cap", "steps_absurd"):
             assert field in rows[0], f"CSV export dropped the {field} column"
+
+        # steps_absurd must be a real value on every row, never blank here: unlike
+        # fits_in_memory it needs no caller-supplied input, so an empty cell would
+        # mean the field silently failed to reach the row.
+        assert all(r["steps_absurd"] in ("True", "False") for r in rows), (
+            f"steps_absurd must be populated on every row: "
+            f"{sorted({r['steps_absurd'] for r in rows})}"
+        )
 
         assessed_rows = [r for r in rows if r["hardware"] == "64 p5"]
         assert len(assessed_rows) == 4

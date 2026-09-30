@@ -15,7 +15,18 @@ Most users should leave these at their default values.
 from .project_config import PRECISION
 
 # Target batch size configuration
-TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
+#
+# NOT a target any longer -- no code tries to match it. Phase 2's "does this batch
+# hit TOKENS_PER_BATCH" check was unreachable and was removed. The value is Llama 3
+# 405B's INITIAL batch (arXiv:2407.21783 S3.4.1: "an initial batch size of 4M
+# tokens and sequences of length 4,096"), which that run doubled to 8M and then 16M.
+#
+# Its two live consumers read it as exactly that -- the smallest batch in published
+# practice, not a goal:
+#   - compute_absurd_step_ceiling: total_tokens / this = the step count above which
+#     a configuration asks for a batch no published frontier run ever used.
+#   - Phase 6's global-batch approximation.
+TOKENS_PER_BATCH = 4e6  # Llama 3 405B ramp-START batch, used as a credibility floor
 
 # ZeRO optimization strategies with efficiency multipliers
 #
@@ -190,6 +201,13 @@ GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory
 # and MIN_STEPS/MAX_STEPS bound the reported band in describe_batch_budget. The four
 # LOWER_/UPPER_BOUND_* constants are now unused by Phase 2; they are left in place
 # rather than deleted because removing them is a separate decision.
+#
+# THE ABSOLUTE AXIS DID COME BACK, but as one credibility floor rather than as
+# quality bands: compute_absurd_step_ceiling flags a configuration implying more
+# steps than TOTAL_TOKENS / TOKENS_PER_BATCH (3,750,000), i.e. a batch smaller than
+# Llama 3's ramp-start. It is 3.1x looser than MAX_STEPS, so it does not restore
+# the old "too many steps" verdict, and it is reported alongside the relative
+# verdict instead of replacing it. These six band constants remain unused by it.
 LOWER_BOUND_OPTIM_RANGE = 300_000
 UPPER_BOUND_OPTIM_RANGE = 800_000
 LOWER_BOUND_LOW_RANGE = 200_000
@@ -318,6 +336,77 @@ def describe_batch_budget(total_tokens, dp, seq_len,
         "floor_exceeds_band": floor > band_high,
         "implied_steps_at_floor": total_tokens / floor,
     }
+
+
+def compute_absurd_step_ceiling(total_tokens, ref_batch_tokens=None):
+    """Step count above which a configuration is outside published practice.
+
+    This is an ABSOLUTE sanity check, and it exists because the relative outlier
+    rule in phase2_batch.classify_step_outliers structurally cannot provide one.
+    That rule judges a configuration only against its siblings in the same
+    (variant, hardware) pair, so a pair whose ENTIRE range is absurd reports every
+    middle configuration as "reasonable". Measured: Llama-3.1-8B on "1 g5" spans
+    28,610,229 to 3,662,109,375 steps, and the relative rule calls the 57,220,458
+    to 1,831,054,687 middle band reasonable. Nothing in a relative comparison can
+    object, because within that pair those really are the least extreme values.
+
+    THE REFERENCE IS THE SMALLEST BATCH IN PUBLISHED PRACTICE, not a quality
+    target. TOKENS_PER_BATCH (4e6) is Llama 3 405B's INITIAL batch -- the smallest
+    batch it used at any point in training, before ramping to 8M and then 16M
+    (arXiv:2407.21783 S3.4.1). DeepSeek-V3's smallest was larger still, 3072 x 4096
+    = 12.6M (arXiv:2412.19437 S4.2). So a configuration implying MORE steps than
+    total_tokens / 4e6 asks for a batch smaller than any published frontier run
+    used at any point, which is a statement about the published envelope rather
+    than an opinion about optimality. At TOTAL_TOKENS = 15e12 that is 3,750,000
+    steps.
+
+    This deliberately does NOT reinstate the bands that were removed. The bands
+    graded quality on an absolute scale and condemned 81% of configurations as
+    "too many steps" while telling the reader nothing. This returns one
+    order-of-magnitude floor on credibility, is reported as a SEPARATE axis from
+    the relative verdict rather than overriding it, and is 3.1x looser than
+    MAX_STEPS -- so a configuration can be well outside the old "optimal" window
+    and still not be absurd.
+
+    WHAT IT CATCHES, measured over the full 13,728-configuration post-cap sweep:
+    8,096 configurations (59.0%), but the distribution is what matters and it is
+    sharply targeted rather than a blanket condemnation --
+
+        g5 / g6 / g6e (inference-class)   95.0% flagged
+        p6e-gb200                         75.0% flagged
+        p5 / p5en / p6-b200 / p6-b300     26.3% flagged
+
+    and of the 704 pairs, the 132 whose every configuration is absurd are EXACTLY
+    the six small presets (1 and 4 instances of g5, g6, g6e) x 22 variants. No
+    p5-class or p6-class pair is wholly absurd. The check is therefore mostly
+    answering "this topology is too small to train this token budget at all",
+    which is the case the relative rule is blind to.
+
+    THERE IS NO LOWER COUNTERPART, and that is by construction rather than an
+    omission. The caller admits a configuration only when tokens_per_batch is
+    strictly below compute_max_tokens_per_batch, whose step ceiling term is
+    total_tokens / MIN_STEPS. So steps = total_tokens / batch > MIN_STEPS always
+    holds for any configuration Phase 2 ever sees -- zero of the 13,728 fall below
+    MIN_STEPS, and none can. The too-few-steps side is already enforced upstream
+    by the derived cap, so adding a second check for it would be dead code.
+
+    Args:
+        total_tokens: Training token budget (TOTAL_TOKENS).
+        ref_batch_tokens: Smallest batch considered credible, in tokens. Defaults
+            to TOKENS_PER_BATCH, which is Llama 3's ramp-start batch.
+
+    Returns:
+        Step count above which a configuration is flagged absurd.
+    """
+    if ref_batch_tokens is None:
+        ref_batch_tokens = TOKENS_PER_BATCH
+    if total_tokens <= 0 or ref_batch_tokens <= 0:
+        raise ValueError(
+            f"total_tokens and ref_batch_tokens must be positive, got "
+            f"total_tokens={total_tokens}, ref_batch_tokens={ref_batch_tokens}"
+        )
+    return total_tokens / ref_batch_tokens
+
 
 # Hardware memory specifications (GB)
 #

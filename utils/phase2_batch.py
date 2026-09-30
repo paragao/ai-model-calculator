@@ -130,6 +130,15 @@ def analyze_batch_configuration(hw, micro, accum, dp, seq_len=None, variant_name
           configurations, so it cannot be set here.
         - priority: None for the same reason. After classification it is 1
           (reasonable) or 3 (outlier).
+        - steps_absurd: True when steps exceeds compute_absurd_step_ceiling, i.e.
+          when the batch is smaller than Llama 3's ramp-start 4M and so smaller
+          than any published frontier run used at any point. This is the ABSOLUTE
+          sanity check and is INDEPENDENT of assessment/priority, which are purely
+          relative: a configuration can be "reasonable" among its siblings and
+          still be absurd, which is precisely the case on the six small-GPU presets
+          where every configuration in the pair is absurd. Note there is no
+          too-few-steps counterpart because the caller's cap already guarantees
+          steps > MIN_STEPS -- see compute_absurd_step_ceiling.
         - hardware: Hardware name
         - exceeds_batch_cap: True when tokens_per_batch is at or above the cap
           DERIVED for this configuration by compute_max_tokens_per_batch, i.e.
@@ -171,6 +180,13 @@ def analyze_batch_configuration(hw, micro, accum, dp, seq_len=None, variant_name
         # and generate_batch_recommendations raises rather than accept one.
         "assessment": None,
         "priority": None,
+        # The ABSOLUTE axis, and unlike assessment/priority it CAN be set here,
+        # because it compares one configuration against a fixed published
+        # reference rather than against its siblings. Kept as its own field
+        # instead of folded into priority so the two axes stay readable: a
+        # configuration can be the least extreme in its pair and still ask for a
+        # batch no published run used.
+        "steps_absurd": steps > compute_absurd_step_ceiling(TOTAL_TOKENS),
         "exceeds_batch_cap": tokens_per_batch >= compute_max_tokens_per_batch(
             TOTAL_TOKENS, dp, seq_len
         ),
@@ -185,6 +201,14 @@ def generate_batch_recommendations(batch_results):
     Reports the step-count SPREAD for each (variant, hardware) pair and names the
     outliers to drop, rather than asserting an absolute step target. See
     classify_step_outliers for why the absolute bands were removed.
+
+    Emits on TWO INDEPENDENT AXES, which answer different questions and can
+    disagree. The relative axis (📊) says which configurations are least extreme
+    among their siblings. The absolute axis (🚨/⚠️) says whether the pair is inside
+    published practice at all -- see compute_absurd_step_ceiling. A pair can be
+    wholly absurd and still have "reasonable" siblings, because "reasonable" is
+    only ever a comparison within the pair; that case is escalated to 🚨 precisely
+    because the relative rule cannot express it.
 
     Args:
         batch_results: Dict with "variant | hardware" -> list of batch configs,
@@ -263,6 +287,47 @@ def generate_batch_recommendations(batch_results):
                 f"cross-check against Phase 1 before using one."
             )
 
+        # The absolute axis. This is reported SEPARATELY from the relative verdict
+        # because the two answer different questions: "reasonable" means least
+        # extreme among its siblings, which says nothing about whether the whole
+        # pair is credible. The wholly-absurd case is the one the relative rule
+        # structurally cannot see, so it is escalated rather than folded in.
+        #
+        # DELIBERATELY NOT "any absurd config". Every micro x accum grid contains
+        # micro=1/accum=1, which is the smallest expressible batch and therefore
+        # the most steps, so at least one absurd configuration is near-structural:
+        # measured at 572 of 704 pairs (81%). Warning on that would reproduce the
+        # exact failure of the step bands this replaced -- flagging four pairs in
+        # five and so carrying no information. The threshold is instead whether the
+        # pair's LARGEST-batch reasonable configuration is absurd, i.e. whether
+        # following the relative recommendation still lands outside published
+        # practice: 220 of 704 pairs (31%), of which 132 are wholly absurd. The
+        # remaining per-configuration detail is in the CSV's steps_absurd column.
+        absurd = [c for c in configs if c.get("steps_absurd")]
+        best_reasonable = max(reasonable, key=lambda c: c["tokens_per_batch"])
+        ceiling = compute_absurd_step_ceiling(TOTAL_TOKENS)
+
+        if len(absurd) == len(configs):
+            fewest = min(c["steps"] for c in configs)
+            recommendations.append(
+                f"🚨 {hw_name}: ALL {len(configs)} configurations imply more than "
+                f"{ceiling:,.0f} steps -- the fewest is {fewest:,.0f}. Every batch "
+                f"here is smaller than any published frontier run used at any "
+                f"point in training, so the 'reasonable' ratings above are "
+                f"relative to siblings that are themselves outside published "
+                f"practice. This hardware is too small for this variant; no "
+                f"configuration in this pair is credible."
+            )
+        elif best_reasonable.get("steps_absurd"):
+            recommendations.append(
+                f"⚠️  {hw_name}: even the largest reasonable batch "
+                f"({best_reasonable['tokens_per_batch']/1e6:.1f}M tokens, "
+                f"{best_reasonable['steps']:,.0f} steps) exceeds {ceiling:,.0f} "
+                f"steps and is outside published practice. The relative verdict "
+                f"ranks within this pair only -- scale up the hardware or raise "
+                f"micro/accum beyond this grid for a credible batch."
+            )
+
     return recommendations
 
 
@@ -279,7 +344,7 @@ def export_batch_results_csv(batch_results, filename):
     with open(filename, 'w', newline='') as f:
         fieldnames = ['variant', 'hardware', 'seq_len', 'micro_batch', 'grad_accum',
                       'tokens_per_batch_M', 'training_steps', 'assessment', 'priority',
-                      'fits_in_memory', 'exceeds_batch_cap']
+                      'fits_in_memory', 'exceeds_batch_cap', 'steps_absurd']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -303,7 +368,15 @@ def export_batch_results_csv(batch_results, filename):
                     'fits_in_memory': ('' if config.get('fits_in_memory') is None
                                        else config['fits_in_memory']),
                     'exceeds_batch_cap': ('' if config.get('exceeds_batch_cap') is None
-                                          else config['exceeds_batch_cap'])
+                                          else config['exceeds_batch_cap']),
+                    # The ABSOLUTE axis, deliberately a separate column from
+                    # assessment/priority rather than folded into them: a row can
+                    # read priority 1 "reasonable" and steps_absurd True at the
+                    # same time, because the verdict is relative to the pair while
+                    # this is measured against published practice. Filtering a
+                    # report on priority alone will therefore keep absurd rows.
+                    'steps_absurd': ('' if config.get('steps_absurd') is None
+                                     else config['steps_absurd'])
                 }
                 writer.writerow(row)
     print(f"\n✅ Exported batch analysis to {filename}")
