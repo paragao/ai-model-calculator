@@ -15,7 +15,18 @@ Most users should leave these at their default values.
 from .project_config import PRECISION
 
 # Target batch size configuration
-TOKENS_PER_BATCH = 4e6  # Target tokens per batch (4M default)
+#
+# NOT a target any longer -- no code tries to match it. Phase 2's "does this batch
+# hit TOKENS_PER_BATCH" check was unreachable and was removed. The value is Llama 3
+# 405B's INITIAL batch (arXiv:2407.21783 S3.4.1: "an initial batch size of 4M
+# tokens and sequences of length 4,096"), which that run doubled to 8M and then 16M.
+#
+# Its two live consumers read it as exactly that -- the smallest batch in published
+# practice, not a goal:
+#   - compute_absurd_step_ceiling: total_tokens / this = the step count above which
+#     a configuration asks for a batch no published frontier run ever used.
+#   - Phase 6's global-batch approximation.
+TOKENS_PER_BATCH = 4e6  # Llama 3 405B ramp-START batch, used as a credibility floor
 
 # ZeRO optimization strategies with efficiency multipliers
 #
@@ -164,7 +175,39 @@ FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching alloc
 # Memory utilization
 GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory
 
-# Training step boundaries (for assessing batch size quality)
+# Training step boundaries
+#
+# NO LONGER USED TO CLASSIFY BATCH CONFIGURATIONS. Phase 2 used to score each
+# configuration against these bands plus a priority-0 "matches TOKENS_PER_BATCH"
+# check; both were unusable and were replaced by a RELATIVE rule
+# (phase2_batch.classify_step_outliers): Phase 2 now reports the step count a
+# configuration implies and marks only the smallest and largest step counts within
+# a (variant, hardware) pair as outliers.
+#
+# Why the absolute bands went:
+#   - The priority-0 target check was UNREACHABLE. tokens_per_batch is
+#     dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
+#     absolute number: 0 hits across 14,080 swept configurations, so priority 0 was
+#     never returned and the optimal_configs list was always empty.
+#   - The bands DISAGREED with TOKENS_PER_BATCH. TOTAL_TOKENS / TOKENS_PER_BATCH =
+#     3,750,000 steps, 3.1x MAX_STEPS, while the optimal band implied a batch of
+#     18.8M-50.0M tokens, 5x-12x the configured target.
+#   - The verdict was useless in practice: 80.8% of configurations landed in "too
+#     many steps". Switching to the relative rule moved 10,076 of those to
+#     "reasonable" without anything about them changing -- which is the point, but
+#     also means "reasonable" now asserts only "not extreme among its siblings".
+#
+# STILL LIVE: MIN_STEPS is the step ceiling in compute_max_tokens_per_batch below,
+# and MIN_STEPS/MAX_STEPS bound the reported band in describe_batch_budget. The four
+# LOWER_/UPPER_BOUND_* constants are now unused by Phase 2; they are left in place
+# rather than deleted because removing them is a separate decision.
+#
+# THE ABSOLUTE AXIS DID COME BACK, but as one credibility floor rather than as
+# quality bands: compute_absurd_step_ceiling flags a configuration implying more
+# steps than TOTAL_TOKENS / TOKENS_PER_BATCH (3,750,000), i.e. a batch smaller than
+# Llama 3's ramp-start. It is 3.1x looser than MAX_STEPS, so it does not restore
+# the old "too many steps" verdict, and it is reported alongside the relative
+# verdict instead of replacing it. These six band constants remain unused by it.
 LOWER_BOUND_OPTIM_RANGE = 300_000
 UPPER_BOUND_OPTIM_RANGE = 800_000
 LOWER_BOUND_LOW_RANGE = 200_000
@@ -173,23 +216,6 @@ LOWER_BOUND_HIGH_RANGE = 800_000
 UPPER_BOUND_HIGH_RANGE = 1_200_000
 MIN_STEPS = 200_000
 MAX_STEPS = 1_200_000
-
-# The step bounds above are CONTIGUOUS and are consumed as half-open intervals by
-# phase2_batch.assess_training_steps, so every step count is classified. They were
-# once all tested strictly on both sides, which left 200_000 / 300_000 / 800_000
-# matching no branch and reported as "unknown".
-#
-# UNRESOLVED -- these bounds DISAGREE with TOKENS_PER_BATCH in project_config:
-#   TOTAL_TOKENS / TOKENS_PER_BATCH = 15e12 / 4e6 = 3,750,000 steps, which is 3.1x
-#   MAX_STEPS. The optimal band instead implies a batch of
-#   TOTAL_TOKENS/UPPER_BOUND_OPTIM_RANGE .. TOTAL_TOKENS/LOWER_BOUND_OPTIM_RANGE
-#   = 18.8M .. 50.0M tokens, i.e. 5x-12x the configured target.
-#   Worse, neither target window is reachable: tokens_per_batch is
-#   dp*micro*accum*seq_len and cannot land within +/-MARGIN (2%) of an arbitrary
-#   absolute number, so priority 0 is never returned at all -- measured 0 hits
-#   across 14,080 swept configs.
-# Fixing it means choosing an intent (a 4M batch, or 300k-800k steps), so it is
-# deliberately not guessed. See the note in assess_training_steps.
 
 # Batch size constraints
 #
@@ -310,6 +336,77 @@ def describe_batch_budget(total_tokens, dp, seq_len,
         "floor_exceeds_band": floor > band_high,
         "implied_steps_at_floor": total_tokens / floor,
     }
+
+
+def compute_absurd_step_ceiling(total_tokens, ref_batch_tokens=None):
+    """Step count above which a configuration is outside published practice.
+
+    This is an ABSOLUTE sanity check, and it exists because the relative outlier
+    rule in phase2_batch.classify_step_outliers structurally cannot provide one.
+    That rule judges a configuration only against its siblings in the same
+    (variant, hardware) pair, so a pair whose ENTIRE range is absurd reports every
+    middle configuration as "reasonable". Measured: Llama-3.1-8B on "1 g5" spans
+    28,610,229 to 3,662,109,375 steps, and the relative rule calls the 57,220,458
+    to 1,831,054,687 middle band reasonable. Nothing in a relative comparison can
+    object, because within that pair those really are the least extreme values.
+
+    THE REFERENCE IS THE SMALLEST BATCH IN PUBLISHED PRACTICE, not a quality
+    target. TOKENS_PER_BATCH (4e6) is Llama 3 405B's INITIAL batch -- the smallest
+    batch it used at any point in training, before ramping to 8M and then 16M
+    (arXiv:2407.21783 S3.4.1). DeepSeek-V3's smallest was larger still, 3072 x 4096
+    = 12.6M (arXiv:2412.19437 S4.2). So a configuration implying MORE steps than
+    total_tokens / 4e6 asks for a batch smaller than any published frontier run
+    used at any point, which is a statement about the published envelope rather
+    than an opinion about optimality. At TOTAL_TOKENS = 15e12 that is 3,750,000
+    steps.
+
+    This deliberately does NOT reinstate the bands that were removed. The bands
+    graded quality on an absolute scale and condemned 81% of configurations as
+    "too many steps" while telling the reader nothing. This returns one
+    order-of-magnitude floor on credibility, is reported as a SEPARATE axis from
+    the relative verdict rather than overriding it, and is 3.1x looser than
+    MAX_STEPS -- so a configuration can be well outside the old "optimal" window
+    and still not be absurd.
+
+    WHAT IT CATCHES, measured over the full 13,728-configuration post-cap sweep:
+    8,096 configurations (59.0%), but the distribution is what matters and it is
+    sharply targeted rather than a blanket condemnation --
+
+        g5 / g6 / g6e (inference-class)   95.0% flagged
+        p6e-gb200                         75.0% flagged
+        p5 / p5en / p6-b200 / p6-b300     26.3% flagged
+
+    and of the 704 pairs, the 132 whose every configuration is absurd are EXACTLY
+    the six small presets (1 and 4 instances of g5, g6, g6e) x 22 variants. No
+    p5-class or p6-class pair is wholly absurd. The check is therefore mostly
+    answering "this topology is too small to train this token budget at all",
+    which is the case the relative rule is blind to.
+
+    THERE IS NO LOWER COUNTERPART, and that is by construction rather than an
+    omission. The caller admits a configuration only when tokens_per_batch is
+    strictly below compute_max_tokens_per_batch, whose step ceiling term is
+    total_tokens / MIN_STEPS. So steps = total_tokens / batch > MIN_STEPS always
+    holds for any configuration Phase 2 ever sees -- zero of the 13,728 fall below
+    MIN_STEPS, and none can. The too-few-steps side is already enforced upstream
+    by the derived cap, so adding a second check for it would be dead code.
+
+    Args:
+        total_tokens: Training token budget (TOTAL_TOKENS).
+        ref_batch_tokens: Smallest batch considered credible, in tokens. Defaults
+            to TOKENS_PER_BATCH, which is Llama 3's ramp-start batch.
+
+    Returns:
+        Step count above which a configuration is flagged absurd.
+    """
+    if ref_batch_tokens is None:
+        ref_batch_tokens = TOKENS_PER_BATCH
+    if total_tokens <= 0 or ref_batch_tokens <= 0:
+        raise ValueError(
+            f"total_tokens and ref_batch_tokens must be positive, got "
+            f"total_tokens={total_tokens}, ref_batch_tokens={ref_batch_tokens}"
+        )
+    return total_tokens / ref_batch_tokens
+
 
 # Hardware memory specifications (GB)
 #

@@ -62,19 +62,23 @@ def format_batch_assessment_with_color(assessment, priority):
 
     Args:
         assessment: Assessment string
-        priority: Priority level (0-3)
+        priority: Priority level. Phase 2 now produces only 1 (reasonable) and
+            3 (outlier); 0 and 2 are retained for callers on the old absolute-band
+            scheme and are no longer emitted by classify_step_outliers.
 
     Returns:
         Colored assessment string
     """
-    if priority == 0:  # Optimal (matches target)
+    if priority == 0:  # legacy: matched an absolute target
         return color_text(assessment, 'cyan')
-    elif priority == 1:  # Good (reasonable)
+    elif priority == 1:  # reasonable -- inside the pair's step-count spread
         return color_text(assessment, 'green')
-    elif priority == 2:  # Borderline
+    elif priority == 2:  # legacy: borderline against an absolute band
         return color_text(assessment, 'yellow')
-    else:  # Poor (too many/few steps)
-        return color_text(assessment, 'red')
+    else:
+        # Outlier: the smallest or largest step count for this pair. Yellow, not
+        # red -- it is extreme relative to its siblings, not an error or a failure.
+        return color_text(assessment, 'yellow')
 
 
 def format_training_time_with_color(months_low, months_high, rel_speed):
