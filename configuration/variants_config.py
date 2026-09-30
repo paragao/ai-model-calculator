@@ -572,6 +572,12 @@ DEEPSEEK_VARIANTS = [
         "expert_ffn": 2048,
         "dense_ffn": 18432,
         "q_heads": 128,
+        # MLA: qk_nope_head_dim 128 + qk_rope_head_dim 64; v_head_dim 128.
+        # Verified against the published config. Used ONLY by
+        # compute_attention_flops_dim, which needs the score/context matmul
+        # widths and cannot derive them from d / q_heads for MLA.
+        "qk_head_dim": 192,
+        "v_head_dim": 128,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
@@ -600,6 +606,12 @@ DEEPSEEK_VARIANTS = [
         "expert_ffn": 2048,
         "dense_ffn": 18432,
         "q_heads": 128,
+        # MLA: qk_nope_head_dim 128 + qk_rope_head_dim 64; v_head_dim 128.
+        # Verified against the published config. Used ONLY by
+        # compute_attention_flops_dim, which needs the score/context matmul
+        # widths and cannot derive them from d / q_heads for MLA.
+        "qk_head_dim": 192,
+        "v_head_dim": 128,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
@@ -628,6 +640,12 @@ DEEPSEEK_VARIANTS = [
         "expert_ffn": 2048,
         "dense_ffn": 18432,
         "q_heads": 128,
+        # MLA: qk_nope_head_dim 128 + qk_rope_head_dim 64; v_head_dim 128.
+        # Verified against the published config. Used ONLY by
+        # compute_attention_flops_dim, which needs the score/context matmul
+        # widths and cannot derive them from d / q_heads for MLA.
+        "qk_head_dim": 192,
+        "v_head_dim": 128,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
