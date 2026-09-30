@@ -236,7 +236,7 @@ def compute_attention_flops_dim(variant):
     """Effective hidden width for the O(seq_len^2) attention FLOPs term.
 
     NOT the same quantity as the model's `d`, and using `d` understates the term
-    for 11 of 22 catalog variants.
+    for 10 of 22 catalog variants.
 
     The two score/context matmuls are parameter-free, so 6ND does not cover them
     and they are added separately. Per layer per sequence, forward:
@@ -249,7 +249,7 @@ def compute_attention_flops_dim(variant):
     W = q_heads * (qk_head_dim + v_head_dim) / 2, which this returns.
 
     For standard MHA/GQA where qk_head_dim == v_head_dim == d / q_heads this
-    reduces to exactly `d`, so the 11 conforming variants are unaffected. It
+    reduces to exactly `d`, so the 12 conforming variants are unaffected. It
     differs in two cases:
 
     1. A STORED head_dim that is not d / q_heads. Seven variants: Qwen3-32B
@@ -259,9 +259,10 @@ def compute_attention_flops_dim(variant):
        context matmuls run over q_heads regardless of kv_heads, because each query
        head attends with its own (s, s) matrix.
     2. MLA, where qk and v head dims differ FROM EACH OTHER as well as from
-       d / q_heads. DeepSeek-V3 and V3.1 publish qk_nope_head_dim 128 +
-       qk_rope_head_dim 64 = 192 and v_head_dim 128 over 128 heads against
+       d / q_heads. DeepSeek-V3, V3.1 and V3.2 each publish qk_nope_head_dim 128
+       + qk_rope_head_dim 64 = 192 and v_head_dim 128 over 128 heads against
        d = 7168, giving W = 128 * (192 + 128) / 2 = 20480, a 2.86x understatement.
+       All three were checked individually rather than assumed to match.
 
     Falls back to d / q_heads when a variant stores no head dims, which reproduces
     the old `d` behaviour. That fallback is a KNOWN GAP, not a verified value: it

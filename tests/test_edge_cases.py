@@ -942,6 +942,16 @@ def test_attention_flops_width_is_query_projection_not_hidden_dim():
         f"  missing:    {sorted(expected - changed)}"
     )
 
+    # Pin the TOTALS the docstring quotes, not just the membership. The set
+    # assertion above stays green when a new conforming variant is added, but the
+    # docstring's "10 of 22 / 12 conforming" silently becomes wrong -- which is
+    # exactly the drift that shipped once already (it read 11/11).
+    assert len(VARIANTS) == 22, (
+        f"catalog is now {len(VARIANTS)} variants; update the '10 of 22' and "
+        f"'12 conforming' counts in compute_attention_flops_dim's docstring"
+    )
+    assert len(changed) == 10 and len(VARIANTS) - len(changed) == 12
+
     # DeepSeek-V4 must stay on the fallback: its config is unpublished, so the
     # value is a known gap and must NOT be filled in by copying a sibling.
     v4 = next(v for v in VARIANTS if v["name"] == "DeepSeek-V4")
