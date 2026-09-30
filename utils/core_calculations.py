@@ -457,6 +457,11 @@ def calculate_memory_for_micro(
     nccl_ep_scaling_factor=0.0,
     fragmentation_factor=1.0,
     experts_per_gpu=0,
+    grad_bytes=1.0,
+    vocab=None,
+    logits_bytes_per_element=0,
+    logits_fused_ce=True,
+    logits_chunk_tokens=1024,
 ):
     """
     Calculate total GPU memory required for a given micro batch size.
@@ -482,6 +487,18 @@ def calculate_memory_for_micro(
         nccl_ep_scaling_factor: Additional NCCL GB per EP rank (default 0.0)
         fragmentation_factor: PyTorch allocator fragmentation multiplier (default 1.0)
         experts_per_gpu: Number of experts per GPU (default 0)
+        grad_bytes: MULTIPLIER on parameter memory for gradients, the same shape as
+            optim_bytes. 1.0 keeps gradients at PARAM_BYTES, which is wrong for FP8
+            because gradients reduce in BF16 or higher; pass
+            GRAD_BYTES_PER_PARAM / PARAM_BYTES. Defaults to 1.0 so an existing
+            caller that does not pass it keeps its previous behaviour.
+        vocab: Vocabulary size for the output-logits term. A variant's own "vocab"
+            key wins over this. None disables the term.
+        logits_bytes_per_element: Bytes per logit element, covering the bf16 logits
+            plus the fp32 softmax and its gradient. 0 disables the term, which is
+            the default so an existing caller is unaffected.
+        logits_fused_ce: When True, only logits_chunk_tokens rows are live at once.
+        logits_chunk_tokens: Rows materialised at once under a fused CE.
 
     Returns:
         dict: Memory breakdown with keys:
@@ -491,6 +508,7 @@ def calculate_memory_for_micro(
             - optim: Optimizer state memory
             - activation: Activation memory
             - buffer: Communication buffer memory
+            - logits: Output-logits memory (0 when the term is disabled)
     """
     d = variant["d"]
     is_moe = variant.get("expert_ffn", 0) > 0
@@ -541,18 +559,20 @@ def calculate_memory_for_micro(
     zero3_transient = 0.0
     zero3_transient_detail = None
     if zero_strategy == 1:
-        grad_mem = model_mem_gb
+        # grad_bytes is a multiplier on parameter memory, so gradients can be held
+        # at a precision independent of PARAM_BYTES. 1.0 means "same as params".
+        grad_mem = model_mem_gb * grad_bytes
         # Optimizer: dense params sharded across full DP, MoE params across eff_dp_moe
         optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
         optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
         optim_mem = optim_dense + optim_moe
     elif zero_strategy == 2:
-        grad_mem = model_mem_gb / dp
+        grad_mem = model_mem_gb * grad_bytes / dp
         optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
         optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
         optim_mem = optim_dense + optim_moe
     elif zero_strategy == 3:
-        grad_mem = model_mem_gb / dp
+        grad_mem = model_mem_gb * grad_bytes / dp
         optim_dense = model_mem_gb * dense_frac * optim_bytes / dp
         optim_moe = model_mem_gb * moe_frac * optim_bytes / eff_dp_moe
         optim_mem = optim_dense + optim_moe
@@ -589,24 +609,27 @@ def calculate_memory_for_micro(
     else:
         raise ValueError(f"Unknown ZeRO strategy: {zero_strategy}")
 
+    # --- Output-logits memory ---
+    #
+    # The LM head produces a (micro, seq_len, vocab) tensor and the cross-entropy
+    # backward needs its gradient. This is NOT covered by the activation term
+    # below, which is per-layer in d and never touches vocab.
+    #
+    # Under a fused or chunked CE only logits_chunk_tokens rows are live at once, so
+    # above the chunk size this term stops scaling with micro. Unfused it grows
+    # linearly with micro and becomes the single largest term in this function.
+    #
+    # The LM head WEIGHT gradient is not double-counted here: the head's parameters
+    # are already in model_mem_gb via embed_mem, so grad_mem covers them.
+    logits_mem = 0.0
+    logits_vocab = variant.get("vocab") or vocab
+    if logits_vocab and logits_bytes_per_element:
+        logits_tokens = micro * seq_len
+        live_tokens = (min(logits_tokens, logits_chunk_tokens)
+                       if logits_fused_ce else logits_tokens)
+        logits_mem = live_tokens * logits_vocab * logits_bytes_per_element / 1e9
+
     # --- Activation memory ---
-    #
-    # UNMODELLED, and it is the largest known gap: the OUTPUT LOGITS. The LM head
-    # produces a (micro, seq_len, vocab) tensor, and the cross-entropy backward
-    # needs its gradient, with the softmax commonly computed in fp32. None of that
-    # appears below -- the activation term is per-layer in d and never touches
-    # vocab, which is 128,256 to 248,320 across this catalog.
-    #
-    # Measured for Llama-3.1-8B at seq_len 4096, vocab 128,256:
-    #     micro=1   1.05 GB bf16   ~4.2 GB with an fp32 softmax and its gradient
-    #     micro=8   8.41 GB bf16  ~33.6 GB
-    # For Qwen3.5-397B-A17B (vocab 248,320) those double again, reaching ~65 GB at
-    # micro=8. At larger micro this single term can exceed the ENTIRE total
-    # computed here, which is why these figures are a ranking heuristic and a lower
-    # bound, never a predicted peak. Production stacks cut it with a chunked or
-    # fused cross-entropy, so the real cost depends on the loss implementation --
-    # modelling it needs that choice made explicitly rather than assumed.
-    #
     # For MoE layers, activations include expert intermediates (higher per-layer cost)
     if is_moe and moe_layers_per_gpu > 0:
         # MoE activation per layer: attention acts + routed expert intermediates
@@ -670,7 +693,8 @@ def calculate_memory_for_micro(
     # zero3_transient is 0.0 for ZeRO-1 and ZeRO-2, which never shard parameters
     # and so never gather them back.
     raw_total = (
-        param_mem + grad_mem + optim_mem + activation_mem + buffer_mem + zero3_transient
+        param_mem + grad_mem + optim_mem + activation_mem + buffer_mem
+        + zero3_transient + logits_mem
     )
     total_mem = raw_total * fragmentation_factor
 
@@ -681,6 +705,7 @@ def calculate_memory_for_micro(
         "optim": optim_mem,
         "activation": activation_mem,
         "buffer": buffer_mem,
+        "logits": logits_mem,
         "zero3_transient": zero3_transient,
         "zero3_transient_detail": zero3_transient_detail,
     }
@@ -757,6 +782,11 @@ def calculate_viable_micro_batch_sizes(
             nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
             fragmentation_factor=FRAGMENTATION_FACTOR,
             experts_per_gpu=experts_per_gpu,
+            grad_bytes=GRAD_BYTES,
+            vocab=VOCAB,
+            logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
+            logits_fused_ce=LOGITS_FUSED_CE,
+            logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
         )
 
         # Check if this micro batch size fits in memory

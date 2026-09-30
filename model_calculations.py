@@ -278,10 +278,10 @@ def run(variants, hardware, *, report=False):
         print(f"{'#' * 140}")
 
         print(
-            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'AGbuf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
+            f"\n  {'Variant':<10} {'Model':>8} {'Grad':>8} {'Optim':>8} {'Activ':>8} {'Buf':>8} {'Logits':>8} {'AGbuf':>8} {'TOTAL':>8} {'Headroom':>9} {'Util%':>6} {'ZeRO':>6} {'micro':>6}"
         )
         print(
-            f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6} {'-' * 6}"
+            f"  {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 9} {'-' * 6} {'-' * 6} {'-' * 6}"
         )
 
         for v in variants:
@@ -320,7 +320,7 @@ def run(variants, hardware, *, report=False):
 
                 print(
                     f"  {v['name']:<10} {mb['model']:>7.1f}G {mb['grad']:>7.1f}G {mb['optim']:>7.1f}G "
-                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {ag_str} {mb['total']:>7.1f}G "
+                    f"{mb['activation']:>7.1f}G {mb['buffer']:>7.1f}G {mb['logits']:>7.1f}G {ag_str} {mb['total']:>7.1f}G "
                     f"{headroom_str} {util_pct:>6} {z_label:>6} {micro_display:>6}"
                 )
             else:

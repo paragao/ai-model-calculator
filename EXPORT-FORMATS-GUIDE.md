@@ -42,10 +42,19 @@ read them verbatim rather than guessing a longer form.
 - `zero_strategy` - Best strategy that fits: "ZeRO-1", "ZeRO-2", "ZeRO-3", or "OOM"
 - `micro_batch` - Largest viable micro batch (1, 2, 4, 8 or 16), or "N/A" when OOM
 - `model_gb` - Model parameter memory (GB)
-- `grad_gb` - Gradient memory (GB)
+- `grad_gb` - Gradient memory (GB). Held at `GRAD_BYTES_PER_PARAM` (2, BF16)
+  **regardless of `PRECISION`**: an FP8 recipe uses FP8 only for the GEMM inputs and
+  reduces gradients in BF16 or higher, so this column does not halve at FP8.
 - `optim_gb` - Optimizer state memory (GB)
 - `activation_gb` - Activation memory (GB)
 - `buffer_gb` - Communication buffer memory (GB)
+- `logits_gb` - Output-logits memory (GB): the `(micro, seq_len, vocab)` tensor plus
+  its cross-entropy gradient, at `LOGITS_BYTES_PER_ELEMENT` (8) bytes per element.
+  **Not** part of `activation_gb`, which is per-layer in `d` and never touches
+  `vocab`. Under the default fused-CE assumption only `LOGITS_CHUNK_TOKENS` (1024)
+  rows are live at once, so above that this column is **flat in `micro_batch`**;
+  with `LOGITS_FUSED_CE = False` it grows linearly and becomes the largest term.
+  See "Output logits" below.
 - `zero3_transient_gb` - ZeRO-3 transient all-gather buffer (GB). **0.0 for ZeRO-1
   and ZeRO-2**, which do not gather parameters. DP-invariant, and for 18 of 22
   variants the largest gathered unit is the embedding table.
@@ -233,6 +242,40 @@ memory_df %>%
 - **0.3 - 0.6**: Good utilization
 - **0.6 - 0.8**: Optimal utilization
 - **0.8 - 1.0**: Very high utilization (less headroom for spikes)
+
+### Output logits (Phase 1 `logits_gb`)
+
+The LM head produces a `(micro, seq_len, vocab)` tensor and the cross-entropy
+backward needs its gradient. `vocab` runs 128,256 to 248,320 in this catalog, so the
+term is large, and it is **separate from `activation_gb`**, which is per-layer in `d`.
+
+`LOGITS_BYTES_PER_ELEMENT = 8` covers a bf16 logits tensor plus the fp32 softmax and
+its gradient.
+
+**The fused-CE assumption is the dominant knob, and it is an assumption.** A fused or
+chunked cross-entropy (Liger's `fused_linear_cross_entropy`, a compiled chunked loss)
+walks the flattened `micro * seq_len` rows in chunks and keeps only one chunk live, so
+above the chunk size the term stops scaling with `micro` altogether:
+
+| `micro` | fused, 1024-token chunk | unfused |
+|---|---|---|
+| 1 | 1.05 GB | 4.20 GB |
+| 4 | 1.05 GB | 16.81 GB |
+| 8 | 1.05 GB | 33.62 GB |
+| 16 | 1.05 GB | 67.24 GB |
+
+Figures for `Llama-3.1-8B` at `seq_len` 4096, `vocab` 128,256.
+
+Measured over all 10,560 variant × hardware × ZeRO × micro combinations, **3,880
+configurations fit under the fused assumption against 3,252 unfused** — so the
+assumption is worth 628 configurations and should not be treated as incidental. Set
+`LOGITS_FUSED_CE = False` for a plain `nn.CrossEntropyLoss` over a materialised
+logits tensor, and set `LOGITS_CHUNK_TOKENS` to your implementation's chunk size
+rather than trusting the 1024 default, which is a placeholder and not a measured
+property of any model.
+
+The LM head **weight** gradient is not double-counted: the head's parameters are in
+`model_gb` already, so `grad_gb` covers them.
 
 ### Efficiency rating (Phase 3 `efficiency_rating`)
 
