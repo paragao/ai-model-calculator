@@ -14,6 +14,7 @@ from .core_calculations import (
     calculate_viable_micro_batch_sizes,
     calculate_training_time_months,
     calculate_training_time_months_with_overhead,
+    compute_attention_flops_dim,
 )
 
 # Import communication models for overhead estimation
@@ -167,6 +168,11 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
                 "vp": VP,
                 "ep": EP,
                 "hidden_dim": variant["d"],
+                # Width for the O(seq_len^2) attention FLOPs term ONLY. Distinct
+                # from hidden_dim, which stays `d` for the PP and MoE comm models
+                # because those move d-wide activation vectors. See
+                # compute_attention_flops_dim.
+                "attn_flops_dim": compute_attention_flops_dim(variant),
                 "seq_len": seq_len,
                 "inter_node_bw_gb": hw["inter_node_bw_gb"],
                 "intra_node_bw_gbps": hw["intra_node_bw_gbps"],
@@ -283,7 +289,7 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
         # Only full-attention layers contribute the O(seq_len^2) term; linear
         # attention is O(seq_len) and is already covered by the 6ND term.
         layers=platform.get("full_attention_layers") or platform["layers"],
-        hidden_dim=platform["hidden_dim"],
+        hidden_dim=platform["attn_flops_dim"],
         seq_len=platform["seq_len"],
         attention_flops_factor=ATTENTION_FLOPS_FACTOR,
     )

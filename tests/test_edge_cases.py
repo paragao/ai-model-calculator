@@ -877,3 +877,76 @@ def test_phase2_csv_export_carries_feasibility_fields():
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_attention_flops_width_is_query_projection_not_hidden_dim():
+    """The O(seq_len^2) attention term must use the score/context matmul width.
+
+    Using `d` understates it for 10 of 22 catalog variants. The two matmuls are
+    parameter-free so 6ND does not cover them, and per layer per sequence
+    fwd+bwd costs 6 * s^2 * q_heads * (qk_head_dim + v_head_dim). Against
+    ATTENTION_FLOPS_FACTOR = 12 on a single width that means
+
+        W = q_heads * (qk_head_dim + v_head_dim) / 2
+
+    Pins four things:
+      1. W == d EXACTLY for standard MHA/GQA, so conforming variants are a strict
+         no-op -- without this the fix would silently move every variant.
+      2. A stored head_dim that is not d / q_heads is honoured. GQA is NOT the
+         cause: the score and context matmuls run over q_heads regardless of
+         kv_heads, since each query head attends with its own (s, s) matrix.
+      3. MLA, where qk and v head dims differ from each other. DeepSeek-V3
+         publishes qk_nope 128 + qk_rope 64 and v_head_dim 128 over 128 heads
+         against d = 7168, so W = 20480 -- 2.86x d.
+      4. The no-head-dims fallback reproduces `d`, which is the deliberate
+         behaviour for an unverified entry rather than a value to trust.
+    """
+    from utils.core_calculations import compute_attention_flops_dim
+    from configuration.variants_config import VARIANTS
+
+    # 1. Standard MHA/GQA: head_dim == d / q_heads -> exactly d, not merely close.
+    for d, q in ((4096, 32), (8192, 64), (16384, 128), (3584, 28)):
+        v = {"d": d, "q_heads": q, "head_dim": d // q}
+        assert compute_attention_flops_dim(v) == d, (
+            f"d={d} q_heads={q} must be a no-op, got "
+            f"{compute_attention_flops_dim(v)}"
+        )
+
+    # 2. Stored head_dim that disagrees with d / q_heads.
+    #    Qwen3-30B-A3B: d=2048 but 32 heads x 128 = 4096.
+    assert compute_attention_flops_dim(
+        {"d": 2048, "q_heads": 32, "head_dim": 128}) == 4096
+    #    Qwen3.5-122B-A10B: d=3072 but 32 heads x 256 = 8192, the worst at 2.67x.
+    assert compute_attention_flops_dim(
+        {"d": 3072, "q_heads": 32, "head_dim": 256}) == 8192
+
+    # 3. MLA: asymmetric qk and v widths.
+    ds = {"d": 7168, "q_heads": 128, "qk_head_dim": 192, "v_head_dim": 128}
+    assert compute_attention_flops_dim(ds) == 128 * (192 + 128) / 2 == 20480
+
+    # 4. Fallback with no head dims at all reproduces d.
+    assert compute_attention_flops_dim({"d": 7168, "q_heads": 128}) == 7168
+
+    # Catalog-level: every variant whose head dims imply d must be untouched, and
+    # the known-changed set must be exactly the 10 measured.
+    changed = {v["name"] for v in VARIANTS
+               if abs(compute_attention_flops_dim(v) - v["d"]) > 1e-9}
+    expected = {
+        "Qwen3-32B", "Qwen3-30B-A3B", "Qwen3-235B-A22B", "Qwen3.5-27B",
+        "Qwen3.5-35B-A3B", "Qwen3.5-122B-A10B", "Qwen3.5-397B-A17B",
+        "DeepSeek-V3", "DeepSeek-V3.1", "DeepSeek-V3.2",
+    }
+    assert changed == expected, (
+        f"attention width changed for an unexpected set.\n"
+        f"  unexpected: {sorted(changed - expected)}\n"
+        f"  missing:    {sorted(expected - changed)}"
+    )
+
+    # DeepSeek-V4 must stay on the fallback: its config is unpublished, so the
+    # value is a known gap and must NOT be filled in by copying a sibling.
+    v4 = next(v for v in VARIANTS if v["name"] == "DeepSeek-V4")
+    assert v4.get("qk_head_dim") is None and v4.get("v_head_dim") is None, (
+        "DeepSeek-V4 has no published config; its MLA head dims must not be "
+        "assumed from V3"
+    )
+    assert compute_attention_flops_dim(v4) == v4["d"]

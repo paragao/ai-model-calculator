@@ -232,6 +232,58 @@ def calculate_zero3_transient_gb(
     }
 
 
+def compute_attention_flops_dim(variant):
+    """Effective hidden width for the O(seq_len^2) attention FLOPs term.
+
+    NOT the same quantity as the model's `d`, and using `d` understates the term
+    for 11 of 22 catalog variants.
+
+    The two score/context matmuls are parameter-free, so 6ND does not cover them
+    and they are added separately. Per layer per sequence, forward:
+        QK^T          2 * s^2 * q_heads * qk_head_dim
+        softmax(.)V   2 * s^2 * q_heads * v_head_dim
+    and backward is ~2x forward, so fwd+bwd is
+        6 * s^2 * q_heads * (qk_head_dim + v_head_dim).
+
+    ATTENTION_FLOPS_FACTOR is 12 against a single width, i.e. 12 * s^2 * W. So
+    W = q_heads * (qk_head_dim + v_head_dim) / 2, which this returns.
+
+    For standard MHA/GQA where qk_head_dim == v_head_dim == d / q_heads this
+    reduces to exactly `d`, so the 11 conforming variants are unaffected. It
+    differs in two cases:
+
+    1. A STORED head_dim that is not d / q_heads. Seven variants: Qwen3-32B
+       (1.60x), Qwen3-30B-A3B (2.00x), Qwen3-235B-A22B (2.00x), Qwen3.5-27B
+       (1.20x), Qwen3.5-35B-A3B (2.00x), Qwen3.5-122B-A10B (2.67x) and
+       Qwen3.5-397B-A17B (2.00x). Note GQA does not cause this -- the score and
+       context matmuls run over q_heads regardless of kv_heads, because each query
+       head attends with its own (s, s) matrix.
+    2. MLA, where qk and v head dims differ FROM EACH OTHER as well as from
+       d / q_heads. DeepSeek-V3 and V3.1 publish qk_nope_head_dim 128 +
+       qk_rope_head_dim 64 = 192 and v_head_dim 128 over 128 heads against
+       d = 7168, giving W = 128 * (192 + 128) / 2 = 20480, a 2.86x understatement.
+
+    Falls back to d / q_heads when a variant stores no head dims, which reproduces
+    the old `d` behaviour. That fallback is a KNOWN GAP, not a verified value: it
+    currently applies to DeepSeek-V4, whose config is unpublished, so its attention
+    FLOPs are very likely understated by about the same factor as its siblings.
+    Do not close that by copying V3's numbers across.
+    """
+    d = variant["d"]
+    q_heads = variant.get("q_heads") or 0
+    if q_heads <= 0:
+        return d
+
+    qk = variant.get("qk_head_dim")
+    v = variant.get("v_head_dim")
+    if qk is None or v is None:
+        head_dim = variant.get("head_dim") or (d // q_heads)
+        qk = qk if qk is not None else head_dim
+        v = v if v is not None else head_dim
+
+    return q_heads * (qk + v) / 2.0
+
+
 def calculate_training_time_months(
     total_tokens, active_params_b, num_gpus, peak_tflops_per_gpu, mfu, efficiency,
     layers=0, hidden_dim=0, seq_len=0, attention_flops_factor=0,
