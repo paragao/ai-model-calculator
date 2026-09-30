@@ -108,6 +108,11 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
         fragmentation_factor=FRAGMENTATION_FACTOR,
         experts_per_gpu=experts_per_gpu,
+        grad_bytes=GRAD_BYTES,
+        vocab=VOCAB,
+        logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
+        logits_fused_ce=LOGITS_FUSED_CE,
+        logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
     )
 
     required = memory_breakdown["total"]
@@ -297,6 +302,11 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
         fragmentation_factor=FRAGMENTATION_FACTOR,
         experts_per_gpu=experts_per_gpu,
+        grad_bytes=GRAD_BYTES,
+        vocab=VOCAB,
+        logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
+        logits_fused_ce=LOGITS_FUSED_CE,
+        logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
     )
 
     # Calculate efficiency metrics
@@ -404,7 +414,7 @@ def export_results_csv(results, filename):
         fieldnames = [
             'variant', 'hardware', 'zero_strategy', 'micro_batch',
             'model_gb', 'grad_gb', 'optim_gb', 'activation_gb', 'buffer_gb',
-            'zero3_transient_gb',
+            'logits_gb', 'zero3_transient_gb',
             'total_gb', 'gpu_capacity_gb', 'headroom_gb', 'utilization_pct',
             'memory_efficiency', 'status'
         ]
@@ -427,6 +437,7 @@ def export_results_csv(results, filename):
                         'optim_gb': 0,
                         'activation_gb': 0,
                         'buffer_gb': 0,
+                        'logits_gb': 0,
                         'total_gb': result["oom_diagnostics"]["required_memory"],
                         'gpu_capacity_gb': result["oom_diagnostics"]["available_memory"],
                         'headroom_gb': -result["oom_diagnostics"]["shortage"],
@@ -448,6 +459,7 @@ def export_results_csv(results, filename):
                         'optim_gb': mb["optim"],
                         'activation_gb': mb["activation"],
                         'buffer_gb': mb["buffer"],
+                        'logits_gb': mb["logits"],
                         'zero3_transient_gb': mb["zero3_transient"],
                         'total_gb': mb["total"],
                         'gpu_capacity_gb': mb["total"] + em["wasted_headroom"],

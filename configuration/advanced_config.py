@@ -95,20 +95,18 @@ else:
 #
 # Two REAL limitations remain, both measured:
 #
-# 1. GRADIENTS scale with PARAM_BYTES. calculate_memory_for_micro derives
-#    grad_mem from model_mem_gb, so an FP8 run charges 1 byte/param for
-#    gradients. Real FP8 recipes (e.g. Transformer Engine) use FP8 only for the
-#    GEMM inputs and reduce/accumulate gradients in BF16 or FP32, so FP8
-#    gradient memory here is understated by roughly 2x. Measured on
-#    Llama-3.1-8B: grad 3.846 GB at PARAM_BYTES=2 versus 1.923 GB at 1.
-#    Fixing it needs a separate GRAD_BYTES rather than reusing PARAM_BYTES.
+# 1. GRADIENTS scale with PARAM_BYTES. -- RESOLVED, see GRAD_BYTES below, which
+#    holds gradients at GRAD_BYTES_PER_PARAM regardless of PARAM_BYTES. An FP8 run
+#    now charges 3.846 GB on Llama-3.1-8B, matching BF16, because gradients reduce
+#    in BF16 either way.
 #
-# 2. ACTIVATIONS do NOT scale with PRECISION, contrary to what this note used to
-#    claim. The dense activation term is seq_len * micro * d *
-#    EMPIRICAL_ACT_MULTIPLIER with no PARAM_BYTES factor, so it is byte-identical
-#    at FP8 (measured: 6.000 GB at both PARAM_BYTES=2 and 1). Only the MoE expert
-#    intermediate inside the same expression carries PARAM_BYTES, so the two
-#    halves of one activation formula disagree about whether precision applies.
+# 2. ACTIVATIONS do NOT scale with PRECISION. The dense activation term is
+#    seq_len * micro * d * EMPIRICAL_ACT_MULTIPLIER with no PARAM_BYTES factor, so
+#    it is byte-identical at FP8 (measured: 6.000 GB at both PARAM_BYTES=2 and 1).
+#    Only the MoE expert intermediate inside the same expression carries
+#    PARAM_BYTES, so the two halves of one activation formula disagree about
+#    whether precision applies. STILL OPEN -- it needs a decision about which half
+#    is right, not a mechanical change.
 #
 # OPTIM_BYTES is correct across precisions -- see its derivation below, which
 # divides by PARAM_BYTES to hold the product at 12 bytes/param.
@@ -143,6 +141,51 @@ NUM_EMBEDDINGS_TABLES = 2
 # the parameters are fp8.
 OPTIM_BYTES_PER_PARAM = 12  # fp32 master + fp32 momentum + fp32 variance
 OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 6.0, FP8 -> 12.0
+
+# GRAD_BYTES is a MULTIPLIER ON PARAMETER MEMORY, the same shape as OPTIM_BYTES
+# above, because model_mem_gb already carries PARAM_BYTES.
+#
+# Gradients are NOT stored at PARAM_BYTES. An FP8 recipe (e.g. Transformer Engine)
+# uses FP8 only for the GEMM inputs and reduces/accumulates gradients in BF16 or
+# higher, so an FP8 run must still pay 2 bytes/param for gradients. Deriving the
+# multiplier from PARAM_BYTES holds the product at GRAD_BYTES_PER_PARAM, exactly as
+# OPTIM_BYTES holds its product at 12.
+#
+# Before this existed, grad_mem was model_mem_gb directly, so FP8 charged 1
+# byte/param -- measured on Llama-3.1-8B, 1.923 GB against the correct 3.846.
+GRAD_BYTES_PER_PARAM = 2  # BF16 gradient accumulation and reduction
+GRAD_BYTES = GRAD_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 1.0, FP8 -> 2.0
+
+# --- Output-logits memory -------------------------------------------------
+#
+# The LM head produces a (micro, seq_len, vocab) tensor and the cross-entropy
+# backward needs its gradient. vocab is 128,256 to 248,320 across this catalog, so
+# this term is large and was previously not modelled at all.
+#
+# 8 bytes per element covers a bf16 logits tensor plus the fp32 softmax and its
+# gradient, which is the standard unfused working set. Checked against the
+# component figures: for Llama-3.1-8B at seq_len 4096 and vocab 128,256 this gives
+# 4.20 GB at micro=1 and 33.6 GB at micro=8.
+LOGITS_BYTES_PER_ELEMENT = 8
+
+# FUSED CROSS-ENTROPY ASSUMPTION -- the dominant knob in this term.
+#
+# A fused or chunked CE (Liger's fused_linear_cross_entropy, a compiled chunked
+# loss) never materialises the full logits tensor. It walks the flattened
+# (micro * seq_len) rows in chunks, and for each chunk computes logits, softmax and
+# the gradient, then backpropagates straight into the hidden states and the LM head
+# weight gradient. Only ONE chunk is live at a time.
+#
+# The behavioural consequence matters more than the number: above the chunk size
+# this term stops scaling with micro entirely, whereas unfused it grows linearly.
+#
+# LOGITS_CHUNK_TOKENS is an ASSUMPTION, not a measured value. Real implementations
+# size the chunk from available memory, so treat it as the knob to set rather than a
+# property of the model. Set LOGITS_FUSED_CE = False to charge the full unfused
+# tensor instead, which is the right choice for a plain nn.CrossEntropyLoss over a
+# materialised logits tensor.
+LOGITS_FUSED_CE = True
+LOGITS_CHUNK_TOKENS = 1024  # rows whose logits are live at once under fused CE
 
 # Activation memory estimation (empirical multipliers)
 EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer

@@ -997,6 +997,124 @@ def test_higher_tp_never_raises_moe_optimizer_memory():
     )
 
 
+def test_fused_ce_logits_stop_scaling_with_micro_above_the_chunk():
+    """The whole point of a fused CE is that the logits stop growing with micro.
+
+    The LM head produces a (micro, seq_len, vocab) tensor and cross-entropy backward
+    needs its gradient. A fused or chunked CE walks the flattened rows in chunks and
+    keeps only one chunk live, so above the chunk size this term is FLAT in micro;
+    unfused it grows linearly and becomes the largest term in the function.
+
+    Measured on Llama-3.1-8B at seq_len 4096, vocab 128,256: unfused is 4.20 GB at
+    micro=1 and 33.62 GB at micro=8, while fused holds at 1.05 GB.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+
+    variant = {"d": 4096, "layers": 32, "dense_layers": 32, "attn_per_layer": 41_943_040,
+               "dense_ffn": 14336, "expert_ffn": 0, "shared_each": 0, "router_each": 0,
+               "expert_each": 0, "vocab": 128_256}
+    common = dict(
+        model_mem_gb=16.0, variant=variant, dp=64, layers_per_gpu=32, zero_strategy=1,
+        seq_len=4096, topk=8, param_bytes=2, empirical_act_multiplier=12,
+        selective_act_checkpointing_multiplier=0.45, fwd_bwd_routing_buff_passes=2,
+        nccl_mem_buf=6.0, optim_bytes=6.0, vocab=128_256,
+        logits_bytes_per_element=8, logits_chunk_tokens=1024,
+    )
+
+    fused = [calculate_memory_for_micro(micro=m, logits_fused_ce=True, **common)["logits"]
+             for m in (1, 2, 4, 8, 16)]
+    unfused = [calculate_memory_for_micro(micro=m, logits_fused_ce=False, **common)["logits"]
+               for m in (1, 2, 4, 8, 16)]
+
+    assert len(set(round(x, 6) for x in fused)) == 1, (
+        f"fused logits must be flat in micro above the chunk size, got {fused}"
+    )
+    # 1024 rows * 128,256 vocab * 8 bytes
+    assert abs(fused[0] - 1.0508) < 1e-3, f"expected ~1.05 GB, got {fused[0]}"
+
+    # Unfused doubles with micro, and is 32x the fused figure at micro=8.
+    for i in range(1, len(unfused)):
+        assert abs(unfused[i] / unfused[i - 1] - 2.0) < 1e-6, \
+            "unfused logits must scale linearly with micro"
+    assert abs(unfused[0] - 4.2027) < 1e-3, f"expected ~4.20 GB, got {unfused[0]}"
+    assert abs(unfused[3] - 33.6215) < 1e-3, f"expected ~33.62 GB, got {unfused[3]}"
+
+    # Below the chunk size the two agree: there is nothing to chunk.
+    small = dict(common, seq_len=512)
+    assert (calculate_memory_for_micro(micro=1, logits_fused_ce=True, **small)["logits"]
+            == calculate_memory_for_micro(micro=1, logits_fused_ce=False, **small)["logits"])
+
+    # Disabled by default for a caller that does not opt in, so the term cannot
+    # appear unannounced in an existing consumer's totals.
+    off = {k: v for k, v in common.items() if k != "logits_bytes_per_element"}
+    assert calculate_memory_for_micro(micro=8, **off)["logits"] == 0.0
+
+    # And when enabled it must reach the TOTAL, not merely be reported beside it.
+    # A term computed into the breakdown but left out of the sum is this repo's
+    # recurring defect: fits_in_memory, exceeds_batch_cap and steps_absurd were all
+    # computed and then dropped before reaching their consumer.
+    frag = 1.24
+    with_logits = calculate_memory_for_micro(
+        micro=8, logits_fused_ce=False, fragmentation_factor=frag, **common)
+    without = calculate_memory_for_micro(
+        micro=8, fragmentation_factor=frag, **off)
+    assert abs((with_logits["total"] - without["total"])
+               - with_logits["logits"] * frag) < 1e-6, (
+        f"the logits term must be in the total: enabling it moved the total by "
+        f"{with_logits['total'] - without['total']:.4f} but the term is "
+        f"{with_logits['logits']:.4f} GB before fragmentation"
+    )
+
+
+def test_fp8_gradients_are_held_at_bf16_not_at_param_bytes():
+    """An FP8 recipe does not store gradients in FP8, so they must not shrink with it.
+
+    FP8 is used for the GEMM inputs; gradients are reduced and accumulated in BF16 or
+    higher. grad_mem derives from model_mem_gb, which carries PARAM_BYTES, so without
+    a separate multiplier an FP8 run charged 1 byte/param -- measured 1.923 GB against
+    the correct 3.846 on Llama-3.1-8B.
+
+    GRAD_BYTES is a multiplier on parameter memory, the same shape as OPTIM_BYTES, so
+    GRAD_BYTES_PER_PARAM / PARAM_BYTES holds the product constant across precisions.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+
+    variant = {"d": 4096, "layers": 32, "dense_layers": 32, "attn_per_layer": 41_943_040,
+               "dense_ffn": 14336, "expert_ffn": 0, "shared_each": 0, "router_each": 0,
+               "expert_each": 0, "vocab": 128_256}
+
+    def grad_for(param_bytes):
+        # model_mem_gb scales with param_bytes, as calculate_model_memory_gb makes it.
+        model_mem = 16.0 * param_bytes / 2
+        return calculate_memory_for_micro(
+            micro=1, model_mem_gb=model_mem, variant=variant, dp=64, layers_per_gpu=32,
+            zero_strategy=1, seq_len=4096, topk=8, param_bytes=param_bytes,
+            empirical_act_multiplier=12, selective_act_checkpointing_multiplier=0.45,
+            fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0,
+            optim_bytes=12 / param_bytes,
+            grad_bytes=2 / param_bytes)["grad"]
+
+    bf16, fp8 = grad_for(2), grad_for(1)
+    assert bf16 == fp8, (
+        f"gradient memory must be precision-independent: BF16 {bf16} vs FP8 {fp8}. "
+        f"If FP8 is half, grad_bytes is not compensating for PARAM_BYTES."
+    )
+
+    # And the config derives it that way.
+    from configuration.advanced_config import (
+        GRAD_BYTES, GRAD_BYTES_PER_PARAM, PARAM_BYTES)
+    assert GRAD_BYTES * PARAM_BYTES == GRAD_BYTES_PER_PARAM, \
+        "GRAD_BYTES must hold GRAD_BYTES_PER_PARAM bytes/param at any precision"
+
+    # Default of 1.0 keeps an existing caller's behaviour unchanged.
+    no_arg = calculate_memory_for_micro(
+        micro=1, model_mem_gb=16.0, variant=variant, dp=64, layers_per_gpu=32,
+        zero_strategy=1, seq_len=4096, topk=8, param_bytes=2,
+        empirical_act_multiplier=12, selective_act_checkpointing_multiplier=0.45,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0)
+    assert no_arg["grad"] == 16.0
+
+
 def test_batch_config_reports_memory_feasibility_and_the_batch_cap():
     """Phase 2 has no memory awareness of its own, so it must report, not hide it.
 
