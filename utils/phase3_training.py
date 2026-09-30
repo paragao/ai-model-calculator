@@ -5,6 +5,8 @@ Generates platform configurations and estimates training times for model variant
 across different hardware, comparing ZeRO strategies and batch sizes.
 """
 
+import math
+
 # Import configurations
 from configuration.project_config import *
 from configuration.advanced_config import *
@@ -23,6 +25,33 @@ from .phase5_alltoall_comm import calculate_moe_all_to_all
 
 # Import formatting utilities
 from .formatting_utils import color_text
+
+
+# ---------------------------------------------------------------------------
+# Efficiency-rating thresholds.
+#
+# The rating is a position within a variant's OWN [slowest, fastest] range, on a
+# log scale, not a fixed multiplier on rel_speed. Fixed multipliers cannot work
+# here: measured over the real sweep, per-variant spread (slowest/fastest) runs
+# from 32.5x (Llama-3.1-405B) to 20,642x (Llama-3.2-3B) -- a 635x difference in
+# the scale being measured -- so any single multiplier threshold means something
+# different for every variant and the ratings are not comparable across them.
+#
+# Positions are log-scaled because the est_months values within a variant are
+# spread geometrically (GPU count doubles), so a linear position would put
+# almost every config against the fast end.
+#
+# Thresholds chosen from the measured distribution over all 5,084 rows:
+#   rating 0 (>= 0.80): 1,351 rows (26.6%)
+#   rating 1 (>= 0.60): 1,834 rows (36.1%)
+#   rating 2 (>= 0.40): 1,068 rows (21.0%)
+#   rating 3 ( < 0.40):   831 rows (16.3%)
+# Every band is populated and none dominates. The alternatives measured worse:
+# 0.75/0.50/0.25 left rating 3 at 7.1%, and 0.70/0.45/0.20 left it at 5.2%.
+EFFICIENCY_POSITION_EXCELLENT = 0.80  # rating 0 (***)
+EFFICIENCY_POSITION_GOOD = 0.60       # rating 1 (**)
+EFFICIENCY_POSITION_MODERATE = 0.40   # rating 2 (*)
+
 
 
 def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
@@ -254,24 +283,29 @@ def calculate_platform_overhead(platform):
     return bubble_fraction, exposed_comm_ms
 
 
-def calculate_training_metrics(platform, active_params_b, base_time_months):
+def calculate_training_metrics(platform, active_params_b):
     """
     Calculate training time metrics for a platform configuration.
 
     Args:
         platform: Platform dict with gpus, peak_tflops, eff
         active_params_b: Active parameters in billions
-        base_time_months: Baseline time for relative speed calculation
 
     Returns:
         dict with:
         - est_months: Estimated training time in months (overhead-inclusive)
-        - rel_speed: Relative speed vs baseline (1.0x = baseline)
+        - rel_speed: None -- set by classify_platform_efficiency
         - months_low: Lower bound with optimistic multiplier
         - months_high: Upper bound with pessimistic multiplier
         - bubble_pct: PP bubble as % of total time
         - comm_overhead_pct: Exposed comm as % of total time
-        - efficiency_rating: Star rating (0-3)
+        - efficiency_rating: None -- set by classify_platform_efficiency
+
+    rel_speed and efficiency_rating are deliberately NOT assigned here. Both are
+    relative to the variant's whole set of configurations -- rel_speed is a
+    speed-up over the SLOWEST config, and the rating is a position within the
+    [slowest, fastest] range -- so neither can be known while sweeping one
+    config at a time. Call classify_platform_efficiency on the collected list.
     """
     # Estimate PP bubble + exposed comm for this specific (micro, accum) config
     bubble_fraction, exposed_comm_ms = calculate_platform_overhead(platform)
@@ -295,32 +329,91 @@ def calculate_training_metrics(platform, active_params_b, base_time_months):
     )
     est_months = overhead["est_months"]
 
-    # Calculate relative speed compared to baseline (overhead-inclusive)
-    rel_speed = base_time_months / est_months if est_months > 0 else 0
-
     # Apply uncertainty range
     months_low = est_months * TIME_ESTIMATE_LOW_MULTIPLIER
     months_high = est_months * TIME_ESTIMATE_HIGH_MULTIPLIER
 
-    # Assign efficiency rating (0=best, 3=worst)
-    if rel_speed >= 2.0:
-        efficiency_rating = 0  # ⭐⭐⭐
-    elif rel_speed >= 1.5:
-        efficiency_rating = 1  # ⭐⭐
-    elif rel_speed >= 1.0:
-        efficiency_rating = 2  # ⭐
-    else:
-        efficiency_rating = 3  # (no stars)
-
     return {
         "est_months": est_months,
-        "rel_speed": rel_speed,
+        "rel_speed": None,
         "months_low": months_low,
         "months_high": months_high,
         "bubble_pct": overhead["bubble_pct"],
         "comm_overhead_pct": overhead["comm_pct"],
-        "efficiency_rating": efficiency_rating
+        "efficiency_rating": None
     }
+
+
+def classify_platform_efficiency(platform_results):
+    """
+    Assign rel_speed and efficiency_rating across one variant's configurations.
+
+    rel_speed is anchored on the SLOWEST configuration in the set, so it reads as
+    "how many times faster than the worst viable option". It is therefore always
+    >= 1.0, and exactly 1.0 for the slowest config itself. The previous anchor was
+    all_platforms[0] -- the first entry in sweep order, which is neither the
+    fastest nor the slowest and measured mid-pack for all 22 variants. That made
+    1.0x mean nothing in particular and left 78% of rows rated 0 purely by
+    exceeding 2x an arbitrary entry.
+
+    efficiency_rating is the config's log-scaled position within this variant's
+    [slowest, fastest] range: 0.0 at the slowest, 1.0 at the fastest, banded by
+    the EFFICIENCY_POSITION_* thresholds. It is NOT a threshold on rel_speed --
+    see those constants for why a fixed multiplier cannot be comparable across
+    variants whose spreads differ by 635x.
+
+    Args:
+        platform_results: list of platform dicts, each already carrying est_months
+
+    Returns:
+        The same list, with rel_speed and efficiency_rating filled in.
+
+    A set with fewer than 2 distinct est_months values has no range to position
+    within; every config is then both slowest and fastest, so all get rel_speed
+    1.0 and rating 0.
+    """
+    if not platform_results:
+        return platform_results
+
+    times = [p["est_months"] for p in platform_results if p["est_months"] > 0]
+    if not times:
+        for p in platform_results:
+            p["rel_speed"] = 0.0
+            p["efficiency_rating"] = 3
+        return platform_results
+
+    slowest = max(times)
+    fastest = min(times)
+
+    # Log-span of the set. Zero when every config takes the same time.
+    span = math.log(slowest / fastest) if fastest > 0 and slowest > fastest else 0.0
+
+    for p in platform_results:
+        est = p["est_months"]
+        if est <= 0:
+            p["rel_speed"] = 0.0
+            p["efficiency_rating"] = 3
+            continue
+
+        rel_speed = slowest / est
+        p["rel_speed"] = rel_speed
+
+        if span > 0:
+            position = math.log(rel_speed) / span
+        else:
+            # Degenerate set: nothing to rank against, so no config is penalised.
+            position = 1.0
+
+        if position >= EFFICIENCY_POSITION_EXCELLENT:
+            p["efficiency_rating"] = 0
+        elif position >= EFFICIENCY_POSITION_GOOD:
+            p["efficiency_rating"] = 1
+        elif position >= EFFICIENCY_POSITION_MODERATE:
+            p["efficiency_rating"] = 2
+        else:
+            p["efficiency_rating"] = 3
+
+    return platform_results
 
 
 def generate_training_recommendations(training_results):
@@ -332,11 +425,26 @@ def generate_training_recommendations(training_results):
 
     Returns:
         list of recommendation strings
+
+    Raises:
+        ValueError: if any configuration is still unclassified. rel_speed and
+            efficiency_rating are assigned by a separate set-level pass, so a
+            caller that forgets it would otherwise format None into the output.
     """
     recommendations = []
 
     if not training_results.get("variants"):
         return ["⚠️  No training configurations were viable"]
+
+    for variant_name, platforms in training_results["variants"].items():
+        unrated = sum(1 for p in platforms if p.get("rel_speed") is None
+                      or p.get("efficiency_rating") is None)
+        if unrated:
+            raise ValueError(
+                f"{variant_name}: {unrated} configuration(s) have no rel_speed or "
+                f"efficiency_rating. Call classify_platform_efficiency on each "
+                f"variant's platform list before generating recommendations."
+            )
 
     # Find fastest overall configuration
     fastest_config = None
@@ -354,7 +462,8 @@ def generate_training_recommendations(training_results):
         recommendations.append(
             f"🏆 Fastest configuration: Variant {fastest_variant} on {fastest_config['name']} "
             f"({fastest_config['months_low']:.1f}-{fastest_config['months_high']:.1f} months, "
-            f"{fastest_config['rel_speed']:.1f}x speed)"
+            f"{fastest_config['rel_speed']:.1f}x faster than the slowest "
+            f"{fastest_variant} option)"
         )
 
     # Find most cost-effective (best time per GPU)
@@ -453,6 +562,11 @@ def export_training_results_csv(training_results, filename):
     Args:
         training_results: dict with variant results
         filename: Output CSV filename
+
+    rel_speed and efficiency_rating export as EMPTY when unset, not as 0 and 3.
+    Those two values are legitimate readings -- 3 is the worst rating -- so
+    defaulting to them would make a config that was never classified
+    indistinguishable from one genuinely rated worst.
     """
     import csv
 
@@ -467,6 +581,8 @@ def export_training_results_csv(training_results, filename):
 
         for variant_name, platforms in training_results.get("variants", {}).items():
             for platform in platforms:
+                rel_speed = platform.get('rel_speed')
+                rating = platform.get('efficiency_rating')
                 writer.writerow({
                     'variant': variant_name,
                     'platform': platform['name'],
@@ -479,10 +595,10 @@ def export_training_results_csv(training_results, filename):
                     'tok_batch': platform['tok_batch'],
                     'steps': platform['steps'],
                     'est_months': platform.get('est_months', 0),
-                    'rel_speed': platform.get('rel_speed', 0),
+                    'rel_speed': '' if rel_speed is None else rel_speed,
                     'months_low': platform.get('months_low', 0),
                     'months_high': platform.get('months_high', 0),
                     'bubble_pct': platform.get('bubble_pct', 0),
                     'comm_overhead_pct': platform.get('comm_overhead_pct', 0),
-                    'efficiency_rating': platform.get('efficiency_rating', 3)
+                    'efficiency_rating': '' if rating is None else rating
                 })

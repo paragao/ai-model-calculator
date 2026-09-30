@@ -678,6 +678,212 @@ def test_recommendations_refuse_unclassified_configs():
     assert "steps" in joined
 
 
+def test_rel_speed_is_anchored_on_the_slowest_config_not_sweep_order():
+    """rel_speed must mean "times faster than the worst option", so it needs the set.
+
+    The old anchor was all_platforms[0] -- the first entry in sweep order, which
+    measured mid-pack for all 22 variants. rel_speed could therefore be below 1.0
+    (0.002 at worst), 1.0x meant nothing in particular, and 78% of rows cleared the
+    fixed 2.0x bar for rating 0.
+
+    Anchored on the slowest config, rel_speed is >= 1.0 everywhere and exactly 1.0
+    for the slowest config itself.
+    """
+    from utils.phase3_training import classify_platform_efficiency
+
+    # est_months deliberately NOT in sorted order, so a sweep-order anchor would
+    # pick 8.0 -- neither the slowest (40.0) nor the fastest (1.0).
+    configs = [{"est_months": m} for m in (8.0, 40.0, 1.0, 2.0, 20.0)]
+    classify_platform_efficiency(configs)
+
+    assert all(c["rel_speed"] >= 1.0 for c in configs), \
+        "a slowest anchor cannot produce a rel_speed below 1.0"
+
+    slowest = max(configs, key=lambda c: c["est_months"])
+    assert slowest["rel_speed"] == 1.0, \
+        "the slowest config is the anchor, so it must read exactly 1.0x"
+
+    fastest = min(configs, key=lambda c: c["est_months"])
+    assert fastest["rel_speed"] == 40.0, \
+        "the fastest config's rel_speed is the set's full spread (40.0/1.0)"
+
+    # Every config is classified.
+    assert all(c["efficiency_rating"] is not None for c in configs)
+
+
+def test_efficiency_rating_is_comparable_across_wildly_different_spreads():
+    """The rating is a log-position in the variant's own range, not a multiplier.
+
+    Measured over the real sweep, per-variant spread (slowest/fastest) runs from
+    32.5x to 20,642x -- a 635x difference in the scale being measured. A fixed
+    multiplier threshold on rel_speed therefore means something different for every
+    variant: against a slowest anchor, 2.0x is the top 3% of a 32x spread but the
+    bottom 7% of a 20,642x one.
+
+    Two sets with very different spreads but the same RELATIVE positions must
+    produce the same ratings, which is what makes ratings comparable across
+    variants.
+    """
+    from utils.phase3_training import classify_platform_efficiency
+
+    # Same log-positions (0, 0.25, 0.5, 0.75, 1.0) in both sets, wildly
+    # different absolute spreads: 16x versus 100,000x.
+    narrow = [{"est_months": 16.0 / (16.0 ** p)} for p in (0, 0.25, 0.5, 0.75, 1.0)]
+    wide = [{"est_months": 1e5 / (1e5 ** p)} for p in (0, 0.25, 0.5, 0.75, 1.0)]
+
+    classify_platform_efficiency(narrow)
+    classify_platform_efficiency(wide)
+
+    assert [c["efficiency_rating"] for c in narrow] == \
+           [c["efficiency_rating"] for c in wide], \
+        "equal relative positions must rate equally regardless of absolute spread"
+
+    # And the rel_speed values are NOT equal, which is exactly why a fixed
+    # multiplier threshold could not have produced that agreement.
+    assert narrow[-1]["rel_speed"] != wide[-1]["rel_speed"]
+
+
+def test_every_efficiency_band_is_reachable_including_the_worst():
+    """A rating no input can produce is a dead band, and one nearly happened here.
+
+    Anchoring rel_speed on the slowest config makes it >= 1.0 by construction, so
+    the old thresholds (>=2.0, >=1.5, >=1.0, else) would have left rating 3
+    UNREACHABLE -- measured at 0 of 5,084 rows -- while pushing 97.8% into rating 0.
+    That is the same uninformative-verdict failure the step bands had.
+
+    The log-position bands keep all four populated: the slowest config sits at
+    position 0.0 and the fastest at 1.0, so both extremes are always occupied.
+    """
+    from utils.phase3_training import classify_platform_efficiency
+
+    # A geometric ladder spanning the full range, as real sweeps produce.
+    configs = [{"est_months": 2.0 ** -i} for i in range(20)]
+    classify_platform_efficiency(configs)
+
+    ratings = {c["efficiency_rating"] for c in configs}
+    assert ratings == {0, 1, 2, 3}, (
+        f"all four bands must be reachable, got {sorted(ratings)}. If rating 3 is "
+        f"missing, the thresholds are being applied to rel_speed (always >= 1.0) "
+        f"instead of to the log-position."
+    )
+
+    slowest = max(configs, key=lambda c: c["est_months"])
+    fastest = min(configs, key=lambda c: c["est_months"])
+    assert slowest["efficiency_rating"] == 3, "the slowest config is position 0.0"
+    assert fastest["efficiency_rating"] == 0, "the fastest config is position 1.0"
+
+
+def test_degenerate_set_with_no_range_penalises_nothing():
+    """With one distinct time there is no range to position within.
+
+    log(slowest/fastest) is 0, so a naive position would divide by zero. Every
+    config is simultaneously slowest and fastest, so none is worse than the others
+    and none is penalised.
+    """
+    from utils.phase3_training import classify_platform_efficiency
+
+    configs = [{"est_months": 5.0} for _ in range(4)]
+    classify_platform_efficiency(configs)
+
+    assert all(c["rel_speed"] == 1.0 for c in configs)
+    assert all(c["efficiency_rating"] == 0 for c in configs), \
+        "with nothing to rank against, no config is penalised"
+
+    # A single config is the same case.
+    one = [{"est_months": 3.0}]
+    classify_platform_efficiency(one)
+    assert one[0]["rel_speed"] == 1.0 and one[0]["efficiency_rating"] == 0
+
+
+def test_training_recommendations_refuse_unclassified_configs():
+    """calculate_training_metrics cannot rate a config, so it must not pretend to.
+
+    Both rel_speed and efficiency_rating are relative to the variant's whole set,
+    so they are assigned by classify_platform_efficiency. If that pass were skipped,
+    the recommendation string would format None into the output, so this raises.
+    """
+    import pytest
+    from utils.phase3_training import (
+        classify_platform_efficiency,
+        generate_training_recommendations,
+    )
+
+    plats = [
+        {"name": "64 p5", "gpus": 512, "est_months": 4.0, "months_low": 3.2,
+         "months_high": 5.3, "rel_speed": None, "efficiency_rating": None,
+         "bubble_pct": 1.0, "zero": 1, "micro": 1, "accum": 8, "seq_len": 4096,
+         "tok_batch": 4e6, "steps": 1000, "comm_overhead_pct": 0.5},
+        {"name": "8 p5", "gpus": 64, "est_months": 32.0, "months_low": 25.6,
+         "months_high": 42.2, "rel_speed": None, "efficiency_rating": None,
+         "bubble_pct": 2.0, "zero": 1, "micro": 1, "accum": 8, "seq_len": 4096,
+         "tok_batch": 4e6, "steps": 1000, "comm_overhead_pct": 0.9},
+    ]
+
+    with pytest.raises(ValueError, match="no rel_speed or efficiency_rating"):
+        generate_training_recommendations({"variants": {"TestModel": plats}})
+
+    classify_platform_efficiency(plats)
+    recs = generate_training_recommendations({"variants": {"TestModel": plats}})
+    assert recs, "classified configs should produce recommendations"
+    joined = " ".join(recs)
+    assert "faster than the slowest" in joined, (
+        "the headline speed-up must name its anchor -- under a slowest anchor it "
+        "can read as 20,642x, which is meaningless without saying what it is "
+        "relative to"
+    )
+
+
+def test_phase3_csv_exports_unclassified_as_blank_not_as_a_real_rating():
+    """0 and 3 are legitimate readings, so they cannot double as "not assessed".
+
+    efficiency_rating 3 is the WORST rating, so defaulting an unset value to 3
+    would make a config that was never classified indistinguishable from one
+    genuinely rated worst -- the same trap as coercing an unassessed None to False.
+    """
+    import csv
+    import tempfile
+    import os
+    from utils.phase3_training import (
+        classify_platform_efficiency,
+        export_training_results_csv,
+    )
+
+    def plat(name, months):
+        return {"name": name, "gpus": 64, "zero": 1, "micro": 1, "accum": 8,
+                "seq_len": 4096, "gbs": 512, "tok_batch": 4e6, "steps": 1000,
+                "est_months": months, "months_low": months * 0.8,
+                "months_high": months * 1.3, "bubble_pct": 1.0,
+                "comm_overhead_pct": 0.5, "rel_speed": None,
+                "efficiency_rating": None}
+
+    rated = [plat("a", 4.0), plat("b", 32.0)]
+    classify_platform_efficiency(rated)
+    unrated = [plat("c", 4.0), plat("d", 32.0)]  # deliberately never classified
+
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    try:
+        export_training_results_csv(
+            {"variants": {"Rated": rated, "Unrated": unrated}}, path)
+        rows = list(csv.DictReader(open(path)))
+    finally:
+        os.unlink(path)
+
+    assert "efficiency_rating" in rows[0] and "rel_speed" in rows[0], \
+        "both columns must be in fieldnames -- DictWriter silently drops keys that "\
+        "are not, which is how fits_in_memory and steps_absurd were lost before"
+
+    by_variant = {}
+    for r in rows:
+        by_variant.setdefault(r["variant"], []).append(r)
+
+    assert all(r["efficiency_rating"] != "" for r in by_variant["Rated"])
+    assert all(r["rel_speed"] != "" for r in by_variant["Rated"])
+    assert all(r["efficiency_rating"] == "" for r in by_variant["Unrated"]), \
+        "an unclassified rating must be blank, never 3"
+    assert all(r["rel_speed"] == "" for r in by_variant["Unrated"])
+
+
 def test_batch_config_reports_memory_feasibility_and_the_batch_cap():
     """Phase 2 has no memory awareness of its own, so it must report, not hide it.
 
