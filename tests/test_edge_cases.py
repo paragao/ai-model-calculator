@@ -884,6 +884,119 @@ def test_phase3_csv_exports_unclassified_as_blank_not_as_a_real_rating():
     assert all(r["rel_speed"] == "" for r in by_variant["Unrated"])
 
 
+def test_moe_frac_uses_the_variant_expert_count_not_the_global():
+    """The two memory functions must resolve the expert count identically.
+
+    calculate_memory_for_micro carried a comment saying its moe_frac split "must
+    match calculate_model_memory_gb", and it did not: the memory function applies a
+    variant's own num_experts over the global N_EXPERTS // EP, while this one used
+    the raw global for both moe_frac and the MoE dispatch buffer. Measured, that
+    affected 7 of 11 MoE variants -- the global overstates Llama-4-Scout's 16
+    experts by 8x and understates Qwen3.5-397B's 512 by 4x.
+
+    Pinned via the shared helper, so the two cannot drift apart again.
+    """
+    from utils.core_calculations import resolve_experts_per_gpu
+
+    # A variant's own count wins over whatever the caller passed.
+    scout = {"num_experts": 16}
+    assert resolve_experts_per_gpu(scout, experts_per_gpu=16, ep=8) == 2, \
+        "16 experts over EP=8 is 2 per GPU, not the global's 16"
+
+    big = {"num_experts": 512}
+    assert resolve_experts_per_gpu(big, experts_per_gpu=16, ep=8) == 64, \
+        "512 experts over EP=8 is 64 per GPU, 4x the global's 16"
+
+    # Never below 1, and a variant with no count keeps the caller's value.
+    assert resolve_experts_per_gpu({"num_experts": 4}, 16, ep=8) == 1
+    assert resolve_experts_per_gpu({}, 16, ep=8) == 16
+
+    # And the real catalog: every MoE variant declaring a count must resolve to
+    # its own value, not the global.
+    from configuration.variants_config import VARIANTS
+    from configuration.project_config import EP as CFG_EP
+    checked = 0
+    for v in VARIANTS:
+        ne = v.get("num_experts")
+        if not ne:
+            continue
+        expected = max(1, ne // CFG_EP)
+        assert resolve_experts_per_gpu(v, experts_per_gpu=99999, ep=CFG_EP) == expected, \
+            f"{v['name']}: expected {expected} experts/GPU from its own count"
+        checked += 1
+    assert checked >= 10, f"expected at least 10 variants with num_experts, got {checked}"
+
+
+def test_higher_tp_never_raises_moe_optimizer_memory():
+    """moe_frac is a fraction OF a tp-divided model memory, so it must be tp-divided.
+
+    calculate_model_memory_gb divides routed expert weights by TP. moe_frac did not,
+    so the ratio exceeded 1.0 for any TP > 1 and clamped there, driving dense_frac to
+    0 and pushing ALL optimizer and ZeRO-3 parameter sharding onto eff_dp_moe
+    instead of the larger dp.
+
+    Measured on Qwen3-235B-A22B at TP=2 before the fix: reported optimizer memory
+    ROSE from 5.36 to 8.04 GB even though TP had halved the weights. Raising tensor
+    parallelism must not increase reported memory.
+    """
+    import utils.core_calculations as cc
+    from configuration.variants_config import VARIANTS
+    from configuration.project_config import EP, VOCAB, TOPK
+    from configuration.advanced_config import (
+        LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        PARAM_BYTES, OPTIM_BYTES, EMPIRICAL_ACT_MULTIPLIER,
+        SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER, FWD_BWD_ROUTING_BUFF_PASSES,
+        NCCL_MEM_BUF, NCCL_EP_SCALING_FACTOR, FRAGMENTATION_FACTOR,
+    )
+
+    v = next(x for x in VARIANTS if x["name"] == "Qwen3-235B-A22B")
+    layers_per_gpu = v["layers"]
+    seq_len = v.get("seq_len", 4096)
+    experts_global = 128 // EP
+
+    original_tp = cc.TP
+    recovered_fracs, optims = [], []
+    try:
+        for tp in (1, 2, 4):
+            cc.TP = tp
+            dp = 512 // tp
+            model_mem = cc.calculate_model_memory_gb(
+                v, layers_per_gpu, experts_global, PARAM_BYTES, VOCAB, LAYER_NORM,
+                FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=tp)
+            b = cc.calculate_memory_for_micro(
+                1, model_mem, v, dp, layers_per_gpu, 1, seq_len, TOPK, PARAM_BYTES,
+                EMPIRICAL_ACT_MULTIPLIER, SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+                FWD_BWD_ROUTING_BUFF_PASSES, NCCL_MEM_BUF, OPTIM_BYTES,
+                ep=EP, pp=1, vp=1,
+                nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+                fragmentation_factor=FRAGMENTATION_FACTOR,
+                experts_per_gpu=experts_global)
+
+            # Recover the moe_frac the FUNCTION used, from the optimizer memory it
+            # returned. Asserting on a locally recomputed fraction would test this
+            # test's own arithmetic rather than the function's, and would stay green
+            # with the TP division removed.
+            eff_dp_moe = dp // EP if dp > EP else dp
+            x = b["optim"] / (model_mem * OPTIM_BYTES)
+            recovered_fracs.append((x - 1.0 / dp) / (1.0 / eff_dp_moe - 1.0 / dp))
+            optims.append(b["optim"])
+    finally:
+        cc.TP = original_tp
+
+    assert all(f < 0.999 for f in recovered_fracs), (
+        f"moe_frac clamped at 1.0 (recovered {[round(f, 4) for f in recovered_fracs]}), "
+        f"which zeroes dense_frac and forces all sharding onto eff_dp_moe -- "
+        f"routed_mem is not being divided by TP"
+    )
+    # TP halves the weights while halving dp, so optimizer memory should stay
+    # roughly flat. The clamp made it jump 1.5x, from 5.36 to 8.04 GB.
+    assert optims[1] / optims[0] < 1.05, (
+        f"optimizer memory rose {optims[1] / optims[0]:.2f}x going from TP=1 to TP=2 "
+        f"({optims[0]:.2f} -> {optims[1]:.2f} GB); raising tensor parallelism must "
+        f"not increase reported memory"
+    )
+
+
 def test_batch_config_reports_memory_feasibility_and_the_batch_cap():
     """Phase 2 has no memory awareness of its own, so it must report, not hide it.
 

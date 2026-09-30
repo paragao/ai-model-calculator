@@ -85,15 +85,33 @@ if PRECISION == "BF16":
 else:
     PARAM_BYTES = 1  # 1 byte per parameter for FP8
 
-# KNOWN LIMITATION -- PRECISION affects PARAM_BYTES ONLY, never throughput.
-# phase3_training reads hw["peak_tflops_bf16"] unconditionally and no hardware
-# preset defines peak_tflops_fp8, so setting PRECISION="FP8" halves parameter and
-# activation memory while still computing training time at BF16 throughput. FP8 is
-# roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, so FP8 runs
-# OVERSTATE training time by about 2x. (A10G is Ampere and has no FP8 at all, so
-# FP8 on g5 is not a valid configuration.) Fixing this needs a per-preset
-# peak_tflops_fp8 field plus precision-aware selection in phase3, which belongs
-# with the hardware presets rather than here.
+# PRECISION affects PARAM_BYTES, and through it parameter and GRADIENT memory.
+#
+# Throughput is handled: every hardware preset defines peak_tflops_fp8 and
+# phase3_training selects on PRECISION, refusing g5 where the value is 0 because
+# A10G is Ampere and has no FP8 at all. The earlier note here claiming
+# "phase3_training reads peak_tflops_bf16 unconditionally and no hardware preset
+# defines peak_tflops_fp8" described a defect that has since been fixed.
+#
+# Two REAL limitations remain, both measured:
+#
+# 1. GRADIENTS scale with PARAM_BYTES. calculate_memory_for_micro derives
+#    grad_mem from model_mem_gb, so an FP8 run charges 1 byte/param for
+#    gradients. Real FP8 recipes (e.g. Transformer Engine) use FP8 only for the
+#    GEMM inputs and reduce/accumulate gradients in BF16 or FP32, so FP8
+#    gradient memory here is understated by roughly 2x. Measured on
+#    Llama-3.1-8B: grad 3.846 GB at PARAM_BYTES=2 versus 1.923 GB at 1.
+#    Fixing it needs a separate GRAD_BYTES rather than reusing PARAM_BYTES.
+#
+# 2. ACTIVATIONS do NOT scale with PRECISION, contrary to what this note used to
+#    claim. The dense activation term is seq_len * micro * d *
+#    EMPIRICAL_ACT_MULTIPLIER with no PARAM_BYTES factor, so it is byte-identical
+#    at FP8 (measured: 6.000 GB at both PARAM_BYTES=2 and 1). Only the MoE expert
+#    intermediate inside the same expression carries PARAM_BYTES, so the two
+#    halves of one activation formula disagree about whether precision applies.
+#
+# OPTIM_BYTES is correct across precisions -- see its derivation below, which
+# divides by PARAM_BYTES to hold the product at 12 bytes/param.
 
 # Model architecture constants
 LAYER_NORM = 2  # RMSNorm vectors of width d per layer: input + post-attention
