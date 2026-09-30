@@ -1075,7 +1075,9 @@ def test_fp8_gradients_are_held_at_bf16_not_at_param_bytes():
     the correct 3.846 on Llama-3.1-8B.
 
     GRAD_BYTES is a multiplier on parameter memory, the same shape as OPTIM_BYTES, so
-    GRAD_BYTES_PER_PARAM / PARAM_BYTES holds the product constant across precisions.
+    GRAD_BYTES_PER_PARAM / PARAM_STORAGE_BYTES holds the product constant across
+    precisions. It divides by PARAM_STORAGE_BYTES rather than PARAM_BYTES because
+    model_mem_gb now carries the RESIDENT size, which is BF16 either way.
     """
     from utils.core_calculations import calculate_memory_for_micro
 
@@ -1100,10 +1102,12 @@ def test_fp8_gradients_are_held_at_bf16_not_at_param_bytes():
         f"If FP8 is half, grad_bytes is not compensating for PARAM_BYTES."
     )
 
-    # And the config derives it that way.
+    # And the config derives it that way. Asserted against PARAM_STORAGE_BYTES, not
+    # PARAM_BYTES: the old form held only at BF16, where the two happen to be equal,
+    # so it would have passed vacuously here and failed under PRECISION="FP8".
     from configuration.advanced_config import (
-        GRAD_BYTES, GRAD_BYTES_PER_PARAM, PARAM_BYTES)
-    assert GRAD_BYTES * PARAM_BYTES == GRAD_BYTES_PER_PARAM, \
+        GRAD_BYTES, GRAD_BYTES_PER_PARAM, PARAM_STORAGE_BYTES)
+    assert GRAD_BYTES * PARAM_STORAGE_BYTES == GRAD_BYTES_PER_PARAM, \
         "GRAD_BYTES must hold GRAD_BYTES_PER_PARAM bytes/param at any precision"
 
     # Default of 1.0 keeps an existing caller's behaviour unchanged.
@@ -1397,3 +1401,215 @@ def test_attention_flops_width_is_query_projection_not_hidden_dim():
         "assumed from V3"
     )
     assert compute_attention_flops_dim(v4) == v4["d"]
+
+
+def test_phase1_memory_is_identical_at_bf16_and_fp8():
+    """FP8 is a COMPUTE dtype on this stack, so it must not change resident memory.
+
+    The recipe passes only `--compute_dtype fp8_cs` (dgxc-benchmarks-efa
+    modified-files/launch.sh), so Transformer Engine keeps parameters in BF16 and adds
+    cached FP8 cast copies. MEASURED on the one controlled pair -- Llama 70B LoRA
+    finetune, H200 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster, container and
+    parallelism with precision the only difference (jobs 1236/1238) -- FP8 cost 41.1 GB
+    against BF16's 37.8, i.e. +8.73%. So halving parameter memory was wrong in SIGN.
+
+    This pins the WIRING, not the arithmetic: every production caller must pass
+    PARAM_STORAGE_BYTES. Reverting any one of them to PARAM_BYTES makes FP8 diverge
+    and fails here.
+
+    The residual is honest and deliberate: predicting EQUAL memory is 8.0% low against
+    the measured 1.0873, because the FP8 cast copies and scaling metadata are not
+    modelled. Predicting FP8 CHEAPER, as the code did, was 17.0% low.
+    """
+    import importlib
+    import configuration.project_config as pc
+    from configuration.variants_config import VARIANTS
+    from configuration.hardware_config import HARDWARE
+
+    original = pc.PRECISION
+    breakdowns = {}
+    try:
+        for precision in ("BF16", "FP8"):
+            pc.PRECISION = precision
+            import configuration.advanced_config as ac
+            importlib.reload(ac)
+            import utils.core_calculations as cc
+            importlib.reload(cc)
+            import utils.phase1_memory as p1
+            importlib.reload(p1)
+
+            assert ac.PARAM_STORAGE_BYTES == 2, (
+                f"weights are resident in BF16 at either precision; got "
+                f"{ac.PARAM_STORAGE_BYTES} at {precision}"
+            )
+            rows = {}
+            for v in VARIANTS[:6]:
+                for hw in HARDWARE[:4]:
+                    dp = hw["gpus"] // (pc.TP * pc.PP * pc.CP)
+                    r = p1.analyze_variant_memory(
+                        v, hw, dp, v["layers"] // pc.PP, pc.EXPERTS_PER_GPU)
+                    mb = r.get("memory_breakdown") or {}
+                    # diagnose_oom has its OWN calculate_memory_for_micro call, and
+                    # its numbers are user-visible OOM advice. Covered explicitly:
+                    # reverting only that site changes nothing in the fit path, so a
+                    # test watching analyze_variant_memory alone cannot see it.
+                    diag = p1.diagnose_oom(
+                        v, hw, dp, v["layers"] // pc.PP, pc.EXPERTS_PER_GPU)
+                    db = diag.get("breakdown") or {}
+                    rows[f'{v["name"]}|{hw["name"]}'] = (
+                        r["best_zero"],
+                        *(round(mb.get(t, 0.0), 9) for t in
+                          ("total", "model", "grad", "optim", "activation",
+                           "buffer", "logits")),
+                        round(diag["required_memory"], 9),
+                        round(diag["shortage"], 9),
+                        *(round(db.get(t, 0.0), 9) for t in
+                          ("total", "model", "grad", "optim", "activation",
+                           "buffer", "logits")),
+                    )
+            breakdowns[precision] = rows
+    finally:
+        pc.PRECISION = original
+        import configuration.advanced_config as ac
+        importlib.reload(ac)
+        import utils.core_calculations as cc
+        importlib.reload(cc)
+        import utils.phase1_memory as p1
+        importlib.reload(p1)
+
+    assert breakdowns["BF16"], "swept nothing; the harness itself is broken"
+    differing = [k for k in breakdowns["BF16"]
+                 if breakdowns["BF16"][k] != breakdowns["FP8"][k]]
+    assert not differing, (
+        f"{len(differing)} of {len(breakdowns['BF16'])} configs differ between BF16 "
+        f"and FP8. First: {differing[0]} "
+        f"BF16={breakdowns['BF16'][differing[0]]} FP8={breakdowns['FP8'][differing[0]]}. "
+        f"A production caller is passing PARAM_BYTES where it must pass "
+        f"PARAM_STORAGE_BYTES, or OPTIM_BYTES/GRAD_BYTES is derived from PARAM_BYTES."
+    )
+
+
+def _mem_for_cp(cp, **overrides):
+    """One dense-model memory breakdown at a given cp. Shared by the cp tests."""
+    from utils.core_calculations import calculate_memory_for_micro
+
+    variant = {"d": 8192, "layers": 80, "dense_layers": 80,
+               "attn_per_layer": 167_772_160, "dense_ffn": 28672, "expert_ffn": 0,
+               "shared_each": 0, "router_each": 0, "expert_each": 0,
+               "vocab": 128_256}
+    kwargs = dict(
+        micro=1, model_mem_gb=16.0, variant=variant, dp=8, layers_per_gpu=20,
+        zero_strategy=1, seq_len=8192, topk=0, param_bytes=2,
+        empirical_act_multiplier=12, selective_act_checkpointing_multiplier=0.45,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+        pp=4, vocab=128_256, logits_bytes_per_element=8,
+    )
+    kwargs.update(overrides)
+    if cp is not None:
+        kwargs["cp"] = cp
+    return calculate_memory_for_micro(**kwargs)
+
+
+def test_context_parallelism_divides_the_sequence_dependent_memory():
+    """cp shards the SEQUENCE, so per-GPU activation memory must fall as cp rises.
+
+    Before this, cp reached the model only through the caller's
+    dp = gpus // (TP * PP * CP), so raising cp shrank dp and therefore RAISED reported
+    per-GPU memory -- the opposite of what context parallelism is for. Same class as
+    the moe_frac TP omission: a parallelism degree moving memory the wrong way.
+
+    Measured consequence on a real run: dgxc job 179 (Llama 70B bf16 pretrain, H200
+    64 GPUs, TP=2 PP=4 CP=2 VP=5, seq 8192) reserved 108.08 GB. Ignoring cp put the
+    ZeRO-1 estimate at 161.37 GB (1.49x); dividing by cp puts it at 126.75 (1.17x),
+    and ZeRO-2 -- which is what a NeMo distributed optimizer with gradient sharding
+    resembles -- at 108.88 GB, i.e. 1.01x measured.
+    """
+    act = {cp: _mem_for_cp(cp)["activation"] for cp in (1, 2, 4, 8)}
+
+    assert act[1] > 0, "activation term is zero; the probe is not exercising it"
+    for cp in (2, 4, 8):
+        assert abs(act[cp] - act[1] / cp) < 1e-9 * max(1.0, act[1]), (
+            f"activation at cp={cp} is {act[cp]}, expected {act[1] / cp} "
+            f"(= cp=1 value {act[1]} / {cp}). cp must divide the sequence."
+        )
+
+    # cp=1 must be a no-op, so an existing caller that passes no cp is unaffected.
+    assert _mem_for_cp(None)["total"] == _mem_for_cp(1)["total"]
+
+    # cp must reach the LOGITS term too. Under fused CE the live token count is
+    # capped at the chunk, so the term is flat in cp by design -- the unfused path is
+    # where a missing divisor would show, so assert there.
+    unfused = {cp: _mem_for_cp(cp, logits_fused_ce=False)["logits"]
+               for cp in (1, 2, 4)}
+    assert unfused[1] > 0
+    for cp in (2, 4):
+        assert abs(unfused[cp] - unfused[1] / cp) < 1e-9 * max(1.0, unfused[1]), (
+            f"unfused logits at cp={cp} is {unfused[cp]}, expected "
+            f"{unfused[1] / cp}: the logits tensor is (micro, seq_len/cp, vocab)"
+        )
+
+    # A zero or negative cp must not divide by zero or inflate memory.
+    assert _mem_for_cp(0)["activation"] == act[1]
+
+
+def test_moe_expert_activation_does_not_scale_with_precision():
+    """Both halves of the activation formula must agree that precision does not apply.
+
+    EMPIRICAL_ACT_MULTIPLIER is already BYTES per element of (seq_len * micro * d) --
+    the expression divides by 1e9 with no other byte factor -- so it is an implicitly
+    BF16 figure and cannot scale. The MoE expert intermediate in the SAME expression
+    counted elements and multiplied by param_bytes, so FP8 saved 20.0-40.5% on a MoE
+    layer and exactly 0% on a dense one. A dense FFN intermediate is as FP8-eligible
+    as an expert one, so that split was not physical.
+
+    Chosen against measurement, not symmetry. On the controlled pair (jobs 1236/1238)
+    FP8 cost +8.73% MORE memory, so every candidate that made activations cheaper
+    under FP8 moved further from reality: both-invariant gave a predicted FP8/BF16
+    total ratio of 0.9028 (error -17.0%), dense x0.75 gave 0.8528 (-21.6%) and
+    dense x0.50 gave 0.8028 (-26.2%), against a measured 1.0873.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+    from configuration.advanced_config import ACT_BYTES_PER_ELEMENT
+
+    assert ACT_BYTES_PER_ELEMENT == 2, (
+        "activations are resident in BF16; this constant must not track PARAM_BYTES"
+    )
+
+    moe = {"d": 4096, "layers": 94, "dense_layers": 0, "attn_per_layer": 41_943_040,
+           "dense_ffn": 12288, "expert_ffn": 1536, "shared_each": 0,
+           "router_each": 524_288, "expert_each": 18_874_368, "vocab": 151_936}
+
+    def activation(param_bytes):
+        return calculate_memory_for_micro(
+            micro=2, model_mem_gb=16.0, variant=moe, dp=8, layers_per_gpu=94,
+            zero_strategy=1, seq_len=4096, topk=8, param_bytes=param_bytes,
+            empirical_act_multiplier=12,
+            selective_act_checkpointing_multiplier=0.45,
+            fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+            experts_per_gpu=16, act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+        )["activation"]
+
+    bf16, fp8 = activation(2), activation(1)
+    assert bf16 > 0, "activation term is zero; the probe is not exercising it"
+    assert bf16 == fp8, (
+        f"MoE activation memory must not change with param_bytes: BF16 {bf16} vs "
+        f"FP8 {fp8}. The expert intermediate is still multiplying by param_bytes "
+        f"instead of act_bytes_per_element."
+    )
+
+    # The expert term must still be PRESENT and material -- an invariance assertion
+    # would also pass if the term had been deleted outright, so pin its size. It is
+    # 40-81% of a MoE layer's activations across this catalog, measured.
+    dense_only = calculate_memory_for_micro(
+        micro=2, model_mem_gb=16.0, variant={**moe, "expert_ffn": 0},
+        dp=8, layers_per_gpu=94, zero_strategy=1, seq_len=4096, topk=8,
+        param_bytes=2, empirical_act_multiplier=12,
+        selective_act_checkpointing_multiplier=0.45,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+        experts_per_gpu=16, act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+    )["activation"]
+    expert_share = (bf16 - dense_only) / bf16
+    assert 0.35 < expert_share < 0.85, (
+        f"expert activation term is {expert_share:.1%} of the total, outside the "
+        f"measured 40-81% band -- it has been dropped or double-counted"
+    )

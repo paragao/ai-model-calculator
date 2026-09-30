@@ -85,7 +85,34 @@ if PRECISION == "BF16":
 else:
     PARAM_BYTES = 1  # 1 byte per parameter for FP8
 
-# PRECISION affects PARAM_BYTES, and through it parameter and GRADIENT memory.
+# PARAM_STORAGE_BYTES is what the weights actually OCCUPY, which is not PARAM_BYTES.
+#
+# PARAM_BYTES is a COMPUTE precision. On this stack FP8 is requested with
+# `--compute_dtype fp8_cs` (modified-files/launch.sh in the dgxc-benchmarks-efa
+# repo), and that is the only precision flag the recipe passes -- there is no
+# separate storage or params dtype. Transformer Engine therefore keeps the
+# parameters resident in BF16 and produces cached FP8 cast copies per GEMM,
+# alongside per-tensor scaling factors and amax history. FP8 ADDS resident bytes
+# on top of the BF16 weights; it does not replace them.
+#
+# MEASURED, Llama 70B LoRA finetune on H200 p5en, 32 GPUs, TP=4 PP=2 VP=20 MBS=1,
+# identical cluster/container/parallelism with precision as the ONLY difference
+# (jobs 1236 bf16 and 1238 fp8):
+#     bf16  37.8 GB allocated / 38.5 reserved
+#     fp8   41.1 GB allocated / 41.3 reserved   = +8.73% allocated
+# FP8 cost MORE memory, so halving parameter memory was wrong in SIGN. Holding
+# parameters at BF16 moves the predicted FP8/BF16 total ratio from 0.9028 to
+# 1.0000 against a measured 1.0873, cutting the error from -17.0% to -8.0%.
+#
+# The residual +8.7% is the FP8 cast copies and scaling metadata, which this model
+# does NOT yet carry -- see the open question at the top of this file.
+PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
+
+# PRECISION no longer affects any memory term. It selects the GEMM precision, and
+# through that the throughput peak; parameters, gradients, optimizer state and
+# activations are all resident in BF16 at either setting, each for its own measured
+# reason recorded below. A sweep of all 704 variant x hardware pairs is byte-identical
+# between PRECISION="BF16" and PRECISION="FP8", and a test pins that.
 #
 # Throughput is handled: every hardware preset defines peak_tflops_fp8 and
 # phase3_training selects on PRECISION, refusing g5 where the value is 0 because
@@ -93,20 +120,34 @@ else:
 # "phase3_training reads peak_tflops_bf16 unconditionally and no hardware preset
 # defines peak_tflops_fp8" described a defect that has since been fixed.
 #
-# Two REAL limitations remain, both measured:
+# Three precision questions, all measured. Two resolved, one open:
 #
-# 1. GRADIENTS scale with PARAM_BYTES. -- RESOLVED, see GRAD_BYTES below, which
-#    holds gradients at GRAD_BYTES_PER_PARAM regardless of PARAM_BYTES. An FP8 run
-#    now charges 3.846 GB on Llama-3.1-8B, matching BF16, because gradients reduce
-#    in BF16 either way.
+# 1. GRADIENTS scale with PARAM_BYTES. -- RESOLVED, see GRAD_BYTES below. It is
+#    now derived from PARAM_STORAGE_BYTES, so it is a constant 1.0 and gradients
+#    sit at GRAD_BYTES_PER_PARAM at either precision. An FP8 run charges 3.846 GB
+#    on Llama-3.1-8B, matching BF16, because gradients reduce in BF16 either way.
+#    The same correction applies to OPTIM_BYTES.
 #
-# 2. ACTIVATIONS do NOT scale with PRECISION. The dense activation term is
-#    seq_len * micro * d * EMPIRICAL_ACT_MULTIPLIER with no PARAM_BYTES factor, so
-#    it is byte-identical at FP8 (measured: 6.000 GB at both PARAM_BYTES=2 and 1).
-#    Only the MoE expert intermediate inside the same expression carries
-#    PARAM_BYTES, so the two halves of one activation formula disagree about
-#    whether precision applies. STILL OPEN -- it needs a decision about which half
-#    is right, not a mechanical change.
+# 2. ACTIVATIONS do NOT scale with PRECISION. -- RESOLVED. Both halves of the
+#    activation formula are now precision-invariant: see ACT_BYTES_PER_ELEMENT
+#    below, which replaced the PARAM_BYTES factor on the MoE expert intermediate.
+#    Decided against MEASUREMENT rather than by symmetry -- the controlled bf16/fp8
+#    pair shows FP8 costing 8.73% MORE memory, so making activations cheaper under
+#    FP8 moved the prediction further from reality, not closer.
+#
+# 3. STILL OPEN -- FP8 CAST COPIES AND SCALING METADATA ARE NOT MODELLED.
+#    This is now the single largest known gap. With parameters, gradients,
+#    optimizer state and activations all precision-invariant, this model predicts
+#    IDENTICAL memory at BF16 and FP8. The measurement says FP8 costs +8.73%, so
+#    the prediction is 8.0% LOW for an FP8 run -- an improvement on the 17.0% it
+#    was, but a real and one-directional error.
+#
+#    The missing term is the FP8 cast copy of each weight that feeds a GEMM, plus
+#    per-tensor scaling factors and amax history. Closing it needs a memory profile
+#    that separates weights from activations on a single FP8 run; the +8.73% total
+#    cannot be decomposed, so the term is left out rather than guessed. Do NOT
+#    invent a fraction here -- that is exactly the mistake the activation question
+#    above nearly shipped.
 #
 # OPTIM_BYTES is correct across precisions -- see its derivation below, which
 # divides by PARAM_BYTES to hold the product at 12 bytes/param.
@@ -140,7 +181,10 @@ NUM_EMBEDDINGS_TABLES = 2
 # understating optimizer memory 2x -- the optimizer does not shrink just because
 # the parameters are fp8.
 OPTIM_BYTES_PER_PARAM = 12  # fp32 master + fp32 momentum + fp32 variance
-OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 6.0, FP8 -> 12.0
+# Divided by PARAM_STORAGE_BYTES, not PARAM_BYTES, because model_mem_gb now carries
+# the STORAGE size. Since storage is BF16 at either precision this is a constant
+# 6.0, and the product stays at OPTIM_BYTES_PER_PARAM as it must.
+OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_STORAGE_BYTES  # 6.0 at either precision
 
 # GRAD_BYTES is a MULTIPLIER ON PARAMETER MEMORY, the same shape as OPTIM_BYTES
 # above, because model_mem_gb already carries PARAM_BYTES.
@@ -154,7 +198,10 @@ OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 6.0, FP8 -> 12.0
 # Before this existed, grad_mem was model_mem_gb directly, so FP8 charged 1
 # byte/param -- measured on Llama-3.1-8B, 1.923 GB against the correct 3.846.
 GRAD_BYTES_PER_PARAM = 2  # BF16 gradient accumulation and reduction
-GRAD_BYTES = GRAD_BYTES_PER_PARAM / PARAM_BYTES  # BF16 -> 1.0, FP8 -> 2.0
+# Divided by PARAM_STORAGE_BYTES for the same reason as OPTIM_BYTES above. Both
+# are now constant across PRECISION, which is the point: neither gradients nor
+# optimizer state shrink under FP8, and neither do the weights themselves.
+GRAD_BYTES = GRAD_BYTES_PER_PARAM / PARAM_STORAGE_BYTES  # 1.0 at either precision
 
 # --- Output-logits memory -------------------------------------------------
 #
@@ -189,6 +236,28 @@ LOGITS_CHUNK_TOKENS = 1024  # rows whose logits are live at once under fused CE
 
 # Activation memory estimation (empirical multipliers)
 EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
+
+# ACT_BYTES_PER_ELEMENT resolves the disagreement the two halves of the activation
+# formula used to have about precision. EMPIRICAL_ACT_MULTIPLIER is already BYTES
+# per element of (seq_len * micro * d) -- the expression divides by 1e9 with no
+# other byte factor -- so it is an implicitly-BF16 figure and cannot scale. The MoE
+# expert intermediate in the SAME expression counted elements and multiplied by
+# PARAM_BYTES, so FP8 saved 20.0-40.5% on a MoE layer and exactly 0% on a dense
+# one. That split is not physical: a dense FFN intermediate is as FP8-eligible as
+# an expert one.
+#
+# Both halves are now precision-invariant. Chosen against measurement rather than
+# by symmetry: the controlled bf16/fp8 pair above shows FP8 costing 8.73% MORE
+# memory, so of the candidate treatments, making activations CHEAPER under FP8
+# moved the prediction further from reality --
+#     both invariant (this)    FP8/BF16 ratio 0.9028   error -17.0%
+#     dense x0.75              ratio 0.8528            error -21.6%
+#     dense x0.50              ratio 0.8028            error -26.2%
+# against the measured 1.0873. Real FP8 activation savings are not zero, but they
+# are smaller than the cast-copy overhead that offsets them, and neither term is
+# separable from a single measured total -- so both are left out rather than one
+# being guessed.
+ACT_BYTES_PER_ELEMENT = 2  # activations are resident in BF16 at either PRECISION
 SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
 
 # Communication buffer configuration

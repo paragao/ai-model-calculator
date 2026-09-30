@@ -79,8 +79,13 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     total_gpus = hw["gpus"]
 
     # Peak throughput must follow PRECISION. Previously this always read
-    # peak_tflops_bf16, so an FP8 run halved its memory while still computing
-    # time at BF16 throughput -- overstating FP8 training time ~2x.
+    # peak_tflops_bf16, so an FP8 run computed time at BF16 throughput --
+    # overstating FP8 training time ~2x.
+    #
+    # PRECISION is now a THROUGHPUT-only setting: it no longer changes any memory
+    # term, because the weights, gradients, optimizer state and activations are all
+    # resident in BF16 at either setting. See PARAM_STORAGE_BYTES in advanced_config.
+    #
     # A10G (g5) is Ampere and has NO FP8 support, so peak_tflops_fp8 is 0 there
     # and an FP8 run on it is not a valid configuration.
     if PRECISION == "BF16":
