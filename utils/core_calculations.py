@@ -10,6 +10,28 @@ from configuration.project_config import *
 from configuration.advanced_config import *
 
 
+def resolve_experts_per_gpu(variant, experts_per_gpu, ep=None):
+    """Experts resident on one GPU for this variant, overriding the global count.
+
+    experts_per_gpu arrives from the caller as the GLOBAL N_EXPERTS // EP, which is
+    right only for a model that actually has N_EXPERTS experts. A variant declaring
+    its own count overrides it, because the global is wrong in both directions:
+    Llama-4-Scout has 16 experts (the global 128 overstates it 8x), while
+    Qwen3.5-397B has 512 and the DeepSeek entries 256 (understated 4x and 2x).
+
+    Extracted so calculate_model_memory_gb and calculate_memory_for_micro cannot
+    disagree. They previously did: the memory function applied this override while
+    calculate_memory_for_micro used the raw global for its moe_frac split and its
+    MoE dispatch buffer, despite carrying a comment saying it "must match".
+    Measured, that affected 7 of 11 MoE variants.
+    """
+    variant_experts = variant.get("num_experts")
+    effective_ep = EP if ep is None else ep
+    if variant_experts and effective_ep > 0:
+        return max(1, variant_experts // effective_ep)
+    return experts_per_gpu
+
+
 def calculate_model_memory_gb(
     variant,
     layers_per_gpu,
@@ -59,16 +81,11 @@ def calculate_model_memory_gb(
     moe_layers = layers - variant["dense_layers"]
 
     # experts_per_gpu arrives as the GLOBAL N_EXPERTS // EP, which is right only
-    # for models that actually have N_EXPERTS experts. A variant declaring its
-    # own count overrides it, because the global is wrong in both directions:
-    # Llama-4-Scout has 16 experts (global 128 overstates routed memory 8x),
-    # while Qwen3.5-397B has 512 and DeepSeek 256 (understated 4x and 2x).
+    # for models that actually have N_EXPERTS experts. Resolved by the shared
+    # helper so calculate_memory_for_micro applies the identical override.
     # Note moe_layer_params in the catalog already reflects the true count, but
     # it is metadata -- the memory path below uses expert_each * experts_per_gpu.
-    variant_experts = variant.get("num_experts")
-    effective_ep = EP if ep is None else ep
-    if variant_experts and effective_ep > 0:
-        experts_per_gpu = max(1, variant_experts // effective_ep)
+    experts_per_gpu = resolve_experts_per_gpu(variant, experts_per_gpu, ep)
 
     # When using pipeline parallelism, only a fraction of MoE layers are on this GPU.
     # Approximate: distribute MoE layers proportionally to total layers.
@@ -489,10 +506,24 @@ def calculate_memory_for_micro(
     else:
         eff_dp_moe = dp
 
+    # Resolve the expert count the SAME way calculate_model_memory_gb does, so
+    # moe_frac below is a fraction of the model memory that function returned.
+    # Using the raw global here was wrong for 7 of 11 MoE variants.
+    experts_per_gpu = resolve_experts_per_gpu(variant, experts_per_gpu, ep)
+
     # Estimate fraction of model memory that is MoE expert params vs non-MoE
     if is_moe and model_mem_gb > 0:
-        # Expert memory fraction based on architecture (must match calculate_model_memory_gb)
-        routed_mem = experts_per_gpu * moe_layers_per_gpu * variant["expert_each"] * param_bytes
+        # Expert memory fraction based on architecture. This MUST match
+        # calculate_model_memory_gb, which divides routed weights by TP -- without
+        # that division the ratio exceeds 1.0 for any TP > 1 and clamps, making
+        # dense_frac 0 and pushing ALL optimizer and ZeRO-3 parameter sharding onto
+        # eff_dp_moe. Measured on Qwen3-235B-A22B at TP=2, that raised reported
+        # optimizer memory from 5.36 to 8.04 GB even though TP had halved the
+        # weights -- memory moving the wrong way as TP rises.
+        routed_mem = (
+            experts_per_gpu * moe_layers_per_gpu * variant["expert_each"]
+            * param_bytes / max(1, TP)
+        )
         total_model_bytes = model_mem_gb * 1e9
         moe_frac = min(1.0, routed_mem / total_model_bytes) if total_model_bytes > 0 else 0
         dense_frac = 1.0 - moe_frac
@@ -559,6 +590,23 @@ def calculate_memory_for_micro(
         raise ValueError(f"Unknown ZeRO strategy: {zero_strategy}")
 
     # --- Activation memory ---
+    #
+    # UNMODELLED, and it is the largest known gap: the OUTPUT LOGITS. The LM head
+    # produces a (micro, seq_len, vocab) tensor, and the cross-entropy backward
+    # needs its gradient, with the softmax commonly computed in fp32. None of that
+    # appears below -- the activation term is per-layer in d and never touches
+    # vocab, which is 128,256 to 248,320 across this catalog.
+    #
+    # Measured for Llama-3.1-8B at seq_len 4096, vocab 128,256:
+    #     micro=1   1.05 GB bf16   ~4.2 GB with an fp32 softmax and its gradient
+    #     micro=8   8.41 GB bf16  ~33.6 GB
+    # For Qwen3.5-397B-A17B (vocab 248,320) those double again, reaching ~65 GB at
+    # micro=8. At larger micro this single term can exceed the ENTIRE total
+    # computed here, which is why these figures are a ranking heuristic and a lower
+    # bound, never a predicted peak. Production stacks cut it with a chunked or
+    # fused cross-entropy, so the real cost depends on the loss implementation --
+    # modelling it needs that choice made explicitly rather than assumed.
+    #
     # For MoE layers, activations include expert intermediates (higher per-layer cost)
     if is_moe and moe_layers_per_gpu > 0:
         # MoE activation per layer: attention acts + routed expert intermediates
