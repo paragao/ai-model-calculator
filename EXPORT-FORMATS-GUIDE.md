@@ -98,14 +98,17 @@ derived batch cap. **Three flag columns carry information the `priority` does no
 - `tok_batch` - Global batch in TOKENS (`gbs * seq_len`)
 - `steps` - Training steps for `TOTAL_TOKENS` (15e12 by default)
 - `est_months` - Overhead-inclusive estimate (compute + PP bubble + exposed comm)
-- `rel_speed` - Speed relative to a baseline. **The baseline is the FIRST platform
-  configuration in sweep order, not the fastest or the slowest**, and it differs
-  per variant, so `rel_speed` is not comparable across variants.
+- `rel_speed` - How many times faster than the **SLOWEST** configuration for the
+  same variant. Always `>= 1.0`, and exactly `1.0` for the slowest config itself.
+  The anchor is per-variant, so the value is a within-variant speed-up and is not a
+  cross-variant figure: the fastest config's `rel_speed` equals that variant's full
+  spread, which ranges from 32.5x to 20,642x depending on the variant.
 - `months_low` / `months_high` - 0.75x and 1.25x multipliers on `est_months`
 - `bubble_pct` - PP bubble as % of total time
 - `comm_overhead_pct` - Exposed communication as % of total time
-- `efficiency_rating` - Star rating 0-3 derived from `rel_speed`, NOT from the step
-  count (see "Efficiency rating" below)
+- `efficiency_rating` - Star rating 0-3 from the config's **position** within its
+  variant's speed range, NOT a threshold on `rel_speed` and NOT a step-count
+  rating (see "Efficiency rating" below). Empty when unset.
 
 ### Phase 4 Communication (phase4_*.csv)
 
@@ -233,20 +236,33 @@ memory_df %>%
 
 ### Efficiency rating (Phase 3 `efficiency_rating`)
 
-This is a **relative SPEED** rating, not a step-count rating, and it is derived
-from `rel_speed` alone:
+This is a **relative SPEED** rating, not a step-count rating. It is the
+configuration's log-scaled **position** within its own variant's
+`[slowest, fastest]` range -- `0.0` at the slowest config, `1.0` at the fastest:
 
-- **0** (⭐⭐⭐): `rel_speed >= 2.0`
-- **1** (⭐⭐): `rel_speed >= 1.5`
-- **2** (⭐): `rel_speed >= 1.0`
-- **3** (no stars): slower than the baseline
+- **0** (⭐⭐⭐): position `>= 0.80`
+- **1** (⭐⭐): position `>= 0.60`
+- **2** (⭐): position `>= 0.40`
+- **3** (no stars): position `< 0.40`
 
-**Read it with care.** `rel_speed` is measured against the FIRST platform
-configuration in sweep order, which is neither the fastest nor the slowest -- on a
-default run it is mid-pack for all 22 variants, `rel_speed` spans 0.002 to 51.35,
-and **78% of rows (3,968 of 5,084) land on rating 0**. So rating 0 means "at least
-twice an arbitrary mid-pack anchor", not "optimal", and ratings are not comparable
-between variants. Rank by `est_months` instead.
+Empty means the config was never classified, which is distinct from rating 3.
+
+**Why a position and not a threshold on `rel_speed`.** Per-variant spread
+(slowest/fastest) runs from 32.5x for `Llama-3.1-405B` to 20,642x for
+`Llama-3.2-3B` -- a 635x difference in the scale being measured. A fixed multiplier
+would therefore mean something different for every variant: against a slowest
+anchor, `rel_speed >= 2.0` is the top few percent of a 32x spread but the bottom
+few percent of a 20,642x one. Positions are log-scaled because `est_months` values
+within a variant are spread geometrically (GPU counts double), so a linear position
+would put nearly every config against the fast end.
+
+Measured over all 5,084 rows the bands are 26.6% / 36.1% / 21.0% / 16.3%, so every
+band carries information. An earlier scheme anchored `rel_speed` on the first
+platform in sweep order -- mid-pack for all 22 variants -- and put **78% of rows on
+rating 0** simply by exceeding 2x an arbitrary entry.
+
+`est_months` remains the figure to rank on when you want absolute time; the rating
+tells you where a config sits among the alternatives for that variant.
 
 ### Step assessment (Phase 2 `priority` / `assessment`)
 
@@ -283,7 +299,8 @@ df = pd.read_csv('phase1_memory_results.csv')
 p5 = df[df['hardware'].str.endswith('p5')]
 print(p5[['variant', 'hardware', 'zero_strategy', 'total_gb', 'status']])
 
-# Rank configurations by actual estimated time, not by efficiency_rating.
+# Rank by absolute time. efficiency_rating is a position WITHIN each variant's own
+# range, so it ranks alternatives for one variant and is not a cross-variant sort key.
 train = pd.read_csv('phase3_training_results.csv')
 best = train.sort_values('est_months').groupby('variant').first()
 print(best[['platform', 'zero', 'micro', 'accum', 'est_months']])

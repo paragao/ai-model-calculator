@@ -81,26 +81,32 @@ def format_batch_assessment_with_color(assessment, priority):
         return color_text(assessment, 'yellow')
 
 
-def format_training_time_with_color(months_low, months_high, rel_speed):
+def format_training_time_with_color(months_low, months_high, efficiency_rating):
     """
-    Format training time range with color coding based on relative speed.
+    Format training time range with color coding based on efficiency rating.
 
     Args:
         months_low: Lower bound of time estimate (months)
         months_high: Upper bound of time estimate (months)
-        rel_speed: Relative speed multiplier vs baseline
+        efficiency_rating: Rating 0 (best) to 3 (worst), from
+            classify_platform_efficiency
 
     Returns:
         Colored string showing time range
+
+    Takes the rating rather than rel_speed deliberately. This function used to
+    re-derive its own bands from rel_speed with a second copy of the thresholds,
+    so the colour and the star rating could disagree if either copy changed.
     """
     time_str = f"{months_low:>4.1f}-{months_high:.1f}mo"
 
-    # Color based on relative speed
-    if rel_speed >= 2.0:
+    # Color follows the rating directly -- one source of thresholds, in
+    # utils/phase3_training.py.
+    if efficiency_rating == 0:
         return color_text(time_str, "green")  # Fast
-    elif rel_speed >= 1.5:
+    elif efficiency_rating == 1:
         return color_text(time_str, "cyan")   # Good
-    elif rel_speed >= 1.0:
+    elif efficiency_rating == 2:
         return color_text(time_str, "yellow") # Moderate
     else:
         return color_text(time_str, "red")    # Slow

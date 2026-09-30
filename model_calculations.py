@@ -57,6 +57,7 @@ from utils.phase2_batch import (
 from utils.phase3_training import (
     generate_platform_configs,
     calculate_training_metrics,
+    classify_platform_efficiency,
     generate_training_recommendations,
     export_training_results_csv
 )
@@ -519,11 +520,16 @@ def run(variants, hardware, *, report=False):
 
         # Calculate and display training times if platforms are available
         if all_platforms:
-            # Baseline = overhead-inclusive time of the first platform config.
-            base = all_platforms[0]
-            base_time_months = calculate_training_metrics(
-                base, active_params_b, base_time_months=1.0
-            )["est_months"]
+            # Compute times first, then classify. rel_speed is anchored on the
+            # SLOWEST config and the rating is a position within the variant's
+            # own range, so neither is knowable until every config is timed.
+            platform_results = []
+            for p in all_platforms:
+                metrics = calculate_training_metrics(p, active_params_b)
+                p.update(metrics)
+                platform_results.append(p)
+
+            classify_platform_efficiency(platform_results)
 
             # Print table header
             print(
@@ -533,23 +539,18 @@ def run(variants, hardware, *, report=False):
                 f"  {'-' * 28} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 6} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 10} {'-' * 12}"
             )
 
-            # Calculate and display metrics for each platform
-            platform_results = []
-            for p in all_platforms:
-                metrics = calculate_training_metrics(p, active_params_b, base_time_months)
-                p.update(metrics)
-                platform_results.append(p)
-
+            # Display, fastest first, so the best option leads.
+            for p in sorted(platform_results, key=lambda r: r["est_months"]):
                 # Format time string with color coding
                 time_str = format_training_time_with_color(
-                    metrics["months_low"], metrics["months_high"], metrics["rel_speed"]
+                    p["months_low"], p["months_high"], p["efficiency_rating"]
                 )
 
                 print(
                     f"  {p['name']:<28} {p['gpus']:>6} {'Z' + str(p['zero']):>5} "
                     f"{p['micro']:>6} {p['accum']:>6} {p['seq_len']:>7,} {p['gbs']:>8,} {p['tok_batch'] / 1e6:>8.1f}M "
-                    f"{p['steps']:>8,} {metrics['bubble_pct']:>7.1f}% {metrics['comm_overhead_pct']:>6.1f}% "
-                    f"{metrics['rel_speed']:>9.1f}x {time_str}"
+                    f"{p['steps']:>8,} {p['bubble_pct']:>7.1f}% {p['comm_overhead_pct']:>6.1f}% "
+                    f"{p['rel_speed']:>9.1f}x {time_str}"
                 )
 
             training_results["variants"][variant_name] = platform_results
