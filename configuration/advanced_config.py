@@ -91,21 +91,27 @@ else:
 # `--compute_dtype fp8_cs` (modified-files/launch.sh in the dgxc-benchmarks-efa
 # repo), and that is the only precision flag the recipe passes -- there is no
 # separate storage or params dtype. Transformer Engine therefore keeps the
-# parameters resident in BF16 and produces cached FP8 cast copies per GEMM,
-# alongside per-tensor scaling factors and amax history. FP8 ADDS resident bytes
-# on top of the BF16 weights; it does not replace them.
+# parameters resident in BF16 and produces cached FP8 cast copies per GEMM, each with
+# ONE FP32 per-tensor scale factor -- `fp8_cs` is current scaling, so there is no
+# amax history buffer. FP8 ADDS resident bytes on top of the BF16 weights; it does
+# not replace them.
 #
 # MEASURED, Llama 70B LoRA finetune on H200 p5en, 32 GPUs, TP=4 PP=2 VP=20 MBS=1,
 # identical cluster/container/parallelism with precision as the ONLY difference
-# (jobs 1236 bf16 and 1238 fp8):
+# (jobs 1236 bf16 and 1238 fp8). NOTE THE REGIME: this is a LoRA run and this
+# calculator models full pretraining, which measurably differ -- see "CONSEQUENCE FOR
+# VALIDATION" beside ACT_BYTES_PER_ELEMENT before using this pair as a target:
 #     bf16  37.8 GB allocated / 38.5 reserved
 #     fp8   41.1 GB allocated / 41.3 reserved   = +8.73% allocated
 # FP8 cost MORE memory, so halving parameter memory was wrong in SIGN. Holding
 # parameters at BF16 moves the predicted FP8/BF16 total ratio from 0.9028 to
 # 1.0000 against a measured 1.0873, cutting the error from -17.0% to -8.0%.
 #
-# The residual +8.7% is the FP8 cast copies and scaling metadata, which this model
-# does NOT yet carry -- see the open question at the top of this file.
+# The residual +8.7% is the FP8 weight cast copies. It is NOT scaling metadata:
+# `fp8_cs` is CURRENT scaling, one FP32 scale per tensor with no amax history, which
+# is negligible. The cast-copy term is now measured but deliberately not applied --
+# see the measured table and the 2.67x scale discrepancy beside
+# ACT_BYTES_PER_ELEMENT, and open question 3 above.
 PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 
 # PRECISION no longer affects any memory term. It selects the GEMM precision, and
@@ -135,19 +141,32 @@ PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 #    pair shows FP8 costing 8.73% MORE memory, so making activations cheaper under
 #    FP8 moved the prediction further from reality, not closer.
 #
-# 3. STILL OPEN -- FP8 CAST COPIES AND SCALING METADATA ARE NOT MODELLED.
+# 3. STILL OPEN -- THE FP8 WEIGHT CAST COPY IS NOT MODELLED.
 #    This is now the single largest known gap. With parameters, gradients,
 #    optimizer state and activations all precision-invariant, this model predicts
-#    IDENTICAL memory at BF16 and FP8. The measurement says FP8 costs +8.73%, so
-#    the prediction is 8.0% LOW for an FP8 run -- an improvement on the 17.0% it
-#    was, but a real and one-directional error.
+#    IDENTICAL memory at BF16 and FP8, so it is LOW for an FP8 run.
 #
-#    The missing term is the FP8 cast copy of each weight that feeds a GEMM, plus
-#    per-tensor scaling factors and amax history. Closing it needs a memory profile
-#    that separates weights from activations on a single FP8 run; the +8.73% total
-#    cannot be decomposed, so the term is left out rather than guessed. Do NOT
-#    invent a fraction here -- that is exactly the mistake the activation question
-#    above nearly shipped.
+#    Two earlier claims in this entry were WRONG and are corrected here.
+#
+#    (a) "Scaling metadata" is NOT part of the gap. The recipe requests FP8 with
+#        `--compute_dtype fp8_cs`, which is CURRENT scaling: one FP32 scale factor
+#        per tensor, computed on the fly, with NO amax history buffer. That is a
+#        handful of bytes per tensor and is negligible. The gap is cast copies.
+#
+#    (b) "The +8.73% total cannot be decomposed" was wrong. It decomposes cleanly,
+#        because the weight cast copy is CONSTANT in token count while the
+#        activation delta is LINEAR in it, so a token sweep separates them by
+#        regression. Done in jobs 348/350/351 at r2 = 1.000000; see the measured
+#        values and their (1 - recompute_fraction) scaling beside
+#        ACT_BYTES_PER_ELEMENT below.
+#
+#    What remains open is not the mechanism but its MAGNITUDE AT SCALE. The measured
+#    2.0 bytes/param is exact on a single non-pipelined stack of up to 16 layers and
+#    9.9e9 parameters, yet it overshoots the one controlled pair by 2.67x. The
+#    untested cause is pipelined residency, and the probe cannot reach it. Still do
+#    NOT invent a fraction here: there are now good measurements pointing at a
+#    constant that demonstrably does not hold at scale, which is a more persuasive
+#    version of the same trap, not an escape from it.
 #
 # OPTIM_BYTES is correct across precisions -- see its derivation below, which
 # divides by PARAM_BYTES to hold the product at 12 bytes/param.
@@ -269,14 +288,55 @@ EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
 # Job 349 then swept depth L = 1,2,4,8,16: a/param held at 1.9998 with spread 0.0000
 # and a(L) was linear through the origin, so bytes-per-param is the right FORM.
 #
-# Neither constant is shipped yet, deliberately. Extrapolating a = 2.0 across all
-# params per GPU predicts +11.351 GB for the measured pair against its actual
-# +3.300 GB (3.44x), and is arithmetically impossible: BF16 weights 18.165 GB plus
-# fp8 copies 18.163 GB = 36.328 GB of a 41.100 GB measured total, leaving 4.772 GB
-# for every activation, adapter and buffer. The untested cause is that the probe has
-# NO activation recomputation while that recipe recomputes ~50% of layers, which
-# would make a recomputed block's fp8 copies transient rather than resident. Until
-# that is measured, guessing a fraction here would repeat the Option C error.
+# Neither constant is shipped, deliberately, and the reason has CHANGED. An earlier
+# version of this note said the untested cause was that the probe had no activation
+# recomputation while the recipe recomputes ~50% of layers. That has now been
+# measured, and it was the right mechanism but it does NOT close the gap.
+#
+# MEASURED, jobs 350/351 (H200, TE 2.9.0, te.checkpoint, recompute_num_layers=1 per
+# block, r2 = 1.000000 at EVERY point, in two independent arms):
+#     recomputed fraction f : 0.00    0.25    0.50    0.75    1.00
+#     weight copies B/param : 1.9998  1.4998  0.9999  0.5000  0.0001
+#     activation saved B/tok: -114688 -86016  -57344  -28672       0
+# so BOTH FP8 terms scale by (1 - f) exactly:  a(f) = 2.0*(1-f), s(f) = 3.5*(1-f).
+# The mechanism is that a recomputed block keeps neither its activations nor its fp8
+# weight copy -- both are rebuilt during the recompute pass. Plumbing was proven in
+# the same job: retained forward memory fell 128.19 -> 8.00 MiB (93.8%) with
+# te.checkpoint, which TE reports as FP8-aware.
+#
+# MEASURED, job 351 ARM B -- a FROZEN base (n_trainable = 0, modelling LoRA):
+#     weight copies B/param : 1.9998 at f=0, IDENTICAL to the trainable arm
+#     activation saved B/tok: 0.00 at every f
+# Freezing drops NEITHER fp8 weight copy, so "LoRA keeps only the rowwise copy" is
+# refuted. But the fp8 activation saving vanishes entirely, and cleanly: a frozen
+# weight needs no wgrad, wgrad is what consumes the saved GEMM input, so that input
+# is not saved in EITHER precision and there is no 2->1 byte saving to collect.
+#
+# CONSEQUENCE FOR VALIDATION -- read this before trying again. The only controlled
+# precision pair with memory (jobs 1236/1238) is a LoRA run, and this calculator
+# models FULL pretraining; there is no LoRA or PEFT mode anywhere in it. The frozen
+# arm proves those regimes differ in a load-bearing way (0% vs 29.2% activation
+# saving), so that pair CANNOT validate the activation-precision term at all.
+#
+# The weight term does transfer -- it is identical in both arms -- and it still does
+# not reconcile. At the pair's f = 0.50 it predicts 2.0*(1-0.5)*8.825e9 = +8.825 GB
+# against a measured delta of +3.300 GB (2.67x), now with no activation saving
+# available to offset it. Matching exactly would need a(f=0) = 0.7479 B/param.
+# (Superseded figures: the earlier 3.44x and 18.165 GB used a round 70.0e9 parameter
+# count; the catalog says 70.6e9, giving 8.825e9/GPU and 17.650 GB of BF16 weights.)
+#
+# The one mechanism still untested is PIPELINED residency. Job 349's layer sweep
+# refuted "layers in flight" only for a NON-pipelined forward-then-backward, where
+# every layer's copy is necessarily alive at once; it says nothing about an
+# interleaved 1F1B schedule, where a chunk's fp8 copy need only live from that
+# chunk's forward to its backward, so the resident count is bounded by chunks in
+# flight rather than by all 40 local layers. The probe has no pipeline parallelism
+# and so STRUCTURALLY cannot measure this. What would settle it is a controlled
+# bf16/fp8 pair on a FULL PRETRAINING recipe at PP=1 (where f is ~1.25%, so recompute
+# is nearly inert and the weight term is near its f=0 value). Until then, shipping
+# a = 2.0*(1-f) would overstate a 70B pretrain at TP=4/PP=1 by tens of GB on the
+# strength of a constant whose only end-to-end test misses by 2.67x -- the Option C
+# error with better measurements behind it.
 ACT_BYTES_PER_ELEMENT = 2  # activations are resident in BF16 at either PRECISION
 SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
 
