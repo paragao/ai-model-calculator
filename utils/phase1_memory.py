@@ -115,6 +115,9 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
         cp=CP,
         act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+        recompute_granularity=RECOMPUTE_GRANULARITY,
+        recompute_num_layers=RECOMPUTE_NUM_LAYERS,
+        recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
     )
 
     required = memory_breakdown["total"]
@@ -311,6 +314,9 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
         cp=CP,
         act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+        recompute_granularity=RECOMPUTE_GRANULARITY,
+        recompute_num_layers=RECOMPUTE_NUM_LAYERS,
+        recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
     )
 
     # Calculate efficiency metrics
@@ -418,7 +424,7 @@ def export_results_csv(results, filename):
         fieldnames = [
             'variant', 'hardware', 'zero_strategy', 'micro_batch',
             'model_gb', 'grad_gb', 'optim_gb', 'activation_gb', 'buffer_gb',
-            'logits_gb', 'zero3_transient_gb',
+            'logits_gb', 'zero3_transient_gb', 'recompute_fraction',
             'total_gb', 'gpu_capacity_gb', 'headroom_gb', 'utilization_pct',
             'memory_efficiency', 'status'
         ]
@@ -442,6 +448,7 @@ def export_results_csv(results, filename):
                         'activation_gb': 0,
                         'buffer_gb': 0,
                         'logits_gb': 0,
+                        'recompute_fraction': '',
                         'total_gb': result["oom_diagnostics"]["required_memory"],
                         'gpu_capacity_gb': result["oom_diagnostics"]["available_memory"],
                         'headroom_gb': -result["oom_diagnostics"]["shortage"],
@@ -465,6 +472,7 @@ def export_results_csv(results, filename):
                         'buffer_gb': mb["buffer"],
                         'logits_gb': mb["logits"],
                         'zero3_transient_gb': mb["zero3_transient"],
+                        'recompute_fraction': mb["recompute_fraction"],
                         'total_gb': mb["total"],
                         'gpu_capacity_gb': mb["total"] + em["wasted_headroom"],
                         'headroom_gb': em["wasted_headroom"],

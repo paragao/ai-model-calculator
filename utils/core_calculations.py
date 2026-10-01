@@ -440,6 +440,56 @@ def calculate_training_time_months_with_overhead(
     }
 
 
+def resolve_recompute_scale(
+    layers_per_gpu,
+    vp,
+    recompute_granularity,
+    recompute_num_layers,
+    empirical_act_multiplier,
+    recompute_boundary_bytes_per_element,
+):
+    """Fraction of layers recomputed, and the resulting per-layer activation scale.
+
+    Megatron's recompute_method="block" with recompute_granularity="full" recomputes
+    recompute_num_layers layers of EVERY pipeline chunk. Under an interleaved
+    schedule a chunk is layers_per_gpu / vp layers, so the recomputed FRACTION
+    depends on PP and VP, not on recompute_num_layers alone.
+
+    A stored layer costs empirical_act_multiplier bytes per element. A recomputed
+    layer stores only its block input, i.e. recompute_boundary_bytes_per_element.
+
+    Returns (fraction_recomputed, scale) where scale multiplies the per-layer
+    activation cost. With no recompute the fraction is 0.0 and the scale is exactly
+    1.0, so every caller is unchanged by default.
+
+    This is shared so the base activation term and the VP in-flight term cannot
+    drift apart -- the same failure mode that made moe_frac disagree with itself.
+    """
+    if not recompute_granularity or recompute_num_layers <= 0:
+        return 0.0, 1.0
+    if recompute_granularity != "full":
+        raise ValueError(
+            f"unsupported recompute_granularity {recompute_granularity!r}; "
+            "only None and 'full' are modelled"
+        )
+    if empirical_act_multiplier <= 0:
+        raise ValueError("empirical_act_multiplier must be positive")
+
+    layers_per_chunk = layers_per_gpu / vp if vp and vp > 1 else layers_per_gpu
+    if layers_per_chunk <= 0:
+        return 0.0, 1.0
+
+    recomputed = min(recompute_num_layers, layers_per_chunk)
+    fraction = recomputed / layers_per_chunk
+    # Blend the stored and recomputed per-layer costs, expressed as a multiplier on
+    # the stored cost so it composes with the existing expressions unchanged.
+    scale = (
+        (1.0 - fraction)
+        + fraction * recompute_boundary_bytes_per_element / empirical_act_multiplier
+    )
+    return fraction, scale
+
+
 def calculate_memory_for_micro(
     micro,
     model_mem_gb,
@@ -460,6 +510,9 @@ def calculate_memory_for_micro(
     vp=1,
     cp=1,
     act_bytes_per_element=2,
+    recompute_granularity=None,
+    recompute_num_layers=0,
+    recompute_boundary_bytes_per_element=2,
     nccl_ep_scaling_factor=0.0,
     fragmentation_factor=1.0,
     experts_per_gpu=0,
@@ -485,6 +538,16 @@ def calculate_memory_for_micro(
             every token-count-dependent term sees seq_len/cp per GPU.
         act_bytes_per_element: Bytes per activation element. Precision-invariant;
             see ACT_BYTES_PER_ELEMENT in advanced_config for why.
+        recompute_granularity: None (store every layer's activations, the default
+            and the behaviour before this existed) or "full" (recompute whole
+            blocks, as recompute_granularity="full" in a Megatron/NeMo recipe).
+        recompute_num_layers: Layers recomputed per PIPELINE CHUNK, matching
+            Megatron's recompute_num_layers under recompute_method="block". The
+            recomputed FRACTION is this over layers_per_gpu/vp, so it depends on
+            PP and VP as well -- see resolve_recompute_scale.
+        recompute_boundary_bytes_per_element: Bytes a recomputed block still stores
+            for its own input. Applies to the base term AND the VP in-flight term,
+            which previously took no recompute reduction at all.
         topk: Top-K for MoE routing
         param_bytes: Bytes per parameter AS RESIDENT IN MEMORY -- callers pass
             PARAM_STORAGE_BYTES, not PARAM_BYTES. Every remaining use here wants
@@ -675,6 +738,20 @@ def calculate_memory_for_micro(
 
     activation_mem = act_total_full * selective_act_checkpointing_multiplier / 1e9
 
+    # Activation recomputation. A recomputed block stores only its input, so this
+    # scales the per-layer cost. Inert (scale exactly 1.0) unless a recipe's
+    # recompute settings are supplied. Derived once and applied to BOTH the base
+    # term and the VP in-flight term below, so the two cannot disagree.
+    recompute_fraction, recompute_scale = resolve_recompute_scale(
+        layers_per_gpu,
+        vp,
+        recompute_granularity,
+        recompute_num_layers,
+        empirical_act_multiplier,
+        recompute_boundary_bytes_per_element,
+    )
+    activation_mem *= recompute_scale
+
     # VP activation overhead: interleaved schedule keeps more activations in-flight
     # In interleaved 1F1B, warmup fills (PP-1)*VP micro-batches before steady state.
     # Each micro-batch occupies layers_per_virtual_chunk = layers_per_gpu / VP layers.
@@ -690,6 +767,11 @@ def calculate_memory_for_micro(
         else:
             avg_act_per_layer = seq_len * micro * d * empirical_act_multiplier
         vp_act_overhead = inflight_micros * layers_per_virtual_chunk * avg_act_per_layer / 1e9
+        # In-flight chunks are recomputed on the same schedule as any other, so the
+        # recompute scale applies here too. Before this it did not, which left the
+        # VP term as the single largest activation contributor for a recipe that
+        # recomputes: at PP=2/VP=20 it was 16.106 of 23.354 GB on Llama-3.1-70B.
+        vp_act_overhead *= recompute_scale
         activation_mem += vp_act_overhead
 
     # --- Buffer memory ---
@@ -737,6 +819,7 @@ def calculate_memory_for_micro(
         "activation": activation_mem,
         "buffer": buffer_mem,
         "logits": logits_mem,
+        "recompute_fraction": recompute_fraction,
         "zero3_transient": zero3_transient,
         "zero3_transient_detail": zero3_transient_detail,
     }
@@ -818,8 +901,11 @@ def calculate_viable_micro_batch_sizes(
             logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
             logits_fused_ce=LOGITS_FUSED_CE,
             logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
-        cp=CP,
-        act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+            cp=CP,
+            act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
+            recompute_granularity=RECOMPUTE_GRANULARITY,
+            recompute_num_layers=RECOMPUTE_NUM_LAYERS,
+            recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
         )
 
         # Check if this micro batch size fits in memory

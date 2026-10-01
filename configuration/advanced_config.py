@@ -254,11 +254,51 @@ EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
 #     dense x0.75              ratio 0.8528            error -21.6%
 #     dense x0.50              ratio 0.8028            error -26.2%
 # against the measured 1.0873. Real FP8 activation savings are not zero, but they
-# are smaller than the cast-copy overhead that offsets them, and neither term is
-# separable from a single measured total -- so both are left out rather than one
-# being guessed.
+# are smaller than the cast-copy overhead that offsets them.
+#
+# CORRECTION (measured, Slurm jobs 348/349 on H200, TE 2.9.0, Float8CurrentScaling):
+# an earlier version of this note claimed the two terms were "not separable from a
+# single measured total". That was WRONG -- they separate cleanly, because the weight
+# cast copy is CONSTANT in token count and the activation delta is LINEAR in it, so a
+# token sweep splits them by regression. Measured at r2 = 1.000000:
+#     FP8 weight cast copies  = +1.9998 bytes/param  (rowwise AND columnwise both
+#                               resident on Hopper; matches NVIDIA's "same footprint
+#                               as BF16" for the default fused cast-transpose)
+#     saved-activation delta  = 3.5000 bytes/element SAVED of the 12 = 29.2%
+#                               (matches NVIDIA's documented 20-30% empirical saving)
+# Job 349 then swept depth L = 1,2,4,8,16: a/param held at 1.9998 with spread 0.0000
+# and a(L) was linear through the origin, so bytes-per-param is the right FORM.
+#
+# Neither constant is shipped yet, deliberately. Extrapolating a = 2.0 across all
+# params per GPU predicts +11.351 GB for the measured pair against its actual
+# +3.300 GB (3.44x), and is arithmetically impossible: BF16 weights 18.165 GB plus
+# fp8 copies 18.163 GB = 36.328 GB of a 41.100 GB measured total, leaving 4.772 GB
+# for every activation, adapter and buffer. The untested cause is that the probe has
+# NO activation recomputation while that recipe recomputes ~50% of layers, which
+# would make a recomputed block's fp8 copies transient rather than resident. Until
+# that is measured, guessing a fraction here would repeat the Option C error.
 ACT_BYTES_PER_ELEMENT = 2  # activations are resident in BF16 at either PRECISION
 SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
+
+# --- Activation recomputation -------------------------------------------------
+# Megatron/NeMo recipes commonly set, via overrides.py:
+#     recompute_granularity="full", recompute_method="block", recompute_num_layers=N
+# which fully recomputes N layers of every pipeline chunk instead of storing their
+# activations. A recomputed block stores only its own INPUT, not the ~6 intermediate
+# tensors the multiplier above accounts for.
+#
+# This matters because the fraction recomputed depends on PP and VP, not just on N:
+# layers per chunk is layers_per_gpu / VP under an interleaved schedule, so
+#     PP=4 VP=20 -> 80/(4*20) = 1 layer/chunk  -> 1 of 1  -> ~100% recomputed
+#     PP=2 VP=20 -> 80/(2*20) = 2 layers/chunk -> 1 of 2  -> ~50%  recomputed
+#     PP=1 no VP -> 80 layers in one stage     -> 1 of 80 -> ~1.25% recomputed
+# Changing PP therefore silently changes activation memory by a large factor.
+#
+# DEFAULT IS INERT: granularity None recomputes nothing, which is exactly the
+# behaviour before this was added. Set it to model a recipe that recomputes.
+RECOMPUTE_GRANULARITY = None  # None | "full" -- "full" recomputes whole blocks
+RECOMPUTE_NUM_LAYERS = 0  # layers recomputed per pipeline chunk (recompute_num_layers)
+RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT = 2  # a recomputed block still stores its input
 
 # Communication buffer configuration
 FWD_BWD_ROUTING_BUFF_PASSES = 2  # All-to-all buffer passes for MoE routing
