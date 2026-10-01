@@ -61,6 +61,13 @@ read them verbatim rather than guessing a longer form.
 - `zero3_transient_gb` - ZeRO-3 transient all-gather buffer (GB). **0.0 for ZeRO-1
   and ZeRO-2**, which do not gather parameters. DP-invariant, and for 18 of 22
   variants the largest gathered unit is the embedding table.
+- `recompute_fraction` - Fraction of this configuration's layers whose activations
+  are **recomputed** rather than stored, under `RECOMPUTE_GRANULARITY`. Tri-state:
+  a number for an assessed row, and **empty for an OOM row**, which has no
+  breakdown to assess. `0.0` with the shipped default, which recomputes nothing.
+  Worth reading because it is **not** `RECOMPUTE_NUM_LAYERS` alone: a chunk is
+  `layers_per_gpu / VP` layers, so the same `recompute_num_layers = 1` is ~100% of
+  activations at PP=4/VP=20 and ~1.25% at PP=1. See "Activation recomputation".
 - `total_gb` - Total memory required (GB), including a 1.24x fragmentation factor
 - `gpu_capacity_gb` - GPU memory capacity (GB)
 - `headroom_gb` - Remaining memory (GB)
@@ -315,6 +322,46 @@ Earlier releases applied only the `DP` half, so raising `CP` *increased* reporte
 BF16 pretrain, H200 64 GPUs, TP=2 PP=4 CP=2 VP=5, seq 8192, 108.08 GB reserved) the
 ZeRO-1 estimate moved from 161.37 GB (1.49x) to 126.75 GB (1.17x), and ZeRO-2 -- the
 closer analogue of a NeMo distributed optimizer -- to 108.88 GB, i.e. 1.01x measured.
+
+### Activation recomputation (`recompute_fraction`)
+
+Megatron/NeMo recipes commonly set `recompute_granularity="full"` with
+`recompute_method="block"` and `recompute_num_layers=N`, which recomputes N layers of
+every pipeline chunk during backward instead of storing their activations. A
+recomputed block stores only its own input, so it costs
+`RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT` (2) rather than the
+`EMPIRICAL_ACT_MULTIPLIER` (12) a stored layer costs.
+
+**The fraction is not `recompute_num_layers`.** A chunk is `layers_per_gpu / VP`
+layers under an interleaved schedule, so for an 80-layer model at
+`recompute_num_layers = 1`:
+
+| config | layers/chunk | recomputed | activation scale |
+|---|---|---|---|
+| PP=4 VP=20 | 1 | **100%** | 0.167 |
+| PP=2 VP=20 | 2 | **50%** | 0.583 |
+| PP=1 no VP | 80 | 1.25% | 0.990 |
+
+So changing PP silently changes activation memory several-fold, which is the main
+reason this column is exported rather than left implicit.
+
+The scale applies to the **VP in-flight** term as well as the base term. That matters
+because the in-flight term dominates: on `Llama-3.1-70B` at PP=2/VP=20 it is 16.106 of
+the 23.354 GB total, and earlier releases added it with no checkpointing reduction at
+all. With the benchmark recipe's settings that configuration's activation memory goes
+**23.354 -> 13.623 GB (-41.7%)**, which is what makes the estimate consistent with the
+real run: the measured BF16 total is 37.800 GB of which 18.165 GB is weights, leaving
+19.635 GB for everything else — a budget the unreduced 23.354 GB **exceeded** and the
+reduced 13.623 GB fits inside.
+
+Across the full 704-pair sweep, enabling it moves 444 fits to 458 and changes the
+activation figure on 444 rows, median **-11.1%**. Note the figure can *rise* on some
+rows: cheaper activations let a larger micro batch fit, and Phase 1 reports the best
+micro batch per pair. All 191 such rows were verified to come with a larger
+`micro_batch`, none with it unchanged.
+
+**The default recomputes nothing**, so results are unchanged until you set
+`RECOMPUTE_GRANULARITY` and `RECOMPUTE_NUM_LAYERS` to match your recipe.
 
 ### Efficiency rating (Phase 3 `efficiency_rating`)
 

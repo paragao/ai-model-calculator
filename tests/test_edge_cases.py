@@ -1613,3 +1613,139 @@ def test_moe_expert_activation_does_not_scale_with_precision():
         f"expert activation term is {expert_share:.1%} of the total, outside the "
         f"measured 40-81% band -- it has been dropped or double-counted"
     )
+
+
+def test_recompute_is_inert_by_default():
+    """Adding recomputation must not change any existing result.
+
+    The whole 704-pair sweep was verified byte-identical with the shipped default,
+    and this pins the mechanism: granularity None gives a scale of exactly 1.0, so
+    every activation expression is multiplied by one.
+    """
+    from utils.core_calculations import resolve_recompute_scale
+
+    fraction, scale = resolve_recompute_scale(40, 20, None, 0, 12, 2)
+    assert fraction == 0.0, f"default must recompute nothing, got {fraction}"
+    assert scale == 1.0, (
+        f"default scale must be exactly 1.0 so results are unchanged, got {scale}"
+    )
+
+    # num_layers=0 must also be inert even if a granularity is named, otherwise a
+    # half-configured recipe would silently shrink activations.
+    fraction, scale = resolve_recompute_scale(40, 20, "full", 0, 12, 2)
+    assert (fraction, scale) == (0.0, 1.0), (
+        f"recompute_num_layers=0 must be inert, got fraction={fraction} scale={scale}"
+    )
+
+
+def test_recompute_fraction_depends_on_pp_and_vp_not_just_num_layers():
+    """The recomputed FRACTION is num_layers / (layers_per_gpu / vp).
+
+    This is the point of the term: recompute_num_layers=1 is ~100% of activations at
+    PP=4/VP=20 and ~1.25% at PP=1, so changing PP silently changes activation memory
+    by a large factor. Values cross-checked against the benchmark recipe analysis in
+    scripts/submit-finetune-sweep.sh, which derives the same three figures.
+    """
+    from utils.core_calculations import resolve_recompute_scale
+
+    # 80-layer model. layers_per_gpu = 80 / PP.
+    cases = {
+        # (layers_per_gpu, vp): expected fraction
+        (20, 20): 1.0,        # PP=4 VP=20 -> 1 layer/chunk  -> 1 of 1
+        (40, 20): 0.5,        # PP=2 VP=20 -> 2 layers/chunk -> 1 of 2  (jobs 1236/1238)
+        (80, 1): 1.0 / 80.0,  # PP=1 no VP -> 80 in one stage -> 1 of 80
+    }
+    for (lpg, vp), expected in cases.items():
+        fraction, _ = resolve_recompute_scale(lpg, vp, "full", 1, 12, 2)
+        assert abs(fraction - expected) < 1e-9, (
+            f"layers_per_gpu={lpg} vp={vp}: expected fraction {expected}, got {fraction}"
+        )
+
+    # A recomputed layer still stores its block input, so the scale is NOT 1-fraction.
+    fraction, scale = resolve_recompute_scale(40, 20, "full", 1, 12, 2)
+    expected_scale = 0.5 + 0.5 * 2 / 12
+    assert abs(scale - expected_scale) < 1e-9, (
+        f"scale must blend stored and boundary costs: expected {expected_scale}, "
+        f"got {scale}. A recomputed block is not free -- it stores its own input."
+    )
+
+    # recompute_num_layers beyond the chunk size cannot exceed 100%.
+    fraction, _ = resolve_recompute_scale(40, 20, "full", 99, 12, 2)
+    assert fraction == 1.0, f"fraction must clamp at 1.0, got {fraction}"
+
+
+def test_unsupported_recompute_granularity_raises():
+    """An unmodelled granularity must fail loudly, not silently recompute nothing."""
+    import pytest as _pytest
+
+    from utils.core_calculations import resolve_recompute_scale
+
+    with _pytest.raises(ValueError, match="unsupported recompute_granularity"):
+        resolve_recompute_scale(40, 20, "selective", 1, 12, 2)
+
+
+def test_recompute_scale_reaches_the_vp_inflight_activation_term():
+    """Every activation component must take the recompute scale, VP in-flight included.
+
+    This is the load-bearing assertion. The VP in-flight term was previously added
+    with NO checkpointing reduction at all, and at the benchmark pair's PP=2/VP=20 it
+    is 16.106 of the 23.354 GB total -- the dominant contributor. Scaling only the
+    base term would leave 20.33 GB instead of 13.623 GB.
+
+    Asserting the exact algebraic relation act_on == act_off * scale fails if EITHER
+    site is left unscaled, which a figure-pinning assertion would not catch.
+    """
+    from utils.core_calculations import (
+        calculate_memory_for_micro,
+        resolve_recompute_scale,
+    )
+
+    dense = {"d": 8192, "layers": 80, "dense_layers": 80, "attn_per_layer": 67_108_864,
+             "dense_ffn": 28672, "expert_ffn": 0, "shared_each": 0, "router_each": 0,
+             "expert_each": 0, "vocab": 128_256}
+    # PP=2 VP=20 is the benchmark pair's shape, and vp>1 and pp>1 is what switches the
+    # in-flight term on at all.
+    pp, vp, layers_per_gpu = 2, 20, 40
+
+    def activation(granularity, num_layers):
+        return calculate_memory_for_micro(
+            micro=1, model_mem_gb=18.165, variant=dense, dp=4,
+            layers_per_gpu=layers_per_gpu, zero_strategy=1, seq_len=4096, topk=1,
+            param_bytes=2, empirical_act_multiplier=12,
+            selective_act_checkpointing_multiplier=0.45,
+            fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+            experts_per_gpu=0, pp=pp, vp=vp, act_bytes_per_element=2,
+            recompute_granularity=granularity, recompute_num_layers=num_layers,
+            recompute_boundary_bytes_per_element=2,
+        )["activation"]
+
+    act_off = activation(None, 0)
+    act_on = activation("full", 1)
+    _, scale = resolve_recompute_scale(layers_per_gpu, vp, "full", 1, 12, 2)
+
+    assert act_off > 0, "activation term is zero; the probe is not exercising it"
+    assert act_on < act_off, (
+        f"recomputation must reduce stored activations: {act_off} -> {act_on}"
+    )
+    assert abs(act_on - act_off * scale) < 1e-9, (
+        f"every activation component must take the recompute scale. Expected "
+        f"{act_off * scale} (= {act_off} x {scale}) but got {act_on}. A residual of "
+        f"roughly the VP in-flight term means `vp_act_overhead *= recompute_scale` "
+        f"is missing, leaving the dominant contributor unreduced."
+    )
+
+    # The in-flight term must actually be present here, or this test would pass
+    # vacuously against a model where only the base term exists.
+    act_no_vp = calculate_memory_for_micro(
+        micro=1, model_mem_gb=18.165, variant=dense, dp=4,
+        layers_per_gpu=layers_per_gpu, zero_strategy=1, seq_len=4096, topk=1,
+        param_bytes=2, empirical_act_multiplier=12,
+        selective_act_checkpointing_multiplier=0.45,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+        experts_per_gpu=0, pp=1, vp=1, act_bytes_per_element=2,
+    )["activation"]
+    inflight_share = (act_off - act_no_vp) / act_off
+    assert inflight_share > 0.5, (
+        f"VP in-flight term is only {inflight_share:.1%} of activations here, so this "
+        f"test no longer exercises the dominant contributor it exists to protect"
+    )
