@@ -41,7 +41,10 @@ read them verbatim rather than guessing a longer form.
 - `hardware` - Hardware preset name (e.g., "64 p5" -- 64 INSTANCES, 512 GPUs)
 - `zero_strategy` - Best strategy that fits: "ZeRO-1", "ZeRO-2", "ZeRO-3", or "OOM"
 - `micro_batch` - Largest viable micro batch (1, 2, 4, 8 or 16), or "N/A" when OOM
-- `model_gb` - Model parameter memory (GB)
+- `model_gb` - Model parameter memory (GB). Held at `PARAM_STORAGE_BYTES` (2, BF16)
+  **regardless of `PRECISION`**: `--compute_dtype fp8` is a GEMM precision, so
+  Transformer Engine keeps the weights resident in BF16 and adds FP8 cast copies on
+  top. This column does not halve at FP8.
 - `grad_gb` - Gradient memory (GB). Held at `GRAD_BYTES_PER_PARAM` (2, BF16)
   **regardless of `PRECISION`**: an FP8 recipe uses FP8 only for the GEMM inputs and
   reduces gradients in BF16 or higher, so this column does not halve at FP8.
@@ -276,6 +279,42 @@ property of any model.
 
 The LM head **weight** gradient is not double-counted: the head's parameters are in
 `model_gb` already, so `grad_gb` covers them.
+
+### Precision (`PRECISION` = `BF16` or `FP8`) does not change any memory column
+
+Every Phase 1 memory column is **byte-identical** at both settings. A full sweep of all
+704 variant x hardware pairs produces the same numbers either way, and a test pins it.
+
+This is deliberate and measured, not an oversight. `--compute_dtype fp8` selects a GEMM
+precision; it is not a storage dtype. Transformer Engine keeps parameters resident in
+BF16 and adds cached FP8 cast copies on top, gradients reduce in BF16, optimizer state
+is fp32, and activations are BF16. On the one controlled comparison available -- Llama
+70B LoRA finetune, H200 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster, container
+and parallelism with precision the only difference -- FP8 used **more** memory:
+
+| | allocated | reserved |
+|---|---|---|
+| BF16 | 37.8 GB | 38.5 GB |
+| FP8 | 41.1 GB | 41.3 GB |
+| | **+8.73%** | +7.27% |
+
+**Read the FP8 numbers as a lower bound.** Predicting equal memory is ~8% low against
+that measurement, because the FP8 cast copies and scaling metadata are not modelled.
+Before this was corrected the model predicted FP8 *cheaper*, which was 17% low and
+wrong in sign. `PRECISION` still changes Phase 3 training time, via the throughput peak.
+
+### Context parallelism (`CP`) divides the sequence-dependent memory
+
+`CP` shards the sequence, so activation memory, the a2a/dispatch/PP buffers and the
+output logits all scale as `1/CP` per GPU. Raising `CP` also shrinks
+`DP = gpus / (TP * PP * CP)`, which raises the per-GPU optimizer and gradient share, so
+the net effect on `total_gb` depends on which dominates.
+
+Earlier releases applied only the `DP` half, so raising `CP` *increased* reported memory
+-- the opposite of what context parallelism is for. Against a measured run (Llama 70B
+BF16 pretrain, H200 64 GPUs, TP=2 PP=4 CP=2 VP=5, seq 8192, 108.08 GB reserved) the
+ZeRO-1 estimate moved from 161.37 GB (1.49x) to 126.75 GB (1.17x), and ZeRO-2 -- the
+closer analogue of a NeMo distributed optimizer -- to 108.88 GB, i.e. 1.01x measured.
 
 ### Efficiency rating (Phase 3 `efficiency_rating`)
 

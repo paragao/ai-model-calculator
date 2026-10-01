@@ -80,7 +80,7 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     # Calculate model memory (doesn't change with ZeRO)
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
-        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
         tp=TP
     )
 
@@ -96,7 +96,7 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         zero_strategy=best_zero,
         seq_len=variant.get("seq_len", SEQ_LEN),
         topk=TOPK,
-        param_bytes=PARAM_BYTES,
+        param_bytes=PARAM_STORAGE_BYTES,
         empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
         selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
         fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
@@ -113,6 +113,8 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
         logits_fused_ce=LOGITS_FUSED_CE,
         logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
+        cp=CP,
+        act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
     )
 
     required = memory_breakdown["total"]
@@ -137,7 +139,7 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         transient = calculate_zero3_transient_gb(
             variant=variant,
             experts_per_gpu=experts_per_gpu,
-            param_bytes=PARAM_BYTES,
+            param_bytes=PARAM_STORAGE_BYTES,
             vocab=VOCAB,
             layer_norm=LAYER_NORM,
             ffn_weight_matrices=FFN_WEIGHT_MATRICES,
@@ -223,7 +225,7 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     # Calculate model memory once
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
-        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
         tp=TP
     )
 
@@ -290,7 +292,7 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         zero_strategy=best_zero,
         seq_len=variant.get("seq_len", SEQ_LEN),
         topk=TOPK,
-        param_bytes=PARAM_BYTES,
+        param_bytes=PARAM_STORAGE_BYTES,
         empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
         selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
         fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
@@ -307,6 +309,8 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
         logits_fused_ce=LOGITS_FUSED_CE,
         logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
+        cp=CP,
+        act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
     )
 
     # Calculate efficiency metrics

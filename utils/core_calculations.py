@@ -51,7 +51,9 @@ def calculate_model_memory_gb(
         variant: Variant dictionary with architecture specs
         layers_per_gpu: Number of layers per GPU (total_layers // PP)
         experts_per_gpu: Number of experts per GPU (N_EXPERTS // EP)
-        param_bytes: Bytes per parameter (2 for BF16, 1 for FP8)
+        param_bytes: Bytes per parameter AS RESIDENT IN MEMORY. Callers pass
+            PARAM_STORAGE_BYTES (2 at either precision), NOT PARAM_BYTES:
+            FP8 is a compute dtype and the weights stay BF16.
         vocab: Vocabulary size. Used only as a FALLBACK -- a variant carrying
             its own "vocab" key overrides it, because the global default is
             correct for just the Qwen3 family (Llama-3.x 128256,
@@ -178,7 +180,9 @@ def calculate_zero3_transient_gb(
     Args:
         variant: Variant dictionary with architecture specs
         experts_per_gpu: Number of experts per GPU (already EP-divided)
-        param_bytes: Bytes per parameter (2 for BF16, 1 for FP8)
+        param_bytes: Bytes per parameter AS RESIDENT IN MEMORY. Callers pass
+            PARAM_STORAGE_BYTES (2 at either precision), NOT PARAM_BYTES:
+            FP8 is a compute dtype and the weights stay BF16.
         vocab: Vocabulary size fallback; a variant's own "vocab" key wins
         layer_norm: Layer norm constant (typically 2)
         ffn_weight_matrices: FFN weight matrices constant (typically 3)
@@ -454,6 +458,8 @@ def calculate_memory_for_micro(
     ep=1,
     pp=1,
     vp=1,
+    cp=1,
+    act_bytes_per_element=2,
     nccl_ep_scaling_factor=0.0,
     fragmentation_factor=1.0,
     experts_per_gpu=0,
@@ -473,9 +479,20 @@ def calculate_memory_for_micro(
         dp: Data parallelism degree
         layers_per_gpu: Number of layers per GPU (total_layers // PP)
         zero_strategy: ZeRO strategy (1, 2, or 3)
-        seq_len: Sequence length
+        seq_len: Sequence length. The FULL sequence; cp divides it below, so
+            callers pass the model's sequence length, not a per-rank slice.
+        cp: Context parallelism degree. Shards the sequence across cp ranks, so
+            every token-count-dependent term sees seq_len/cp per GPU.
+        act_bytes_per_element: Bytes per activation element. Precision-invariant;
+            see ACT_BYTES_PER_ELEMENT in advanced_config for why.
         topk: Top-K for MoE routing
-        param_bytes: Bytes per parameter
+        param_bytes: Bytes per parameter AS RESIDENT IN MEMORY -- callers pass
+            PARAM_STORAGE_BYTES, not PARAM_BYTES. Every remaining use here wants
+            the resident size: the moe_frac split (which must match
+            calculate_model_memory_gb), the ZeRO-3 all-gather buffer (which
+            gathers resident weights), and the a2a/dispatch/PP buffers (which
+            carry activations, held at BF16 for the same reason as
+            act_bytes_per_element).
         empirical_act_multiplier: Activation multiplier constant
         selective_act_checkpointing_multiplier: Checkpointing multiplier
         fwd_bwd_routing_buff_passes: Forward/backward routing buffer passes
@@ -512,6 +529,20 @@ def calculate_memory_for_micro(
     """
     d = variant["d"]
     is_moe = variant.get("expert_ffn", 0) > 0
+
+    # Context parallelism shards the SEQUENCE across cp ranks, so each GPU holds
+    # seq_len/cp tokens. Applied once here rather than at each site, because every
+    # seq_len consumer below -- layer activations, the VP in-flight overhead, the
+    # a2a and MoE dispatch buffers, the PP send/recv buffers and the output logits
+    # -- is a per-GPU token-count term and all of them shard alike.
+    #
+    # Before this, cp reached the model ONLY through the caller's
+    # dp = gpus // (TP * PP * CP), so raising cp SHRANK dp and therefore RAISED
+    # reported per-GPU memory, while its actual purpose is to cut activation
+    # memory. Memory moved the wrong way as cp rose, the same class of defect as
+    # the moe_frac TP omission above.
+    seq_len = seq_len / max(1, cp)
+
     moe_layers = variant["layers"] - variant.get("dense_layers", variant["layers"])
     total_layers = variant["layers"]
     moe_layers_per_gpu = int(layers_per_gpu * moe_layers / total_layers) if total_layers > 0 else 0
@@ -635,7 +666,7 @@ def calculate_memory_for_micro(
         # MoE activation per layer: attention acts + routed expert intermediates
         # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output of expert FFN)
         expert_ffn = variant.get("expert_ffn", 0)
-        moe_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * param_bytes)
+        moe_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * act_bytes_per_element)
         dense_act_per_layer = seq_len * micro * d * empirical_act_multiplier
         dense_layers_on_gpu = layers_per_gpu - moe_layers_per_gpu
         act_total_full = (moe_layers_per_gpu * moe_act_per_layer + dense_layers_on_gpu * dense_act_per_layer)
@@ -655,7 +686,7 @@ def calculate_memory_for_micro(
         # In-flight activations use the same per-layer cost but without checkpointing reduction
         if is_moe and moe_layers_per_gpu > 0:
             expert_ffn = variant.get("expert_ffn", 0)
-            avg_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * param_bytes)
+            avg_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * act_bytes_per_element)
         else:
             avg_act_per_layer = seq_len * micro * d * empirical_act_multiplier
         vp_act_overhead = inflight_micros * layers_per_virtual_chunk * avg_act_per_layer / 1e9
@@ -751,7 +782,7 @@ def calculate_viable_micro_batch_sizes(
         variant,
         layers_per_gpu,
         experts_per_gpu,
-        PARAM_BYTES,
+        PARAM_STORAGE_BYTES,
         VOCAB,
         LAYER_NORM,
         FFN_WEIGHT_MATRICES,
@@ -770,7 +801,7 @@ def calculate_viable_micro_batch_sizes(
             zero_strategy=zero_strategy,
             seq_len=variant.get("seq_len", SEQ_LEN),
             topk=TOPK,
-            param_bytes=PARAM_BYTES,
+            param_bytes=PARAM_STORAGE_BYTES,
             empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
             selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
             fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
@@ -787,6 +818,8 @@ def calculate_viable_micro_batch_sizes(
             logits_bytes_per_element=LOGITS_BYTES_PER_ELEMENT,
             logits_fused_ce=LOGITS_FUSED_CE,
             logits_chunk_tokens=LOGITS_CHUNK_TOKENS,
+        cp=CP,
+        act_bytes_per_element=ACT_BYTES_PER_ELEMENT,
         )
 
         # Check if this micro batch size fits in memory

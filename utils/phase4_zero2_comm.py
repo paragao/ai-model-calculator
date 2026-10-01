@@ -45,7 +45,7 @@ def analyze_communication_overhead(variant, hw, dp_values, layers_per_gpu, exper
         variant,
         layers_per_gpu,
         experts_per_gpu,
-        PARAM_BYTES,
+        PARAM_STORAGE_BYTES,
         VOCAB,
         LAYER_NORM,
         FFN_WEIGHT_MATRICES,

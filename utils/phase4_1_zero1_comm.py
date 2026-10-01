@@ -48,7 +48,7 @@ def analyze_zero1_communication_overhead(variant, hw, dp_values, layers_per_gpu,
         variant,
         layers_per_gpu,
         experts_per_gpu,
-        PARAM_BYTES,
+        PARAM_STORAGE_BYTES,
         VOCAB,
         LAYER_NORM,
         FFN_WEIGHT_MATRICES,
@@ -92,7 +92,7 @@ def calculate_zero1_metrics(model_mem_gb, dp_val, inter_node_bw_gb):
     Calculate ZeRO-1 all-gather communication volume and time.
 
     ZeRO-1 communicates optimizer states only (not gradients).
-    Formula: volume = model_mem_gb * (OPTIM_BYTES/PARAM_BYTES) / dp_val * 1000
+    Formula: volume = model_mem_gb * (OPTIM_BYTES/PARAM_STORAGE_BYTES) / dp_val * 1000
 
     Args:
         model_mem_gb: Model memory per GPU in GB

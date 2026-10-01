@@ -41,7 +41,7 @@ def run_scenario(vp, mbs, label, target_low, target_high):
 
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
-        PARAM_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
+        PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
         tp=_TP,
     )
 
@@ -54,7 +54,7 @@ def run_scenario(vp, mbs, label, target_low, target_high):
         zero_strategy=1,
         seq_len=_SEQ_LEN,
         topk=_TOPK,
-        param_bytes=PARAM_BYTES,
+        param_bytes=PARAM_STORAGE_BYTES,
         empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
         selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
         fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
