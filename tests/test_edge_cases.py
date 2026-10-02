@@ -2041,3 +2041,86 @@ def test_vp_inflight_activations_take_the_precision_saving():
         f"{fp8 / bf16}. A value between {1.0 - s} and 1.0 means one of the two "
         f"activation sites is not taking the precision saving."
     )
+
+
+def _advanced_config_assignment(name):
+    """Return the AST value node of a module-level assignment in advanced_config."""
+    import ast
+    path = Path(__file__).parent.parent / "configuration" / "advanced_config.py"
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return node.value
+    raise AssertionError(f"no module-level assignment of {name} in advanced_config")
+
+
+def test_act_bytes_per_element_is_live_for_dense_variants():
+    """ACT_BYTES_PER_ELEMENT must reach the DENSE activation term, not only MoE.
+
+    It used to reach ONLY the two MoE routed-expert sites, because the dense
+    d-proportional term hard-coded the PRODUCT (12) rather than a tensor count times
+    these bytes. That made it DEAD for all 11 dense variants in the catalog:
+    perturbing it 2 -> 3 moved 0 of 352 dense rows and all 352 MoE rows, and left
+    EMPIRICAL_ACT_MULTIPLIER at 12. It is now derived, so the same perturbation
+    moves 352 of 352 dense rows and takes the multiplier to 18.
+
+    The AST half is what makes this non-vacuous. Asserting only
+        EMPIRICAL_ACT_MULTIPLIER == ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
+    passes just as happily when someone re-hardcodes the multiplier back to 12,
+    because 6 * 2 == 12 -- the same vacuous-assertion trap that let
+    GRAD_BYTES * PARAM_BYTES == GRAD_BYTES_PER_PARAM vouch for nothing.
+    """
+    import ast
+
+    for name in ("EMPIRICAL_ACT_MULTIPLIER", "RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT"):
+        node = _advanced_config_assignment(name)
+        referenced = {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+        }
+        assert "ACT_BYTES_PER_ELEMENT" in referenced, (
+            f"{name} must be DERIVED from ACT_BYTES_PER_ELEMENT, but its assignment "
+            f"references {sorted(referenced) or 'no names at all (it is a literal)'}. "
+            f"A literal here makes ACT_BYTES_PER_ELEMENT dead for every dense "
+            f"variant, which is the defect this test exists to prevent."
+        )
+
+    # The derivation must not have changed the shipped values.
+    assert EMPIRICAL_ACT_MULTIPLIER == 12, EMPIRICAL_ACT_MULTIPLIER
+    assert RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT == ACT_BYTES_PER_ELEMENT == 2
+    assert ACT_INTERMEDIATES_PER_ELEMENT == 6
+
+    # Behavioural half: a DENSE variant's activation must scale exactly with the
+    # byte figure. Driven through the production function, and the expected ratio is
+    # the byte ratio, NOT a quantity this test recomputes from the same inputs.
+    def dense_activation(act_bytes):
+        model_mem = calculate_model_memory_gb(
+            DENSE_VARIANT, DENSE_VARIANT["layers"], 0,
+            PARAM_BYTES, 151936, LAYER_NORM, FFN_WEIGHT_MATRICES,
+            NUM_EMBEDDINGS_TABLES, tp=1,
+        )
+        mem = calculate_memory_for_micro(
+            micro=1, model_mem_gb=model_mem, variant=DENSE_VARIANT, dp=8,
+            layers_per_gpu=DENSE_VARIANT["layers"], zero_strategy=1, seq_len=4096,
+            topk=0, param_bytes=PARAM_BYTES,
+            empirical_act_multiplier=ACT_INTERMEDIATES_PER_ELEMENT * act_bytes,
+            selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+            fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
+            nccl_mem_buf=NCCL_MEM_BUF, optim_bytes=OPTIM_BYTES,
+            ep=1, pp=1, vp=1,
+            nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+            fragmentation_factor=FRAGMENTATION_FACTOR,
+            act_bytes_per_element=act_bytes,
+            recompute_boundary_bytes_per_element=act_bytes,
+        )
+        return mem["activation"]
+
+    at2, at3 = dense_activation(2), dense_activation(3)
+    assert at2 > 0, "dense activation is zero, so the ratio below proves nothing"
+    assert abs(at3 / at2 - 1.5) < 1e-12, (
+        f"a dense variant's activation must scale with ACT_BYTES_PER_ELEMENT: "
+        f"2 -> 3 bytes should give exactly 1.5x, got {at3 / at2} "
+        f"({at2} -> {at3}). A ratio of 1.0 means the dense term is still "
+        f"independent of the byte figure."
+    )
