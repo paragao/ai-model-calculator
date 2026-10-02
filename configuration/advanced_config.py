@@ -278,8 +278,36 @@ LOGITS_BYTES_PER_ELEMENT = 8
 LOGITS_FUSED_CE = True
 LOGITS_CHUNK_TOKENS = 1024  # rows whose logits are live at once under fused CE
 
-# Activation memory estimation (empirical multipliers)
-EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
+# Activation memory estimation
+#
+# ACT_BYTES_PER_ELEMENT is the bytes ONE stored activation tensor costs per element.
+# It is defined HERE, before its consumers, because both the dense multiplier below
+# and RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT further down are now derived from it.
+#
+# WHY IT MOVED AND WHY THE MULTIPLIER IS NOW DERIVED. This constant used to be
+# defined ~150 lines below and reached ONLY the two MoE routed-expert activation
+# sites in core_calculations.py, because the dense d-proportional term hard-coded
+# the PRODUCT (12) instead of a count times these bytes. It was therefore DEAD for
+# all 11 dense variants in the catalog: raising it moved nothing for Llama 70B,
+# while its own comment made the general claim "activations are resident in BF16",
+# which reads as governing every activation term.
+#
+# The decomposition below is not invented. The repo already documents the dense
+# multiplier as "the ~6 intermediate tensors" a recomputed block does NOT store,
+# and both ratios come out exact against the two hard-coded figures:
+#     EMPIRICAL_ACT_MULTIPLIER        / ACT_BYTES_PER_ELEMENT = 12 / 2 = 6 tensors
+#     RECOMPUTE_BOUNDARY_BYTES_PER_EL / ACT_BYTES_PER_ELEMENT =  2 / 2 = 1 tensor
+# so 12 was always "6 stored tensors at 2 bytes" and 2 was always "the 1 input
+# tensor a recomputed block keeps, at the same 2 bytes". Making that explicit is
+# BYTE-IDENTICAL at the shipped default and leaves the constant live everywhere.
+#
+# CAVEAT, and it is load-bearing: ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5 was
+# MEASURED against a 12 B/element BF16 baseline. Changing ACT_BYTES_PER_ELEMENT
+# rescales the multiplier and therefore silently rescales that saving's FRACTION,
+# which the measurement does not license. Re-measure the 3.5 if you change this.
+ACT_BYTES_PER_ELEMENT = 2  # ONE stored activation tensor, resident BF16 at either PRECISION
+ACT_INTERMEDIATES_PER_ELEMENT = 6  # stored tensors per layer per element of (seq*micro*d)
+EMPIRICAL_ACT_MULTIPLIER = ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
 
 # --- FP8 activation saving (MEASURED) -----------------------------------------
 # Of the EMPIRICAL_ACT_MULTIPLIER bytes a STORED layer costs per element, FP8 saves
@@ -334,23 +362,38 @@ ACT_PRECISION_SAVING_FRACTION = (
 )
 
 # ACT_BYTES_PER_ELEMENT resolves the disagreement the two halves of the activation
-# formula used to have about precision. EMPIRICAL_ACT_MULTIPLIER is already BYTES
-# per element of (seq_len * micro * d) -- the expression divides by 1e9 with no
-# other byte factor -- so it is an implicitly-BF16 figure and cannot scale. The MoE
-# expert intermediate in the SAME expression counted elements and multiplied by
-# PARAM_BYTES, so FP8 saved 20.0-40.5% on a MoE layer and exactly 0% on a dense
-# one. That split is not physical: a dense FFN intermediate is as FP8-eligible as
-# an expert one.
+# formula used to have about precision. The MoE expert intermediate counted elements
+# and multiplied by PARAM_BYTES, so FP8 saved 20.0-40.5% on a MoE layer and exactly
+# 0% on a dense one. That split is not physical: a dense FFN intermediate is as
+# FP8-eligible as an expert one.
 #
-# Both halves are now precision-invariant. Chosen against measurement rather than
-# by symmetry: the controlled bf16/fp8 pair above shows FP8 costing 8.73% MORE
-# memory, so of the candidate treatments, making activations CHEAPER under FP8
-# moved the prediction further from reality --
-#     both invariant (this)    FP8/BF16 ratio 0.9028   error -17.0%
-#     dense x0.75              ratio 0.8528            error -21.6%
-#     dense x0.50              ratio 0.8028            error -26.2%
-# against the measured 1.0873. Real FP8 activation savings are not zero, but they
-# are smaller than the cast-copy overhead that offsets them.
+# TWO CLAIMS THIS NOTE USED TO MAKE ARE NOW WRONG, both corrected rather than
+# quietly dropped:
+#
+# (a) "EMPIRICAL_ACT_MULTIPLIER is already BYTES per element ... so it is an
+#     implicitly-BF16 figure and CANNOT SCALE." It can now: the multiplier is
+#     DERIVED as ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT (6 * 2), so
+#     the byte figure reaches the dense term too. It was being read as governing
+#     every activation term while reaching only the two MoE expert sites, which made
+#     it DEAD for all 11 dense variants -- measured: perturbing it 2 -> 3 moved 0 of
+#     352 dense rows and all 352 MoE rows, and left the multiplier at 12. After the
+#     derivation the same perturbation moves 352 of 352 dense rows and takes the
+#     multiplier to 18, with the shipped default byte-identical in BOTH precisions.
+#
+# (b) "Both halves are now precision-invariant." Only the EXPERT half is. The dense
+#     half became precision-AWARE when ACT_PRECISION_SAVING_FRACTION shipped, and the
+#     table that used to sit here -- arguing that making activations cheaper under
+#     FP8 moved the prediction FURTHER from reality (ratio 0.9028 against a measured
+#     1.0873) -- was fitted to the Llama-70B LoRA pair, which a frozen-base arm later
+#     showed measures that saving at exactly 0% against 29.2% trainable. It could
+#     never have tested the term, so that argument is withdrawn, not merely outdated.
+#
+# The asymmetry that remains is deliberate but is NOT physical, and is the open gap
+# here: at FP8 the dense half saves 29.17% and the expert half saves nothing, because
+# the 3.5 B/element was measured on a DENSE model (Llama-3.1-8B) and there is no
+# measurement for a routed-expert intermediate. Do not close it by symmetry -- that
+# would invent a constant for an unmeasured term. What would close it: a controlled
+# bf16/fp8 pair on an MoE pretraining recipe.
 #
 # CORRECTION (measured, Slurm jobs 348/349 on H200, TE 2.9.0, Float8CurrentScaling):
 # an earlier version of this note claimed the two terms were "not separable from a
@@ -434,7 +477,8 @@ ACT_PRECISION_SAVING_FRACTION = (
 # duplicate residency in every recipe that ships. So a = 2.0*(1-f) must NEVER ship:
 # it would overstate a 70B pretrain by tens of GB, and there is no longer an
 # untested mechanism left to rescue it.
-ACT_BYTES_PER_ELEMENT = 2  # activations are resident in BF16 at either PRECISION
+# ACT_BYTES_PER_ELEMENT is now defined ABOVE, beside EMPIRICAL_ACT_MULTIPLIER, which
+# is derived from it -- it has to precede its consumers. It used to be assigned here.
 SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
 
 # --- Activation recomputation -------------------------------------------------
@@ -455,7 +499,10 @@ SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkp
 # behaviour before this was added. Set it to model a recipe that recomputes.
 RECOMPUTE_GRANULARITY = None  # None | "full" -- "full" recomputes whole blocks
 RECOMPUTE_NUM_LAYERS = 0  # layers recomputed per pipeline chunk (recompute_num_layers)
-RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT = 2  # a recomputed block still stores its input
+# Derived, not a literal: the input a recomputed block keeps is ONE activation
+# tensor in the same stored dtype as any other, so this is ACT_BYTES_PER_ELEMENT by
+# definition rather than a coincidence that both read 2. It was a hard-coded 2.
+RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT = ACT_BYTES_PER_ELEMENT
 
 # Communication buffer configuration
 FWD_BWD_ROUTING_BUFF_PASSES = 2  # All-to-all buffer passes for MoE routing
