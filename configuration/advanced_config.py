@@ -186,11 +186,12 @@ PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 #
 #    What remains open is not the mechanism but its MAGNITUDE AT SCALE. The measured
 #    2.0 bytes/param is exact on a single non-pipelined stack of up to 16 layers and
-#    9.9e9 parameters, yet it overshoots the one controlled pair by 2.67x. The
-#    untested cause is pipelined residency, and the probe cannot reach it. Still do
-#    NOT invent a fraction here: there are now good measurements pointing at a
-#    constant that demonstrably does not hold at scale, which is a more persuasive
-#    version of the same trap, not an escape from it.
+#    9.9e9 parameters, yet it overshoots the one controlled pair by 2.67x. Pipelined
+#    residency was the last candidate cause and is now REFUTED at PP=2 and PP=4 --
+#    see the PP sweep beside ACT_BYTES_PER_ELEMENT below. Do NOT invent a fraction
+#    here: there are good measurements pointing at a constant that demonstrably does
+#    not hold in any shipped recipe, which is a more persuasive version of the same
+#    trap, not an escape from it.
 #
 # OPTIM_BYTES is correct across precisions -- see its derivation below, which
 # divides by PARAM_BYTES to hold the product at 12 bytes/param.
@@ -312,6 +313,17 @@ EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
 # bf16 transient exactly (0.435 GB in both). It is transient, not resident, so it
 # is deliberately not modelled here. See the PARAM_STORAGE_BYTES block.
 #
+# 3. CORROBORATED ACROSS PP, out of sample. The PP sweep run to refute the weight
+#    term (jobs 370-373, f=0) also re-measures the activation saving at PP=2 and
+#    PP=4, which nothing above was fitted to:
+#        PP=1  bf16 84.604  fp8 78.698  saving +5.906  (17.0% of the bf16 transient)
+#        PP=2  bf16 65.660  fp8 59.872  saving +5.788  (17.5%)
+#        PP=4  bf16 60.256  fp8 54.468  saving +5.788  (17.8%)
+#    Near PP-invariant, which is what 1F1B implies: a stage holds layers/PP layers
+#    but up to PP microbatches in flight, so stored activations per GPU barely move.
+#    Treat this as corroboration of the SHAPE, not as a validated prediction -- these
+#    are absolute peaks from a real recipe, not this model's own output.
+#
 # Expressed as a byte count over the multiplier rather than as a bare fraction, so
 # it tracks EMPIRICAL_ACT_MULTIPLIER if that is ever re-measured.
 ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5  # of EMPIRICAL_ACT_MULTIPLIER, at FP8
@@ -353,10 +365,14 @@ ACT_PRECISION_SAVING_FRACTION = (
 # Job 349 then swept depth L = 1,2,4,8,16: a/param held at 1.9998 with spread 0.0000
 # and a(L) was linear through the origin, so bytes-per-param is the right FORM.
 #
-# Neither constant is shipped, deliberately, and the reason has CHANGED. An earlier
-# version of this note said the untested cause was that the probe had no activation
-# recomputation while the recipe recomputes ~50% of layers. That has now been
-# measured, and it was the right mechanism but it does NOT close the gap.
+# The ACTIVATION constant IS now shipped, as ACT_PRECISION_SAVING_FRACTION. The
+# WEIGHT constant is not, deliberately, and the reason has CHANGED TWICE. This note
+# first said the untested cause was that the probe had no activation recomputation
+# while the recipe recomputes ~50% of layers; that was measured (below) and was the
+# right mechanism but did NOT close the gap. It then said the untested cause was
+# pipelined residency; that is now measured too, and REFUTED (see the PP sweep
+# further down). An earlier version of this sentence read "Neither constant is
+# shipped", which stopped being true when the activation term shipped.
 #
 # MEASURED, jobs 350/351 (H200, TE 2.9.0, te.checkpoint, recompute_num_layers=1 per
 # block, r2 = 1.000000 at EVERY point, in two independent arms):
@@ -390,18 +406,34 @@ ACT_PRECISION_SAVING_FRACTION = (
 # (Superseded figures: the earlier 3.44x and 18.165 GB used a round 70.0e9 parameter
 # count; the catalog says 70.6e9, giving 8.825e9/GPU and 17.650 GB of BF16 weights.)
 #
-# The one mechanism still untested is PIPELINED residency. Job 349's layer sweep
-# refuted "layers in flight" only for a NON-pipelined forward-then-backward, where
-# every layer's copy is necessarily alive at once; it says nothing about an
-# interleaved 1F1B schedule, where a chunk's fp8 copy need only live from that
-# chunk's forward to its backward, so the resident count is bounded by chunks in
-# flight rather than by all 40 local layers. The probe has no pipeline parallelism
-# and so STRUCTURALLY cannot measure this. What would settle it is a controlled
-# bf16/fp8 pair on a FULL PRETRAINING recipe at PP=1 (where f is ~1.25%, so recompute
-# is nearly inert and the weight term is near its f=0 value). Until then, shipping
-# a = 2.0*(1-f) would overstate a 70B pretrain at TP=4/PP=1 by tens of GB on the
-# strength of a constant whose only end-to-end test misses by 2.67x -- the Option C
-# error with better measurements behind it.
+# PIPELINED residency -- the last untested mechanism -- is now MEASURED AND REFUTED.
+# Job 349's layer sweep had refuted "layers in flight" only for a NON-pipelined
+# forward-then-backward, where every layer's copy is necessarily alive at once; it
+# said nothing about an interleaved 1F1B schedule, where a chunk's fp8 copy need
+# only live from that chunk's forward to its backward. The probe has no pipeline
+# parallelism and STRUCTURALLY cannot measure it, so it was tested end to end.
+#
+# MEASURED, jobs 370/371 (PP=2) and 372/373 (PP=4), Llama-3.1-8B FULL pretraining,
+# 8xH200 / 1 node, TP=1 CP=1 no VP, MBS=1 GBS=128, recompute FORCED OFF on BOTH arms
+# via Hydra nulls so f=0 and the weight term is at its MAXIMUM. Combined with the
+# PP=1 f=0 pair (jobs 354/365), at fixed f=0:
+#
+#     PP  params/GPU   steady bf16  steady fp8  delta   a=2.0 PREDICTS
+#      1    8.030e9       49.773      49.773    0.000      +16.06 GB
+#      2    4.015e9       32.595      32.595    0.000       +8.03 GB
+#      4    2.270e9 max   27.717      27.717    0.000       +4.54 GB
+#
+# Steady mem-allocated is IDENTICAL to three decimals at every PP, and Megatron's own
+# "weight and optimizer" accounting is byte-identical within each pair (57438.81 /
+# 34463.29 / 25981.52 MiB). Pipelining does not make the cast copies resident.
+#
+# The null is NOT structural, and that distinction is the whole finding. Job 366
+# showed WHY it holds: fp8_param_gather=True stores parameters in FP8, so the cast
+# copies net out; DISABLING it put 13.959 GB back (1.866 B/param), close to the
+# probe's 2.0. The probe was never wrong about TE -- Megatron simply avoids the
+# duplicate residency in every recipe that ships. So a = 2.0*(1-f) must NEVER ship:
+# it would overstate a 70B pretrain by tens of GB, and there is no longer an
+# untested mechanism left to rescue it.
 ACT_BYTES_PER_ELEMENT = 2  # activations are resident in BF16 at either PRECISION
 SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
 
