@@ -114,11 +114,14 @@ else:
 # ACT_BYTES_PER_ELEMENT, and open question 3 above.
 PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 
-# PRECISION no longer affects any memory term. It selects the GEMM precision, and
-# through that the throughput peak; parameters, gradients, optimizer state and
-# activations are all resident in BF16 at either setting, each for its own measured
-# reason recorded below. A sweep of all 704 variant x hardware pairs is byte-identical
-# between PRECISION="BF16" and PRECISION="FP8", and a test pins that.
+# PRECISION affects EXACTLY ONE memory term: the stored per-layer activation cost,
+# via ACT_PRECISION_SAVING_FRACTION. Parameters, gradients and optimizer state are
+# resident in BF16 at either setting, each for its own measured reason recorded
+# below; activations are NOT, which is a correction to what this comment used to
+# claim. A sweep of all 704 variant x hardware pairs used to be byte-identical
+# between PRECISION="BF16" and PRECISION="FP8" and a test pinned that; the test now
+# pins the opposite, that FP8 activation memory is strictly lower and every other
+# term is unchanged, which is the stronger statement.
 #
 # Throughput is handled: every hardware preset defines peak_tflops_fp8 and
 # phase3_training selects on PRECISION, refusing g5 where the value is 0 because
@@ -134,12 +137,33 @@ PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 #    on Llama-3.1-8B, matching BF16, because gradients reduce in BF16 either way.
 #    The same correction applies to OPTIM_BYTES.
 #
-# 2. ACTIVATIONS do NOT scale with PRECISION. -- RESOLVED. Both halves of the
-#    activation formula are now precision-invariant: see ACT_BYTES_PER_ELEMENT
-#    below, which replaced the PARAM_BYTES factor on the MoE expert intermediate.
-#    Decided against MEASUREMENT rather than by symmetry -- the controlled bf16/fp8
-#    pair shows FP8 costing 8.73% MORE memory, so making activations cheaper under
-#    FP8 moved the prediction further from reality, not closer.
+# 2. ACTIVATIONS DO scale with PRECISION under full pretraining. -- WAS RESOLVED
+#    THE WRONG WAY, NOW CORRECTED AND SHIPPED as ACT_PRECISION_SAVING_FRACTION.
+#    This entry previously read "ACTIVATIONS do NOT scale with PRECISION --
+#    RESOLVED", on the grounds that making FP8 activations cheaper moved the
+#    prediction away from the controlled bf16/fp8 pair (which shows FP8 costing
+#    8.73% MORE). That reasoning used the WRONG INSTRUMENT.
+#
+#    That pair is a Llama-70B **LoRA** run and this model has no LoRA or PEFT mode
+#    anywhere in it -- it models full pretraining only. Job 351's frozen-base arm
+#    measured the two regimes directly and they differ on exactly this term: the
+#    FP8 activation saving is 29.2% with a trainable base and EXACTLY ZERO with a
+#    frozen one. The mechanism is clean -- a frozen weight needs no weight
+#    gradient, and the weight gradient is what consumes the saved GEMM input, so
+#    that input is not stored in EITHER precision and there is no 2->1 byte saving
+#    to collect. So the pair was structurally incapable of showing the effect, and
+#    it was used to refute it three times.
+#
+#    The saving is now measured on real full pretraining, 7 of 8 cells within
+#    0.002 GB of a prediction fixed before the runs. See
+#    ACT_PRECISION_SAVING_FRACTION above for the design and the figures.
+#
+#    What remains unmodelled on this term: the MoE expert intermediate. The
+#    measurement is on a DENSE model, so the saving is applied only to the
+#    d-proportional per-layer term and NOT to the expert intermediate, which keeps
+#    ACT_BYTES_PER_ELEMENT. Physically an expert GEMM input should save too; there
+#    is simply no measurement, and extending a dense figure to it by symmetry is
+#    the same move that produced the error corrected above.
 #
 # 3. STILL OPEN -- THE FP8 WEIGHT CAST COPY IS NOT MODELLED.
 #    This is now the single largest known gap. With parameters, gradients,
@@ -255,6 +279,47 @@ LOGITS_CHUNK_TOKENS = 1024  # rows whose logits are live at once under fused CE
 
 # Activation memory estimation (empirical multipliers)
 EMPIRICAL_ACT_MULTIPLIER = 12  # Multiplier for activation memory per layer
+
+# --- FP8 activation saving (MEASURED) -----------------------------------------
+# Of the EMPIRICAL_ACT_MULTIPLIER bytes a STORED layer costs per element, FP8 saves
+# this many. Measured two independent ways, and this supersedes open question 2
+# below, which claimed activations are precision-invariant:
+#
+# 1. 1-GPU TE probe (jobs 348/350), Float8CurrentScaling on H200, by regressing the
+#    BF16->FP8 delta against token count: 3.5000 B/element saved, r2 = 1.000000.
+#    Job 350 then measured the saving as 3.5 * (1 - recompute_fraction) across
+#    f = 0, 0.25, 0.50, 0.75, 1.00 -- exact at every point. A RECOMPUTED layer
+#    stores no activations, so there is nothing for FP8 to halve.
+#
+# 2. A 2x4 crossed FP8 x recompute design on REAL Llama-3.1-8B full pretraining
+#    (jobs 352/354/361/363 bf16 against 365/353/362/364 fp8_cs, 8xH100, TP=1 PP=1
+#    CP=1, recompute verified identical within each pair from the resolved config
+#    in each arm's own log). With S0 and the recompute slope fixed from the
+#    PRE-EXISTING f=5/32 pair alone and written down before the runs, the f=0,
+#    5/32 and 16/32 cells came out within 0.002 GB:
+#        f=0/32   bf16 84.604  fp8 78.698  saving +5.906 (predicted +5.906)
+#        f=5/32   bf16 79.230  fp8 74.247  saving +4.983 (predicted +4.983)
+#        f=16/32  bf16 67.406  fp8 64.453  saving +2.953 (predicted +2.953)
+#        f=32/32  bf16 50.208  fp8 51.543  saving -1.335 (predicted  0.000)
+#    The f=0 cell discriminates cleanly: (1-f) scaling predicts 78.698 and pure
+#    additivity predicts 79.621, a 0.923 GB separation, and the measurement is
+#    78.698 to three decimals. So FP8 and activation checkpointing are
+#    SUBSTITUTES, not complements -- they compete for the same bytes.
+#
+# The f=32/32 residual is NOT an activation effect: with the activation term zeroed
+# it is the fp8 parameter all-gather buffer, proven causally by job 366, which
+# re-ran that cell with mixed_precision.fp8_param_gather=false and recovered the
+# bf16 transient exactly (0.435 GB in both). It is transient, not resident, so it
+# is deliberately not modelled here. See the PARAM_STORAGE_BYTES block.
+#
+# Expressed as a byte count over the multiplier rather than as a bare fraction, so
+# it tracks EMPIRICAL_ACT_MULTIPLIER if that is ever re-measured.
+ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5  # of EMPIRICAL_ACT_MULTIPLIER, at FP8
+ACT_PRECISION_SAVING_FRACTION = (
+    ACT_PRECISION_SAVED_BYTES_PER_ELEMENT / EMPIRICAL_ACT_MULTIPLIER
+    if PRECISION == "FP8"
+    else 0.0  # exactly inert at BF16, so the default sweep is byte-identical
+)
 
 # ACT_BYTES_PER_ELEMENT resolves the disagreement the two halves of the activation
 # formula used to have about precision. EMPIRICAL_ACT_MULTIPLIER is already BYTES

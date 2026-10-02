@@ -49,7 +49,11 @@ read them verbatim rather than guessing a longer form.
   **regardless of `PRECISION`**: an FP8 recipe uses FP8 only for the GEMM inputs and
   reduces gradients in BF16 or higher, so this column does not halve at FP8.
 - `optim_gb` - Optimizer state memory (GB)
-- `activation_gb` - Activation memory (GB)
+- `activation_gb` - Activation memory (GB). The ONLY memory column that changes with
+  `PRECISION`: at FP8 the d-proportional per-layer part is lower by
+  `ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element, measured), scaled by
+  `(1 - recompute_fraction)` because a recomputed layer stores nothing for FP8 to
+  halve. The MoE routed-expert part does **not** scale. See "Precision" below.
 - `buffer_gb` - Communication buffer memory (GB)
 - `logits_gb` - Output-logits memory (GB): the `(micro, seq_len, vocab)` tensor plus
   its cross-entropy gradient, at `LOGITS_BYTES_PER_ELEMENT` (8) bytes per element.
@@ -287,17 +291,15 @@ property of any model.
 The LM head **weight** gradient is not double-counted: the head's parameters are in
 `model_gb` already, so `grad_gb` covers them.
 
-### Precision (`PRECISION` = `BF16` or `FP8`) does not change any memory column
+### Precision (`PRECISION` = `BF16` or `FP8`) changes exactly one memory column
 
-Every Phase 1 memory column is **byte-identical** at both settings. A full sweep of all
-704 variant x hardware pairs produces the same numbers either way, and a test pins it.
+`activation_gb` is **lower at FP8**. Every other Phase 1 memory column is identical at
+both settings, and a test pins both halves of that.
 
-This is deliberate and measured, not an oversight. `--compute_dtype fp8` selects a GEMM
-precision; it is not a storage dtype. Transformer Engine keeps parameters resident in
-BF16 and adds cached FP8 cast copies on top, gradients reduce in BF16, optimizer state
-is fp32, and activations are BF16. On the one controlled comparison available -- Llama
-70B LoRA finetune, H200 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster, container
-and parallelism with precision the only difference -- FP8 used **more** memory:
+This section previously said no memory column changed, and that was wrong on
+activations. The reason is worth keeping, because it is a sharp lesson about instrument
+choice. The claim rested on the only controlled bf16/fp8 pair then available -- Llama
+**70B LoRA finetune**, H200 32 GPUs -- where FP8 used **more** memory:
 
 | | allocated | reserved |
 |---|---|---|
@@ -305,10 +307,58 @@ and parallelism with precision the only difference -- FP8 used **more** memory:
 | FP8 | 41.1 GB | 41.3 GB |
 | | **+8.73%** | +7.27% |
 
-**Read the FP8 numbers as a lower bound.** Predicting equal memory is ~8% low against
-that measurement, because the FP8 cast copies and scaling metadata are not modelled.
-Before this was corrected the model predicted FP8 *cheaper*, which was 17% low and
-wrong in sign. `PRECISION` still changes Phase 3 training time, via the throughput peak.
+That pair could never have settled it. It is a **LoRA** run and this calculator models
+**full pretraining** only -- it has no LoRA or PEFT mode. A frozen-base probe measured
+the two regimes directly and they differ on exactly this term: the FP8 activation saving
+is **29.2% with a trainable base and exactly 0% with a frozen one**, because a frozen
+weight needs no weight gradient and the weight gradient is what consumes the saved GEMM
+input.
+
+#### What is measured, on real full pretraining
+
+A 2x4 crossed FP8 x recompute design on Llama-3.1-8B, 8xH100, TP=1 PP=1 CP=1, with
+recompute verified identical within each pair from the resolved config in each arm's own
+log. Peak `max_memory_allocated`, GB:
+
+| layers recomputed | bf16 | fp8_cs | FP8 saving | predicted |
+|---|---|---|---|---|
+| 0/32 | 84.604 | 78.698 | **+5.906** | +5.906 |
+| 5/32 | 79.230 | 74.247 | +4.983 | +4.983 |
+| 16/32 | 67.406 | 64.453 | +2.953 | +2.953 |
+| 32/32 | 50.208 | 51.543 | −1.335 | +0.000 |
+
+The saving and its slope were fixed from the pre-existing 5/32 pair alone and written
+down before the other runs; three of the four cells came out within **0.002 GB**.
+
+#### FP8 and recompute are substitutes, not complements
+
+The saving scales as `(1 - recompute_fraction)`: a recomputed layer stores no
+activations, so there is nothing for FP8 to halve. The 0/32 cell discriminates cleanly
+-- `(1-f)` scaling predicts 78.698 GB and pure additivity predicts 79.621, and the
+measurement is 78.698. So **enabling both yields strictly less than the sum of each**,
+and at full recompute the FP8 activation saving is zero.
+
+Practically: fp8 with full recompute beat bf16 with no recompute on both axes, 51.543 vs
+84.604 GB and 11,145 vs 11,891 ms per step.
+
+#### What is still not modelled
+
+The −1.335 GB inversion at 32/32 is **not** an activation effect. With the activation
+term zeroed it is the fp8 parameter all-gather buffer, proven causally by re-running
+that cell with `fp8_param_gather=false`, which recovered the bf16 transient exactly. It
+is transient rather than resident, so it is deliberately absent here. Note the sign
+carefully: *disabling* that feature costs **+13.959 GB** of steady memory, so
+`fp8_param_gather=True` is worth about +12.6 GB net. "FP8 weight cast copies are not
+resident" holds **because** fp8 parameter storage nets them out, not structurally.
+
+The saving is applied to the d-proportional per-layer term only, **not** to the MoE
+routed-expert intermediate, which keeps `ACT_BYTES_PER_ELEMENT`. The measurement is on a
+dense model; extending it to the expert term by symmetry is the move that produced the
+error corrected above. So a dense variant's `activation_gb` falls by exactly
+`ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element = 29.17%) and an MoE variant's
+falls by less -- measured at 5.5-17.5% across this catalog.
+
+`PRECISION` also still changes Phase 3 training time, via the throughput peak.
 
 ### Context parallelism (`CP`) divides the sequence-dependent memory
 

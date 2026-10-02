@@ -1403,31 +1403,46 @@ def test_attention_flops_width_is_query_projection_not_hidden_dim():
     assert compute_attention_flops_dim(v4) == v4["d"]
 
 
-def test_phase1_memory_is_identical_at_bf16_and_fp8():
-    """FP8 is a COMPUTE dtype on this stack, so it must not change resident memory.
+def test_fp8_changes_only_the_activation_term():
+    """FP8 must move the ACTIVATION term and nothing else.
 
-    The recipe passes only `--compute_dtype fp8_cs` (dgxc-benchmarks-efa
-    modified-files/launch.sh), so Transformer Engine keeps parameters in BF16 and adds
-    cached FP8 cast copies. MEASURED on the one controlled pair -- Llama 70B LoRA
-    finetune, H200 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster, container and
-    parallelism with precision the only difference (jobs 1236/1238) -- FP8 cost 41.1 GB
-    against BF16's 37.8, i.e. +8.73%. So halving parameter memory was wrong in SIGN.
+    This test used to be test_phase1_memory_is_identical_at_bf16_and_fp8 and asserted
+    the whole breakdown was byte-identical across precisions. That was WRONG on the
+    activation term and the reason is worth keeping: the decision rested on the one
+    controlled pair available, Llama-70B **LoRA** (jobs 1236/1238), where FP8 costs
+    +8.73% MORE, so any candidate making activations cheaper moved further from it.
 
-    This pins the WIRING, not the arithmetic: every production caller must pass
-    PARAM_STORAGE_BYTES. Reverting any one of them to PARAM_BYTES makes FP8 diverge
-    and fails here.
+    That pair could never have settled it. It is a LoRA run and this model has no
+    LoRA mode; job 351's frozen-base arm measured the FP8 activation saving at 29.2%
+    trainable and EXACTLY ZERO frozen, because a frozen weight needs no weight
+    gradient and the weight gradient is what consumes the saved GEMM input. The
+    saving is now measured on real full pretraining (jobs 352/354/361/363 bf16
+    against 365/353/362/364 fp8_cs), 7 of 8 cells within 0.002 GB of a prediction
+    fixed beforehand.
 
-    The residual is honest and deliberate: predicting EQUAL memory is 8.0% low against
-    the measured 1.0873, because the FP8 cast copies and scaling metadata are not
-    modelled. Predicting FP8 CHEAPER, as the code did, was 17.0% low.
+    So the assertion is now TWO-SIDED, which is strictly stronger than the identity
+    it replaces:
+      - model, grad, optim, buffer and logits stay IDENTICAL. That is the original
+        protection and the reason this test exists: every production caller must
+        pass PARAM_STORAGE_BYTES, and reverting any one of them to PARAM_BYTES
+        makes one of those terms diverge and fails here.
+      - activation is STRICTLY LOWER at FP8, by exactly ACT_PRECISION_SAVING_FRACTION
+        on a dense variant. An identity assertion would pass if the new term were
+        never wired in, which is the silent-drop failure this repo has hit before.
+
+    diagnose_oom has its OWN calculate_memory_for_micro call and its numbers are
+    user-visible OOM advice, so it is swept here too: wiring only the fit path
+    leaves it stale and a test watching analyze_variant_memory alone cannot see it.
     """
     import importlib
     import configuration.project_config as pc
     from configuration.variants_config import VARIANTS
     from configuration.hardware_config import HARDWARE
 
+    INVARIANT = ("model", "grad", "optim", "buffer", "logits")
     original = pc.PRECISION
-    breakdowns = {}
+    terms = {}
+    savings = {}
     try:
         for precision in ("BF16", "FP8"):
             pc.PRECISION = precision
@@ -1442,6 +1457,7 @@ def test_phase1_memory_is_identical_at_bf16_and_fp8():
                 f"weights are resident in BF16 at either precision; got "
                 f"{ac.PARAM_STORAGE_BYTES} at {precision}"
             )
+            savings[precision] = ac.ACT_PRECISION_SAVING_FRACTION
             rows = {}
             for v in VARIANTS[:6]:
                 for hw in HARDWARE[:4]:
@@ -1449,25 +1465,18 @@ def test_phase1_memory_is_identical_at_bf16_and_fp8():
                     r = p1.analyze_variant_memory(
                         v, hw, dp, v["layers"] // pc.PP, pc.EXPERTS_PER_GPU)
                     mb = r.get("memory_breakdown") or {}
-                    # diagnose_oom has its OWN calculate_memory_for_micro call, and
-                    # its numbers are user-visible OOM advice. Covered explicitly:
-                    # reverting only that site changes nothing in the fit path, so a
-                    # test watching analyze_variant_memory alone cannot see it.
                     diag = p1.diagnose_oom(
                         v, hw, dp, v["layers"] // pc.PP, pc.EXPERTS_PER_GPU)
                     db = diag.get("breakdown") or {}
-                    rows[f'{v["name"]}|{hw["name"]}'] = (
-                        r["best_zero"],
-                        *(round(mb.get(t, 0.0), 9) for t in
-                          ("total", "model", "grad", "optim", "activation",
-                           "buffer", "logits")),
-                        round(diag["required_memory"], 9),
-                        round(diag["shortage"], 9),
-                        *(round(db.get(t, 0.0), 9) for t in
-                          ("total", "model", "grad", "optim", "activation",
-                           "buffer", "logits")),
-                    )
-            breakdowns[precision] = rows
+                    rows[f'{v["name"]}|{hw["name"]}'] = {
+                        "zero": r["best_zero"],
+                        "micro": mb.get("micro"),
+                        "fit": tuple(round(mb.get(t, 0.0), 9) for t in INVARIANT),
+                        "diag": tuple(round(db.get(t, 0.0), 9) for t in INVARIANT),
+                        "act": round(mb.get("activation", 0.0), 9),
+                        "diag_act": round(db.get("activation", 0.0), 9),
+                    }
+            terms[precision] = rows
     finally:
         pc.PRECISION = original
         import configuration.advanced_config as ac
@@ -1477,16 +1486,55 @@ def test_phase1_memory_is_identical_at_bf16_and_fp8():
         import utils.phase1_memory as p1
         importlib.reload(p1)
 
-    assert breakdowns["BF16"], "swept nothing; the harness itself is broken"
-    differing = [k for k in breakdowns["BF16"]
-                 if breakdowns["BF16"][k] != breakdowns["FP8"][k]]
-    assert not differing, (
-        f"{len(differing)} of {len(breakdowns['BF16'])} configs differ between BF16 "
-        f"and FP8. First: {differing[0]} "
-        f"BF16={breakdowns['BF16'][differing[0]]} FP8={breakdowns['FP8'][differing[0]]}. "
-        f"A production caller is passing PARAM_BYTES where it must pass "
-        f"PARAM_STORAGE_BYTES, or OPTIM_BYTES/GRAD_BYTES is derived from PARAM_BYTES."
+    assert terms["BF16"], "swept nothing; the harness itself is broken"
+    assert savings["BF16"] == 0.0, (
+        f"the FP8 activation saving must be exactly inert at BF16, so the shipped "
+        f"default sweep is unchanged; got {savings['BF16']}"
     )
+    assert savings["FP8"] > 0.0, (
+        "ACT_PRECISION_SAVING_FRACTION is 0.0 at FP8, so the measured saving is not "
+        "reaching the model at all"
+    )
+
+    # 1. Everything except activation is untouched. Compare only rows whose chosen
+    #    ZeRO strategy and micro batch match, because model/grad/optim depend on the
+    #    strategy and buffer/logits depend on micro -- and cheaper FP8 activations
+    #    legitimately let a different one win. Those reselections are a real
+    #    behaviour change, measured separately in the sweep, not a wiring fault.
+    comparable = [k for k in terms["BF16"]
+                  if terms["BF16"][k]["zero"] == terms["FP8"][k]["zero"]
+                  and terms["BF16"][k]["micro"] == terms["FP8"][k]["micro"]]
+    assert comparable, "no config kept the same strategy and micro; cannot compare"
+    for which in ("fit", "diag"):
+        bad = [k for k in comparable
+               if terms["BF16"][k][which] != terms["FP8"][k][which]]
+        assert not bad, (
+            f"{len(bad)} of {len(comparable)} configs differ on "
+            f"{INVARIANT} in the {which} path. First: {bad[0]} "
+            f"BF16={terms['BF16'][bad[0]][which]} FP8={terms['FP8'][bad[0]][which]}. "
+            f"A production caller is passing PARAM_BYTES where it must pass "
+            f"PARAM_STORAGE_BYTES, or OPTIM_BYTES/GRAD_BYTES is derived from "
+            f"PARAM_BYTES. FP8 must move the activation term and nothing else."
+        )
+
+    # 2. Activation IS lower under FP8, on both paths. Without this the test would
+    #    pass with act_precision_saving_fraction never plumbed through.
+    for which in ("act", "diag_act"):
+        moved = [k for k in comparable
+                 if terms["FP8"][k][which] < terms["BF16"][k][which]]
+        unmoved = [k for k in comparable
+                   if terms["FP8"][k][which] >= terms["BF16"][k][which]
+                   and terms["BF16"][k][which] > 0]
+        assert moved, (
+            f"FP8 activation memory is not lower on ANY config in the {which} path; "
+            f"act_precision_saving_fraction is not reaching "
+            f"calculate_memory_for_micro from this caller"
+        )
+        assert not unmoved, (
+            f"{len(unmoved)} configs have FP8 activation >= BF16 in the {which} "
+            f"path, e.g. {unmoved[0]}: BF16 {terms['BF16'][unmoved[0]][which]} vs "
+            f"FP8 {terms['FP8'][unmoved[0]][which]}"
+        )
 
 
 def _mem_for_cp(cp, **overrides):
@@ -1553,7 +1601,7 @@ def test_context_parallelism_divides_the_sequence_dependent_memory():
 
 
 def test_moe_expert_activation_does_not_scale_with_precision():
-    """Both halves of the activation formula must agree that precision does not apply.
+    """The MoE EXPERT intermediate must not track param_bytes.
 
     EMPIRICAL_ACT_MULTIPLIER is already BYTES per element of (seq_len * micro * d) --
     the expression divides by 1e9 with no other byte factor -- so it is an implicitly
@@ -1562,17 +1610,30 @@ def test_moe_expert_activation_does_not_scale_with_precision():
     layer and exactly 0% on a dense one. A dense FFN intermediate is as FP8-eligible
     as an expert one, so that split was not physical.
 
-    Chosen against measurement, not symmetry. On the controlled pair (jobs 1236/1238)
-    FP8 cost +8.73% MORE memory, so every candidate that made activations cheaper
-    under FP8 moved further from reality: both-invariant gave a predicted FP8/BF16
-    total ratio of 0.9028 (error -17.0%), dense x0.75 gave 0.8528 (-21.6%) and
-    dense x0.50 gave 0.8028 (-26.2%), against a measured 1.0873.
+    CORRECTION to the reasoning this docstring used to carry. It said the choice was
+    "against measurement, not symmetry", because on the controlled pair (jobs
+    1236/1238) FP8 cost +8.73% MORE memory, so every candidate making activations
+    cheaper under FP8 moved further from reality. That pair is a Llama-70B LoRA run
+    and this model has no LoRA mode; job 351's frozen-base arm measured the FP8
+    activation saving at 29.2% trainable and EXACTLY ZERO frozen, so the pair was
+    structurally incapable of showing the effect. FP8 DOES reduce dense activation
+    memory under full pretraining and that is now shipped as
+    ACT_PRECISION_SAVING_FRACTION; see test_fp8_changes_only_the_activation_term.
+
+    What this test still pins, and why it matters MORE now: the FP8 saving is
+    measured on a DENSE model and is deliberately NOT extended to the expert
+    intermediate. Physically an expert GEMM input should save too, but there is no
+    measurement, and extending a dense figure by symmetry is the move that produced
+    the error corrected above. So the expert term keeps act_bytes_per_element and
+    must stay invariant to param_bytes.
     """
     from utils.core_calculations import calculate_memory_for_micro
     from configuration.advanced_config import ACT_BYTES_PER_ELEMENT
 
     assert ACT_BYTES_PER_ELEMENT == 2, (
-        "activations are resident in BF16; this constant must not track PARAM_BYTES"
+        "the MoE expert intermediate is held in BF16; this constant must not track "
+        "PARAM_BYTES. The DENSE per-layer term does scale with precision -- that is "
+        "ACT_PRECISION_SAVING_FRACTION, a separate constant"
     )
 
     moe = {"d": 4096, "layers": 94, "dense_layers": 0, "attn_per_layer": 41_943_040,
@@ -1748,4 +1809,235 @@ def test_recompute_scale_reaches_the_vp_inflight_activation_term():
     assert inflight_share > 0.5, (
         f"VP in-flight term is only {inflight_share:.1%} of activations here, so this "
         f"test no longer exercises the dominant contributor it exists to protect"
+    )
+
+
+def _dense_act(saving, f_layers=0, vp=1, pp=1, layers_per_gpu=32, **over):
+    """One dense-model activation figure. Shared by the FP8 activation tests.
+
+    Llama-3.1-8B shaped, which is the model the 2x4 crossed design was measured on.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+
+    variant = {"d": 4096, "layers": 32, "dense_layers": 32,
+               "attn_per_layer": 41_943_040, "dense_ffn": 14336, "expert_ffn": 0,
+               "shared_each": 0, "router_each": 0, "expert_each": 0,
+               "vocab": 128_256}
+    kwargs = dict(
+        micro=1, model_mem_gb=16.0, variant=variant, dp=8,
+        layers_per_gpu=layers_per_gpu, zero_strategy=1, seq_len=8192, topk=0,
+        param_bytes=2, empirical_act_multiplier=12,
+        selective_act_checkpointing_multiplier=0.45,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+        vp=vp, pp=pp,
+        recompute_granularity="full" if f_layers else None,
+        recompute_num_layers=f_layers,
+        recompute_boundary_bytes_per_element=2,
+        act_precision_saving_fraction=saving,
+    )
+    kwargs.update(over)
+    return calculate_memory_for_micro(**kwargs)["activation"]
+
+
+def test_fp8_activation_saving_is_inert_at_zero():
+    """The shipped BF16 default must leave the activation term exactly unchanged.
+
+    ACT_PRECISION_SAVING_FRACTION is 0.0 unless PRECISION == "FP8", so the whole
+    704-pair sweep is byte-identical at the default -- verified separately by running
+    it. This pins the mechanism that makes that true: a saving of 0.0 gives a stored
+    scale of exactly 1.0, through the SAME code path FP8 uses, so the default is not
+    a special case that could drift away from the FP8 path.
+    """
+    from utils.core_calculations import resolve_recompute_scale
+
+    base = _dense_act(saving=0.0)
+    assert base > 0, "activation term is zero; the probe is not exercising it"
+    assert _dense_act(saving=0.0) == base
+
+    # No recompute, no saving -> the scale is exactly 1.0, not merely close.
+    fraction, scale = resolve_recompute_scale(32, 1, None, 0, 12, 2, 0.0)
+    assert (fraction, scale) == (0.0, 1.0), (
+        f"inert default must give (0.0, 1.0) exactly; got ({fraction}, {scale})"
+    )
+
+
+def test_fp8_saving_reaches_the_term_without_recompute_enabled():
+    """The saving must apply when NO recompute is configured.
+
+    resolve_recompute_scale returns early when granularity is None. That early
+    return used to be a bare 1.0; if it stays 1.0 the FP8 saving becomes reachable
+    only for recipes that ALSO enable recompute, which is backwards -- an f=0 run
+    stores every layer and so saves on every layer. The measured f=0 cell (job 365,
+    78.698 GB against bf16's 84.604) is exactly this case.
+    """
+    from configuration.advanced_config import (
+        ACT_PRECISION_SAVED_BYTES_PER_ELEMENT, EMPIRICAL_ACT_MULTIPLIER,
+    )
+
+    s = ACT_PRECISION_SAVED_BYTES_PER_ELEMENT / EMPIRICAL_ACT_MULTIPLIER
+    bf16 = _dense_act(saving=0.0, f_layers=0)
+    fp8 = _dense_act(saving=s, f_layers=0)
+    assert fp8 < bf16, (
+        "FP8 activation memory is not lower with recompute disabled; the early "
+        "return in resolve_recompute_scale is ignoring act_precision_saving_fraction"
+    )
+    # Ratio of two RETURNED values against the config constant -- the test does not
+    # recompute the activation expression, so deleting the scale from the production
+    # site cannot be masked by the test doing the same arithmetic itself.
+    assert abs(fp8 / bf16 - (1.0 - s)) < 1e-12, (
+        f"a dense model at f=0 must cost exactly (1 - {s}) of BF16; got "
+        f"{fp8 / bf16}"
+    )
+
+
+def test_fp8_saving_and_recompute_are_substitutes_not_additive():
+    """The saving must shrink as (1 - recompute_fraction), measured exactly.
+
+    Job 350 measured the FP8 activation saving as 3.5 * (1 - f) B/element across
+    f = 0, 0.25, 0.50, 0.75, 1.00 at r2 = 1.000000, and the real 2x4 design's f=0
+    cell discriminated (1-f) scaling (predicting 78.698 GB) from pure additivity
+    (79.621) against a measurement of 78.698. A recomputed layer stores no
+    activations, so there is nothing for FP8 to halve.
+
+    Asserted as a RATIO of saved bytes at f against saved bytes at f=0, both taken
+    from returned values. Pure additivity would hold this ratio at 1.0 for every f.
+    """
+    s = 3.5 / 12
+
+    def saved(f_layers):
+        return (_dense_act(saving=0.0, f_layers=f_layers)
+                - _dense_act(saving=s, f_layers=f_layers))
+
+    at_zero = saved(0)
+    assert at_zero > 0, "no saving at f=0; the term is not wired in"
+    for recomputed, expected in ((8, 1 - 8 / 32), (16, 1 - 16 / 32),
+                                 (24, 1 - 24 / 32), (32, 0.0)):
+        ratio = saved(recomputed) / at_zero
+        assert abs(ratio - expected) < 1e-12, (
+            f"at {recomputed}/32 layers recomputed the saving must be "
+            f"{expected:.4f} of its f=0 value, which is what job 350 measured; got "
+            f"{ratio:.6f}. A ratio of 1.0 means the saving is being added "
+            f"independently of recompute instead of competing for the same bytes."
+        )
+    # At full recompute the saving must vanish ENTIRELY, not merely shrink.
+    assert _dense_act(saving=s, f_layers=32) == _dense_act(saving=0.0, f_layers=32), (
+        "with every layer recomputed there are no stored activations, so FP8 and "
+        "BF16 must cost the same; the measured residual at that cell is the fp8 "
+        "param all-gather buffer (job 366), which is transient and not modelled here"
+    )
+
+
+def test_fp8_saving_does_not_reach_the_moe_expert_term():
+    """The dense saving must NOT be extended to the MoE expert intermediate.
+
+    The 2x4 design is a DENSE Llama-3.1-8B. Applying its figure to the expert
+    intermediate would be exactly the symmetry argument that produced the error
+    this round corrected, so the expert term keeps act_bytes_per_element and the
+    saving applies only to the d-proportional part.
+
+    A MoE variant's activation ratio must therefore sit STRICTLY between the dense
+    ratio and 1.0: lower than 1.0 because its own d-proportional part does save,
+    and higher than the dense ratio because its expert part does not.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+
+    s = 3.5 / 12
+    moe = {"d": 4096, "layers": 94, "dense_layers": 0, "attn_per_layer": 41_943_040,
+           "dense_ffn": 12288, "expert_ffn": 1536, "shared_each": 0,
+           "router_each": 524_288, "expert_each": 18_874_368, "vocab": 151_936}
+
+    def act(saving):
+        return calculate_memory_for_micro(
+            micro=2, model_mem_gb=16.0, variant=moe, dp=8, layers_per_gpu=94,
+            zero_strategy=1, seq_len=4096, topk=8, param_bytes=2,
+            empirical_act_multiplier=12,
+            selective_act_checkpointing_multiplier=0.45,
+            fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+            experts_per_gpu=16, act_bytes_per_element=2,
+            act_precision_saving_fraction=saving,
+        )["activation"]
+
+    ratio = act(s) / act(0.0)
+    assert 1.0 - s < ratio < 1.0, (
+        f"MoE activation ratio {ratio:.6f} must lie strictly between the dense "
+        f"{1.0 - s:.6f} and 1.0. At or below the dense value the saving has been "
+        f"applied to the expert intermediate too, which no measurement supports; "
+        f"at 1.0 the MoE path's own dense term is not saving at all."
+    )
+
+
+def test_activation_split_matches_the_aggregate_it_replaced():
+    """Splitting the activation aggregate must not change any number.
+
+    The dense and expert parts were separated so the precision saving could reach
+    one and not the other. The old single expression was
+        moe_layers*(d*m + e) + (L - moe_layers)*d*m
+    which is algebraically L*d*m + moe_layers*e. This pins that equivalence on a
+    PARTIALLY dense MoE model, where the two forms are least likely to coincide by
+    accident, and at the inert default so any difference is the refactor itself.
+    """
+    from utils.core_calculations import calculate_memory_for_micro
+
+    d, m, seq, micro, topk, abpe = 4096, 12, 4096, 2, 8, 2
+    layers, moe_layers, expert_ffn, sacm = 94, 60, 1536, 0.45
+    variant = {"d": d, "layers": layers, "dense_layers": layers - moe_layers,
+               "attn_per_layer": 41_943_040, "dense_ffn": 12288,
+               "expert_ffn": expert_ffn, "shared_each": 0, "router_each": 524_288,
+               "expert_each": 18_874_368, "vocab": 151_936}
+    got = calculate_memory_for_micro(
+        micro=micro, model_mem_gb=16.0, variant=variant, dp=8,
+        layers_per_gpu=layers, zero_strategy=1, seq_len=seq, topk=topk,
+        param_bytes=2, empirical_act_multiplier=m,
+        selective_act_checkpointing_multiplier=sacm,
+        fwd_bwd_routing_buff_passes=2, nccl_mem_buf=6.0, optim_bytes=6.0,
+        experts_per_gpu=16, act_bytes_per_element=abpe,
+    )["activation"]
+
+    # The expression as it was written BEFORE the split, evaluated independently.
+    moe_per_layer = seq * micro * (d * m + topk * expert_ffn * 2 * abpe)
+    dense_per_layer = seq * micro * d * m
+    moe_layers_on_gpu = min(moe_layers, layers)
+    old = (moe_layers_on_gpu * moe_per_layer
+           + (layers - moe_layers_on_gpu) * dense_per_layer) * sacm / 1e9
+    assert got == old, (
+        f"the split activation form gives {got} where the aggregate it replaced "
+        f"gives {old}. The two must be algebraically identical; the whole 704-pair "
+        f"sweep is byte-identical at this default and would also catch this."
+    )
+    assert moe_layers_on_gpu < layers, (
+        "this model is fully MoE, so the dense-layer branch of the old expression "
+        "is not being exercised and the equivalence is only half tested"
+    )
+
+
+def test_vp_inflight_activations_take_the_precision_saving():
+    """The VP in-flight term must save under FP8, not just the base term.
+
+    That term is the LARGEST activation contributor for a pipelined recipe -- 16.106
+    of 23.354 GB at PP=2/VP=20 on Llama-3.1-70B -- and it was shipped once already
+    with no recompute reduction at all. Scaling only the base term would leave the
+    dominant part at BF16 cost.
+
+    Pinned by requiring the ratio to equal (1 - saving) EXACTLY with VP and PP
+    engaged: if either site is unscaled the ratio lands strictly between (1 - s)
+    and 1.0, so this fails whichever one is dropped.
+    """
+    s = 3.5 / 12
+    kw = dict(vp=4, pp=2, layers_per_gpu=32)
+    bf16 = _dense_act(saving=0.0, **kw)
+    fp8 = _dense_act(saving=s, **kw)
+    flat = _dense_act(saving=0.0, vp=1, pp=1, layers_per_gpu=32)
+    assert bf16 > flat, (
+        "VP in-flight overhead is not being added, so this test is not exercising "
+        "the term it exists to protect"
+    )
+    inflight_share = (bf16 - flat) / bf16
+    assert inflight_share > 0.4, (
+        f"VP in-flight term is only {inflight_share:.1%} of activations here, so a "
+        f"regression in it could hide inside rounding"
+    )
+    assert abs(fp8 / bf16 - (1.0 - s)) < 1e-12, (
+        f"with VP={kw['vp']} PP={kw['pp']} the ratio must be exactly {1.0 - s}; got "
+        f"{fp8 / bf16}. A value between {1.0 - s} and 1.0 means one of the two "
+        f"activation sites is not taking the precision saving."
     )

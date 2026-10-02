@@ -447,6 +447,7 @@ def resolve_recompute_scale(
     recompute_num_layers,
     empirical_act_multiplier,
     recompute_boundary_bytes_per_element,
+    act_precision_saving_fraction=0.0,
 ):
     """Fraction of layers recomputed, and the resulting per-layer activation scale.
 
@@ -458,15 +459,28 @@ def resolve_recompute_scale(
     A stored layer costs empirical_act_multiplier bytes per element. A recomputed
     layer stores only its block input, i.e. recompute_boundary_bytes_per_element.
 
+    act_precision_saving_fraction is the share of a STORED layer's bytes that FP8
+    saves. It applies to the stored portion ONLY, which is what makes the two
+    techniques substitutes rather than additive: a recomputed layer stores no
+    activations, so there is nothing for FP8 to halve, and the saving in bytes comes
+    out as empirical_act_multiplier * (1 - fraction) * act_precision_saving_fraction.
+    At the shipped constants that is 3.5 * (1 - f) B/element, which is what jobs 350
+    and 352/354/361/363 x 365/353/362/364 measured. See
+    ACT_PRECISION_SAVING_FRACTION in advanced_config.
+
     Returns (fraction_recomputed, scale) where scale multiplies the per-layer
-    activation cost. With no recompute the fraction is 0.0 and the scale is exactly
-    1.0, so every caller is unchanged by default.
+    activation cost. With no recompute and no precision saving the fraction is 0.0
+    and the scale is exactly 1.0, so every caller is unchanged by default.
 
     This is shared so the base activation term and the VP in-flight term cannot
     drift apart -- the same failure mode that made moe_frac disagree with itself.
     """
+    stored_scale = 1.0 - act_precision_saving_fraction
     if not recompute_granularity or recompute_num_layers <= 0:
-        return 0.0, 1.0
+        # Nothing recomputed, so every layer is stored and every layer saves.
+        # NOT 1.0: returning 1.0 here would make the precision saving reachable
+        # only when a recipe also enables recompute, which is backwards.
+        return 0.0, stored_scale
     if recompute_granularity != "full":
         raise ValueError(
             f"unsupported recompute_granularity {recompute_granularity!r}; "
@@ -477,14 +491,16 @@ def resolve_recompute_scale(
 
     layers_per_chunk = layers_per_gpu / vp if vp and vp > 1 else layers_per_gpu
     if layers_per_chunk <= 0:
-        return 0.0, 1.0
+        return 0.0, stored_scale
 
     recomputed = min(recompute_num_layers, layers_per_chunk)
     fraction = recomputed / layers_per_chunk
     # Blend the stored and recomputed per-layer costs, expressed as a multiplier on
-    # the stored cost so it composes with the existing expressions unchanged.
+    # the stored cost so it composes with the existing expressions unchanged. The
+    # precision saving multiplies the stored term and NOT the boundary term: a
+    # recomputed block's retained input is the next block's input, held in BF16.
     scale = (
-        (1.0 - fraction)
+        (1.0 - fraction) * stored_scale
         + fraction * recompute_boundary_bytes_per_element / empirical_act_multiplier
     )
     return fraction, scale
@@ -513,6 +529,7 @@ def calculate_memory_for_micro(
     recompute_granularity=None,
     recompute_num_layers=0,
     recompute_boundary_bytes_per_element=2,
+    act_precision_saving_fraction=0.0,
     nccl_ep_scaling_factor=0.0,
     fragmentation_factor=1.0,
     experts_per_gpu=0,
@@ -536,8 +553,15 @@ def calculate_memory_for_micro(
             callers pass the model's sequence length, not a per-rank slice.
         cp: Context parallelism degree. Shards the sequence across cp ranks, so
             every token-count-dependent term sees seq_len/cp per GPU.
-        act_bytes_per_element: Bytes per activation element. Precision-invariant;
-            see ACT_BYTES_PER_ELEMENT in advanced_config for why.
+        act_bytes_per_element: Bytes per activation element for the MoE EXPERT
+            intermediate only. Precision-invariant, deliberately: the FP8 activation
+            saving below is measured on a DENSE model and is not extended to the
+            expert term by symmetry. See ACT_BYTES_PER_ELEMENT in advanced_config.
+        act_precision_saving_fraction: Share of a STORED layer's d-proportional
+            activation bytes that FP8 saves. 0.0 at BF16, so the default is exactly
+            inert. Applies to the stored portion only, which makes FP8 and
+            recompute SUBSTITUTES -- see resolve_recompute_scale and
+            ACT_PRECISION_SAVING_FRACTION, measured at 3.5 of 12 B/element.
         recompute_granularity: None (store every layer's activations, the default
             and the behaviour before this existed) or "full" (recompute whole
             blocks, as recompute_granularity="full" in a Megatron/NeMo recipe).
@@ -724,33 +748,60 @@ def calculate_memory_for_micro(
         logits_mem = live_tokens * logits_vocab * logits_bytes_per_element / 1e9
 
     # --- Activation memory ---
-    # For MoE layers, activations include expert intermediates (higher per-layer cost)
+    # Split into the two parts that behave DIFFERENTLY under precision, rather than
+    # one aggregate:
+    #
+    #   dense part  -- the d-proportional per-layer cost (attention and MLP
+    #                  intermediates). Present on EVERY layer, dense or MoE alike.
+    #                  Measured to shrink under FP8; takes act_precision_saving.
+    #   expert part -- the MoE routed-expert intermediate, on MoE layers only.
+    #                  Precision-invariant here because the measurement is on a
+    #                  dense model; see act_bytes_per_element above.
+    #
+    # Algebraically identical to the single aggregate this replaces: that branch
+    # computed moe_layers*(d*m + e) + (L - moe_layers)*d*m, which is L*d*m +
+    # moe_layers*e. The whole 704-pair sweep is byte-identical at the inert default,
+    # and a test pins the equivalence.
+    act_dense_full = layers_per_gpu * seq_len * micro * d * empirical_act_multiplier
+    act_expert_full = 0.0
     if is_moe and moe_layers_per_gpu > 0:
-        # MoE activation per layer: attention acts + routed expert intermediates
-        # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output of expert FFN)
+        # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output)
         expert_ffn = variant.get("expert_ffn", 0)
-        moe_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * act_bytes_per_element)
-        dense_act_per_layer = seq_len * micro * d * empirical_act_multiplier
-        dense_layers_on_gpu = layers_per_gpu - moe_layers_per_gpu
-        act_total_full = (moe_layers_per_gpu * moe_act_per_layer + dense_layers_on_gpu * dense_act_per_layer)
-    else:
-        act_total_full = layers_per_gpu * seq_len * micro * d * empirical_act_multiplier
+        act_expert_full = (
+            moe_layers_per_gpu * seq_len * micro
+            * topk * expert_ffn * 2 * act_bytes_per_element
+        )
 
-    activation_mem = act_total_full * selective_act_checkpointing_multiplier / 1e9
-
-    # Activation recomputation. A recomputed block stores only its input, so this
-    # scales the per-layer cost. Inert (scale exactly 1.0) unless a recipe's
-    # recompute settings are supplied. Derived once and applied to BOTH the base
-    # term and the VP in-flight term below, so the two cannot disagree.
-    recompute_fraction, recompute_scale = resolve_recompute_scale(
+    # Activation recomputation and FP8 precision saving. A recomputed block stores
+    # only its input and an FP8-stored layer costs less, so both scale the per-layer
+    # cost and they COMPOSE rather than add -- see resolve_recompute_scale. Inert
+    # (both scales exactly 1.0) unless a recipe's recompute settings are supplied or
+    # PRECISION is FP8. Derived once and applied to BOTH the base term and the VP
+    # in-flight term below, so the two cannot disagree.
+    recompute_fraction, dense_act_scale = resolve_recompute_scale(
         layers_per_gpu,
         vp,
         recompute_granularity,
         recompute_num_layers,
         empirical_act_multiplier,
         recompute_boundary_bytes_per_element,
+        act_precision_saving_fraction,
     )
-    activation_mem *= recompute_scale
+    # Same recompute blend, no precision saving. Taken from the SAME helper rather
+    # than written out here, so the recompute halves cannot drift apart.
+    _, expert_act_scale = resolve_recompute_scale(
+        layers_per_gpu,
+        vp,
+        recompute_granularity,
+        recompute_num_layers,
+        empirical_act_multiplier,
+        recompute_boundary_bytes_per_element,
+        0.0,
+    )
+
+    activation_mem = (
+        act_dense_full * dense_act_scale + act_expert_full * expert_act_scale
+    ) * selective_act_checkpointing_multiplier / 1e9
 
     # VP activation overhead: interleaved schedule keeps more activations in-flight
     # In interleaved 1F1B, warmup fills (PP-1)*VP micro-batches before steady state.
@@ -760,18 +811,25 @@ def calculate_memory_for_micro(
     if vp > 1 and pp > 1:
         layers_per_virtual_chunk = layers_per_gpu // vp
         inflight_micros = (pp - 1) * vp  # warmup micro-batches
-        # In-flight activations use the same per-layer cost but without checkpointing reduction
+        # Same dense/expert split as the base term above, so the precision saving
+        # reaches the d-proportional part here too and the expert part stays
+        # invariant. In-flight chunks are recomputed on the same schedule as any
+        # other, so the recompute blend applies here as well. Before that it did
+        # not, which left the VP term as the single largest activation contributor
+        # for a recipe that recomputes: at PP=2/VP=20 it was 16.106 of 23.354 GB on
+        # Llama-3.1-70B.
+        dense_act_per_layer = seq_len * micro * d * empirical_act_multiplier
+        expert_act_per_layer = 0.0
         if is_moe and moe_layers_per_gpu > 0:
             expert_ffn = variant.get("expert_ffn", 0)
-            avg_act_per_layer = seq_len * micro * (d * empirical_act_multiplier + topk * expert_ffn * 2 * act_bytes_per_element)
-        else:
-            avg_act_per_layer = seq_len * micro * d * empirical_act_multiplier
+            expert_act_per_layer = (
+                seq_len * micro * topk * expert_ffn * 2 * act_bytes_per_element
+            )
+        avg_act_per_layer = (
+            dense_act_per_layer * dense_act_scale
+            + expert_act_per_layer * expert_act_scale
+        )
         vp_act_overhead = inflight_micros * layers_per_virtual_chunk * avg_act_per_layer / 1e9
-        # In-flight chunks are recomputed on the same schedule as any other, so the
-        # recompute scale applies here too. Before this it did not, which left the
-        # VP term as the single largest activation contributor for a recipe that
-        # recomputes: at PP=2/VP=20 it was 16.106 of 23.354 GB on Llama-3.1-70B.
-        vp_act_overhead *= recompute_scale
         activation_mem += vp_act_overhead
 
     # --- Buffer memory ---
@@ -906,6 +964,7 @@ def calculate_viable_micro_batch_sizes(
             recompute_granularity=RECOMPUTE_GRANULARITY,
             recompute_num_layers=RECOMPUTE_NUM_LAYERS,
             recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
+            act_precision_saving_fraction=ACT_PRECISION_SAVING_FRACTION,
         )
 
         # Check if this micro batch size fits in memory

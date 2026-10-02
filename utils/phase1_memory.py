@@ -118,6 +118,7 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         recompute_granularity=RECOMPUTE_GRANULARITY,
         recompute_num_layers=RECOMPUTE_NUM_LAYERS,
         recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
+        act_precision_saving_fraction=ACT_PRECISION_SAVING_FRACTION,
     )
 
     required = memory_breakdown["total"]
@@ -317,6 +318,7 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         recompute_granularity=RECOMPUTE_GRANULARITY,
         recompute_num_layers=RECOMPUTE_NUM_LAYERS,
         recompute_boundary_bytes_per_element=RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT,
+        act_precision_saving_fraction=ACT_PRECISION_SAVING_FRACTION,
     )
 
     # Calculate efficiency metrics
