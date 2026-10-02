@@ -165,10 +165,26 @@ PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 #    is simply no measurement, and extending a dense figure to it by symmetry is
 #    the same move that produced the error corrected above.
 #
-# 3. STILL OPEN -- THE FP8 WEIGHT CAST COPY IS NOT MODELLED.
-#    This is now the single largest known gap. With parameters, gradients,
-#    optimizer state and activations all precision-invariant, this model predicts
-#    IDENTICAL memory at BF16 and FP8, so it is LOW for an FP8 run.
+# 3. CLOSED -- THE FP8 WEIGHT CAST COPY IS REFUTED AND DELIBERATELY NOT MODELLED.
+#    This heading and the paragraph below it previously read "STILL OPEN ... THE
+#    FP8 WEIGHT CAST COPY IS NOT MODELLED / This is now the single largest known
+#    gap. With parameters, gradients, optimizer state and activations all
+#    precision-invariant, this model predicts IDENTICAL memory at BF16 and FP8,
+#    so it is LOW for an FP8 run." Both halves are now wrong, and the body of
+#    this very entry already says so -- the heading was simply not updated with
+#    it.
+#
+#    Activations are NOT precision-invariant: entry 2 above ships a 29.17%
+#    FP8 saving on the d-proportional term. And the model is not LOW on the
+#    weight side: steady memory is IDENTICAL across precision on real full
+#    pretraining at PP=1, 2 and 4 with recompute off (jobs 370-373), where the
+#    measured 2.0 bytes/param would have added 16.06, 8.03 and 4.54 GB. The
+#    omission is therefore CORRECT for every recipe that ships, not a gap.
+#
+#    The null is not structural, which is the finding rather than a caveat:
+#    `fp8_param_gather=True` stores parameters in FP8 so the cast copies net
+#    out, and DISABLING it puts +13.959 GB back (1.866 bytes/param). So the
+#    cast copies are real in isolation and still must never be added here.
 #
 #    Two earlier claims in this entry were WRONG and are corrected here.
 #
