@@ -174,8 +174,10 @@ PARAM_STORAGE_BYTES = 2  # weights are resident in BF16 at either PRECISION
 #    this very entry already says so -- the heading was simply not updated with
 #    it.
 #
-#    Activations are NOT precision-invariant: entry 2 above ships a 29.17%
-#    FP8 saving on the d-proportional term. And the model is not LOW on the
+#    Activations are NOT precision-invariant: entry 2 above ships a 17.19%
+#    FP8 saving on the d-proportional term (it was 29.17% until the activation
+#    multiplier was measured; the saved bytes were re-measured with it). And the
+#    model is not LOW on the
 #    weight side: steady memory is IDENTICAL across precision on real full
 #    pretraining at PP=1, 2 and 4 with recompute off (jobs 370-373), where the
 #    measured 2.0 bytes/param would have added 16.06, 8.03 and 4.54 GB. The
@@ -251,13 +253,30 @@ OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_STORAGE_BYTES  # 6.0 at either preci
 #
 # Gradients are NOT stored at PARAM_BYTES. An FP8 recipe (e.g. Transformer Engine)
 # uses FP8 only for the GEMM inputs and reduces/accumulates gradients in BF16 or
-# higher, so an FP8 run must still pay 2 bytes/param for gradients. Deriving the
-# multiplier from PARAM_BYTES holds the product at GRAD_BYTES_PER_PARAM, exactly as
-# OPTIM_BYTES holds its product at 12.
+# higher, so an FP8 run must still pay at least 2 bytes/param for gradients.
+# Deriving the multiplier from PARAM_BYTES holds the product at
+# GRAD_BYTES_PER_PARAM, exactly as OPTIM_BYTES holds its product at 12.
 #
 # Before this existed, grad_mem was model_mem_gb directly, so FP8 charged 1
 # byte/param -- measured on Llama-3.1-8B, 1.923 GB against the correct 3.846.
-GRAD_BYTES_PER_PARAM = 2  # BF16 gradient accumulation and reduction
+#
+# THIS WAS 2 ("BF16 gradient accumulation and reduction") AND THAT WAS WRONG.
+# Read directly from the resolved ConfigContainer.yaml of real Megatron-Bridge
+# pretraining runs on this stack (jobs 376/377 Qwen3-30B-A3B, and the Llama-3.1-8B
+# family 352/387):
+#     main_grads_dtype: torch.float32
+#     use_distributed_optimizer: true
+# Megatron keeps a separate fp32 main-gradient buffer for bf16 training -- the
+# bucket the reduce-scatter writes into is fp32, not the bf16 parameter dtype. So
+# the resident cost is 4 bytes/param, not 2. This is a MEASURED dtype, not an
+# estimate: it is a field in the config the framework itself resolved.
+#
+# Worth stating because it is counter-intuitive: this cost does NOT fall under the
+# distributed optimizer. ZeRO-1 shards optimizer state only, and the fp32 main-grad
+# buffer is a gradient, not optimizer state. Our grad_mem is already divided by the
+# ZeRO sharding width where the strategy shards gradients (ZeRO-2+), so raising
+# this constant does not double-charge a sharded configuration.
+GRAD_BYTES_PER_PARAM = 4  # fp32 main-grad buffer (main_grads_dtype=torch.float32)
 # Divided by PARAM_STORAGE_BYTES for the same reason as OPTIM_BYTES above. Both
 # are now constant across PRECISION, which is the point: neither gradients nor
 # optimizer state shrink under FP8, and neither do the weights themselves.
@@ -310,19 +329,71 @@ LOGITS_CHUNK_TOKENS = 1024  # rows whose logits are live at once under fused CE
 #
 # The decomposition below is not invented. The repo already documents the dense
 # multiplier as "the ~6 intermediate tensors" a recomputed block does NOT store,
-# and both ratios come out exact against the two hard-coded figures:
+# and both ratios came out exact against the two hard-coded figures AS THEY THEN
+# STOOD:
 #     EMPIRICAL_ACT_MULTIPLIER        / ACT_BYTES_PER_ELEMENT = 12 / 2 = 6 tensors
 #     RECOMPUTE_BOUNDARY_BYTES_PER_EL / ACT_BYTES_PER_ELEMENT =  2 / 2 = 1 tensor
 # so 12 was always "6 stored tensors at 2 bytes" and 2 was always "the 1 input
-# tensor a recomputed block keeps, at the same 2 bytes". Making that explicit is
-# BYTE-IDENTICAL at the shipped default and leaves the constant live everywhere.
+# tensor a recomputed block keeps, at the same 2 bytes". Making that explicit was
+# BYTE-IDENTICAL at the then-shipped default and left the constant live everywhere.
 #
-# CAVEAT, and it is load-bearing: ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5 was
-# MEASURED against a 12 B/element BF16 baseline. Changing ACT_BYTES_PER_ELEMENT
-# rescales the multiplier and therefore silently rescales that saving's FRACTION,
-# which the measurement does not license. Re-measure the 3.5 if you change this.
+# THE TENSOR COUNT IS NO LONGER 6. It is now 16, measured -- the ratio above
+# records the decomposition's ORIGIN, not the current value. The current stored
+# multiplier is 16 * 2 = 32 B/element; see the measurement block below.
+#
+# RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT is deliberately LEFT at 2 and is now a
+# known over-estimate: the f=32/32 cell measured a 0.435 GB floor where 2
+# B/element predicts 2.147 GB for that run, so the boundary tensor is ~0.4
+# B/element, over-predicted 5x. It is unchanged by this round because it is
+# absolutely unchanged in bytes (it never tracked the multiplier) and correcting
+# it needs its own baselines -- but it now matters relatively less, since it is
+# 2/32 of a stored layer rather than 2/12.
+#
+# CAVEAT, NOW DISCHARGED RATHER THAN CARRIED: this block used to warn that
+# ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5 was measured against a 12 B/element
+# BF16 baseline, so rescaling the multiplier would silently rescale that saving's
+# FRACTION, and told the reader to "re-measure the 3.5 if you change this". The
+# multiplier HAS now changed, from 12 to 32, and the 3.5 has been re-measured to
+# 5.5 on the same real runs rather than carried across. See
+# ACT_PRECISION_SAVED_BYTES_PER_ELEMENT below.
+#
+# THE COUNT WAS 6 AND IT WAS MEASURED TOO LOW BY 2.67x. The "~6 intermediate
+# tensors" figure was a plausible hand count, never a measurement, and a
+# micro-batch sweep refuted it by its own pre-registered falsification criterion.
+#
+# MEASURED, two independent axes on real Llama-3.1-8B full pretraining (8xH100,
+# TP=PP=CP=1, seq 8192, bf16, recompute forced off via Hydra nulls, CUDA graphs
+# off, resolved config diffed per arm). Per-GPU elements of (layers*seq*micro*d)
+# = 32*8192*1*4096 = 1,073,741,824:
+#
+# 1. RECOMPUTE-FRACTION SWEEP at fixed micro=1 (jobs 352/354/361/363). ACT =
+#    max-allocated - mem-allocated:
+#        f =  0/32  34.831 GB
+#        f =  5/32  29.457
+#        f = 16/32  17.633
+#        f = 32/32   0.435
+#    Linear in (1-f) with a 0.435 GB floor: worst residual 0.0004 GB over a
+#    34.40 GB range. The stored component is 34.396 GB => 32.034 B/element.
+#
+# 2. MICRO-BATCH SWEEP at f=0 (jobs 387/388/389/390). ACT(1) = 34.831,
+#    ACT(2) = 73.677, so the slope is 38.846 GB per micro-batch => 36.178
+#    B/element. mbs=4 and mbs=8 both CUDA-OOMed on a 139.80 GiB GPU, which is
+#    what the pre-registered refutation required: the old constant predicted both
+#    would fit with room to spare (73.0 and 96.2 GB).
+#
+# The two axes bracket Korthikanti et al.'s selective figure of 34 B/element
+# (within 6% and 6% respectively). 16 tensors * 2 bytes = 32 is taken from axis 1,
+# which has four points and a 0.0004 GB worst residual against axis 2's two; axis
+# 2 implies a -4.0 GB intercept that axis 1 does not, so 32 is the cleaner
+# estimate and 36 is its upper companion.
+#
+# WHAT THE OLD VALUE COST. At 6 tensors the shipped model charged 12 B/element and
+# then multiplied by SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45 (see below),
+# giving 5.4 effective B/element against a measured 32.0 -- low by 5.93x. That is
+# why FRAGMENTATION_FACTOR had to be 1.24 to make totals come out near a
+# measurement; see that constant.
 ACT_BYTES_PER_ELEMENT = 2  # ONE stored activation tensor, resident BF16 at either PRECISION
-ACT_INTERMEDIATES_PER_ELEMENT = 6  # stored tensors per layer per element of (seq*micro*d)
+ACT_INTERMEDIATES_PER_ELEMENT = 16  # MEASURED; see the two sweeps above
 EMPIRICAL_ACT_MULTIPLIER = ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
 
 # --- FP8 activation saving (MEASURED) -----------------------------------------
@@ -370,7 +441,33 @@ EMPIRICAL_ACT_MULTIPLIER = ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
 #
 # Expressed as a byte count over the multiplier rather than as a bare fraction, so
 # it tracks EMPIRICAL_ACT_MULTIPLIER if that is ever re-measured.
-ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 3.5  # of EMPIRICAL_ACT_MULTIPLIER, at FP8
+#
+# IT HAS NOW BEEN RE-MEASURED, from 3.5 to 5.5, because the multiplier moved from
+# 12 to 32 and this block's own caveat required it. The 3.5 came from axis 1
+# above, a SINGLE-GPU TE probe; 5.5 comes from the real 8-GPU pretraining pair in
+# axis 2, which is the same system the multiplier is now measured on:
+#     job 352 bf16 84.604  job 365 fp8_cs 78.698  saving 5.906 GB
+#     5.906 GB / 1,073,741,824 elements = 5.500 B/element, exactly
+#     5.500 / 32 = 17.19% against a measured 5.906/34.396 = 17.17% of stored
+# So the fraction is held at its measured value instead of being rescaled by
+# arithmetic: carrying 3.5 against the new 32 would have implied 10.94%, which no
+# measurement supports. The absolute GB saving the model predicts for that run is
+# unchanged by this pair of edits -- it is the fraction that was never licensed.
+#
+# THIS SUPERSEDES THE 29.17% FIGURE AND WITH IT ONE CLAIM ABOUT JOBS 376/377.
+# At the old 12 B/element the fraction was 3.5/12 = 29.17%, and the MoE pair
+# 376/377 measured 29.505%, so expert-dense symmetry appeared to land +0.34 pp
+# from measurement. That agreement was CONDITIONAL ON THE WRONG MULTIPLIER. With
+# the multiplier corrected, symmetry predicts 17.19% for that run against the same
+# measured 29.505%, i.e. it now UNDER-predicts by 12.3 pp. Symmetry is still the
+# better of the two shipped options and is NOT reverted -- dense-only predicts
+# 12.50%, further away -- so the sign and the decision stand; only the claim of a
+# near-exact match does not. Holding the dense half at the measured 17.19%, that
+# pair implies an expert-side saving of 62.4%, which EXCEEDS the 50% ceiling an
+# FP8 storage swap can deliver. That points at the expert ELEMENT COUNT being too
+# low rather than at this constant, and it is the sharper form of the open
+# magnitude question. Not closed here: it needs its own measurement.
+ACT_PRECISION_SAVED_BYTES_PER_ELEMENT = 5.5  # of EMPIRICAL_ACT_MULTIPLIER, at FP8
 ACT_PRECISION_SAVING_FRACTION = (
     ACT_PRECISION_SAVED_BYTES_PER_ELEMENT / EMPIRICAL_ACT_MULTIPLIER
     if PRECISION == "FP8"
@@ -422,16 +519,25 @@ ACT_PRECISION_SAVING_FRACTION = (
 #     bf16   68.652 - 52.363 = 16.289 GB
 #     fp8    63.847 - 52.364 = 11.483 GB      -> saving 29.505%
 #
-# The model was picked because its two halves are EXACTLY equal in bytes -- dense
-# d*m = 2048*12 = 24576 and expert topk*e_ffn*2*bytes = 8*768*2*2 = 24576 -- so the
-# competing hypotheses differ by precisely a factor of two:
+# The model was picked because its two halves were EXACTLY equal in bytes AT THE
+# MULTIPLIER THEN SHIPPED -- dense d*m = 2048*12 = 24576 and expert
+# topk*e_ffn*2*bytes = 8*768*2*2 = 24576 -- so the competing hypotheses differed by
+# precisely a factor of two:
 #
 #     experts precision-INVARIANT (the old behaviour) -> predicted saving 14.583%
 #     experts take the SAME saving as the dense half  -> predicted saving 29.167%
 #
-# Measured 29.505% lands 0.338 pp from symmetry and 14.921 pp from invariance,
+# Measured 29.505% landed 0.338 pp from symmetry and 14.921 pp from invariance,
 # against a refutation threshold of 21.875% recorded in the submitter's header
 # BEFORE the jobs were submitted, so this was a test and not a fit.
+#
+# THE MULTIPLIER HAS SINCE BEEN MEASURED AND THAT CHANGES THESE PREDICTIONS.
+# At 32 B/element the halves are 65536 against 24576, a 72.7/27.3 split, and
+# symmetry predicts 17.19% rather than 29.167% -- so it now UNDER-predicts this
+# pair by 12.3 pp. The decision is NOT reverted: invariance predicts 12.50% and is
+# worse, and the correction moved the pair's TOTAL from 24.0 B/element predicted
+# (40.7% low) to 44.0 against 40.45 measured. See
+# ACT_PRECISION_SAVED_BYTES_PER_ELEMENT for what the remaining residual implies.
 #
 # The expert half reuses THIS constant instead of getting its own. The implied
 # expert figure is 3.581 B/element against the dense 3.500, but `peak - steady`
@@ -530,14 +636,39 @@ ACT_PRECISION_SAVING_FRACTION = (
 # untested mechanism left to rescue it.
 # ACT_BYTES_PER_ELEMENT is now defined ABOVE, beside EMPIRICAL_ACT_MULTIPLIER, which
 # is derived from it -- it has to precede its consumers. It used to be assigned here.
-SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 0.45  # Reduction from selective checkpointing
+#
+# THIS WAS 0.45 AND IT WAS APPLIED UNCONDITIONALLY, WHICH IS A DEFECT.
+# core_calculations.calculate_memory_for_micro multiplies the whole activation
+# total by this value at its single site, with no branch on whether any recompute
+# is configured at all:
+#     activation_mem = (dense*scale + expert*scale) * selective_mult / 1e9
+# So a recipe with recompute_granularity=None -- the common case, and the case the
+# measurements above were taken in -- still received a 55% activation discount.
+#
+# It CANNOT be rescued as a selective-recompute factor, because this model has no
+# selective-recompute mode for it to represent. resolve_recompute_scale accepts
+# only None and "full" and RAISES ValueError on anything else:
+#     if recompute_granularity != "full": raise ValueError(...)
+# Selective recompute is therefore unreachable, so there is no configuration in
+# which a 0.45 is the right multiplier. Where recompute IS configured, the
+# reduction is already modelled -- and modelled against measurement -- by the
+# (1-f) blend in resolve_recompute_scale, which this constant then discounted a
+# second time.
+#
+# Set to 1.0 (exactly inert) rather than deleted, so the function signature and
+# every caller are unchanged and the downstream reimplementations stay
+# signature-compatible. KEEP IT AT 1.0 unless a genuine selective-recompute
+# granularity is added AND its multiplier is measured; a non-1.0 value here
+# silently re-introduces a 2.2x error across every row.
+SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER = 1.0  # inert; see above before changing
 
 # --- Activation recomputation -------------------------------------------------
 # Megatron/NeMo recipes commonly set, via overrides.py:
 #     recompute_granularity="full", recompute_method="block", recompute_num_layers=N
 # which fully recomputes N layers of every pipeline chunk instead of storing their
-# activations. A recomputed block stores only its own INPUT, not the ~6 intermediate
-# tensors the multiplier above accounts for.
+# activations. A recomputed block stores only its own INPUT, not the 16 intermediate
+# tensors the multiplier above accounts for (it was "~6" until that count was
+# measured).
 #
 # This matters because the fraction recomputed depends on PP and VP, not just on N:
 # layers per chunk is layers_per_gpu / VP under an interleaved schedule, so
@@ -557,7 +688,29 @@ RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT = ACT_BYTES_PER_ELEMENT
 
 # Communication buffer configuration
 FWD_BWD_ROUTING_BUFF_PASSES = 2  # All-to-all buffer passes for MoE routing
-NCCL_MEM_BUF = 6.0  # NCCL base communication buffer size in GB (includes CUDA context)
+#
+# GATED ON WORLD SIZE SINCE THIS ROUND. core_calculations now charges this only
+# when dp*tp*pp*cp > 1. It previously applied unconditionally, so a SINGLE-GPU
+# configuration was charged the full 6.00 GB of NCCL workspace despite having no
+# communicator at all -- 34% of the raw total on a 0.6B model, and enough to
+# decide the answer: with it, micro-batch 4 OOMs; without it, 4 and 8 fit.
+#
+# The inconsistency is what identified it as an oversight rather than a decision:
+# every OTHER buffer component in that function is already gated on the
+# parallelism that creates it -- moe_dispatch_buf on `is_moe and
+# experts_per_gpu > 0`, pp_buf on `pp > 1`. Only the NCCL term was not.
+#
+# The old comment read "(includes CUDA context)". That bundling is now explicitly
+# ABANDONED rather than silently gated away with the rest: the CUDA context is
+# ~0.5-1 GB/GPU, it exists on one GPU as much as on a thousand, and it is NOT
+# part of an NCCL workspace. Gating this constant therefore drops a real cost on
+# single-GPU configurations. It is left unmodelled rather than split out at a
+# guessed value, because no measurement on this stack pins it -- the context sits
+# outside the PyTorch allocator, so it appears in neither max-allocated nor
+# max-reserved. A single-GPU run reading torch.cuda.mem_get_info against
+# max-reserved would pin it; until then single-GPU totals are a floor by roughly
+# that amount.
+NCCL_MEM_BUF = 6.0  # NCCL base communication buffer, GB; charged only if world > 1
 NCCL_EP_SCALING_FACTOR = 1.0  # Additional GB per EP rank beyond 1 (all-to-all workspace)
 
 # Training-time overhead modeling (Phase 3)
@@ -595,7 +748,42 @@ ATTENTION_FLOPS_FACTOR = 12
 #      1.24x was fitted to a raw total containing NONE of that buffer.
 # For scale, had the calibration been ZeRO-3 the buffer would have contributed
 # 2.00 GB of a 124.2 GB raw total, i.e. 1.6% -- so even the worst case was small.
-FRAGMENTATION_FACTOR = 1.24  # 1.15-1.25x; empirical overhead from caching allocator
+#
+# THE 1.24 WAS WRONG, AND IT WAS NOT MEASURING FRAGMENTATION.
+# The quantity this factor claims to represent is directly measurable: the CUDA
+# caching allocator's own overhead is max-reserved / max-allocated, which
+# Megatron logs per iteration. Across every real run on this stack it is
+# 1.009-1.034, never 1.24:
+#     job 387 mbs=1  85.771 / 84.604 = 1.0138
+#     job 388 mbs=2 124.527 /123.450 = 1.0087
+#     jobs 352/354/361/363 (recompute sweep) = 1.0138 / 1.0161 / 1.0186 / 1.0339
+# Six runs, two models, three recompute fractions: the real allocator overhead is
+# 1-3%. 1.24 was calibrated as measured-150 / raw-121 GB on ONE nsys profile and
+# then applied unconditionally to every configuration, including a 0.6B model on
+# a single GPU.
+#
+# WHAT IT WAS ACTUALLY COMPENSATING FOR. A factor fitted so that a TOTAL matches a
+# measurement will absorb any under-estimated term beneath it, and this one did:
+# EMPIRICAL_ACT_MULTIPLIER was low by 5.93x (see that constant). Two consequences
+# worth recording, because they are the general lesson:
+#   1. The compensation did not even work. With 1.24 applied, the model still
+#      UNDER-predicted the Llama-3.1-8B run -- roughly 67 GB against 85.8 GB
+#      really reserved at mbs=1 -- so the factor was neither right as
+#      fragmentation nor sufficient as compensation.
+#   2. It masked the defect. Because the total was in the right region, the
+#      activation term's 5.93x error did not surface until the term was measured
+#      SEPARATELY, by sweeping a variable only it depends on.
+#
+# 1.02 is the central value of the measured range, chosen rather than the 1.0339
+# maximum because that reading comes from the f=32/32 cell where max-allocated is
+# almost zero and the ratio is dominated by a small fixed residual.
+#
+# NOT MODELLED HERE, stated so it is not mistaken for included: the CUDA context
+# (~0.5-1 GB/GPU) sits OUTSIDE the PyTorch allocator, so it appears in neither
+# max-allocated nor max-reserved and is therefore absent from the ratio above. It
+# does occupy real device memory. See NCCL_MEM_BUF, whose old comment claimed to
+# bundle it.
+FRAGMENTATION_FACTOR = 1.02  # MEASURED max-reserved/max-allocated, 1.009-1.034
 
 # Memory utilization
 GPU_MEM_UTILIZATION_THRESHOLD = 0.92  # Use up to 92% of GPU memory

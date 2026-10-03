@@ -45,17 +45,31 @@ read them verbatim rather than guessing a longer form.
   **regardless of `PRECISION`**: `--compute_dtype fp8` is a GEMM precision, so
   Transformer Engine keeps the weights resident in BF16 and adds FP8 cast copies on
   top. This column does not halve at FP8.
-- `grad_gb` - Gradient memory (GB). Held at `GRAD_BYTES_PER_PARAM` (2, BF16)
-  **regardless of `PRECISION`**: an FP8 recipe uses FP8 only for the GEMM inputs and
-  reduces gradients in BF16 or higher, so this column does not halve at FP8.
+- `grad_gb` - Gradient memory (GB). Held at `GRAD_BYTES_PER_PARAM` (4, fp32)
+  **regardless of `PRECISION`**: an FP8 recipe uses FP8 only for the GEMM inputs,
+  so this column does not halve at FP8. It read 2 (BF16) until the resolved
+  `ConfigContainer.yaml` of real runs on this stack was checked --
+  `main_grads_dtype: torch.float32` with `use_distributed_optimizer: true`, i.e.
+  Megatron keeps a separate **fp32 main-gradient buffer** for bf16 training. This
+  column therefore doubled.
 - `optim_gb` - Optimizer state memory (GB)
 - `activation_gb` - Activation memory (GB). The ONLY memory column that changes with
   `PRECISION`: at FP8 both the d-proportional per-layer part AND the MoE
-  routed-expert part are lower by `ACT_PRECISION_SAVING_FRACTION` (3.5 of 12
+  routed-expert part are lower by `ACT_PRECISION_SAVING_FRACTION` (5.5 of 32
   B/element, measured), scaled by `(1 - recompute_fraction)` because a recomputed
   layer stores nothing for FP8 to halve. The expert part used to be excluded; jobs
   376/377 measured it saving at the same rate. See "Precision" below.
-- `buffer_gb` - Communication buffer memory (GB)
+
+  This column rose ~5.9x for a dense variant at `PP=1`: the stored multiplier was
+  measured at **32 B/element** against a shipped 12, and a blanket 0.45 discount
+  that applied whether or not any recompute was configured has been removed. The
+  two together had the model charging 5.4 effective B/element against a measured
+  32.03.
+- `buffer_gb` - Communication buffer memory (GB). Zero for a **single-GPU**
+  configuration: the NCCL workspace is now charged only when
+  `dp*tp*pp*cp > 1`, and the MoE all-to-all routing buffer only for MoE variants.
+  Both were previously unconditional, so a 1-GPU dense run was charged 6.0 GB of
+  NCCL workspace plus a routing buffer for a router it does not have.
 - `logits_gb` - Output-logits memory (GB): the `(micro, seq_len, vocab)` tensor plus
   its cross-entropy gradient, at `LOGITS_BYTES_PER_ELEMENT` (8) bytes per element.
   **Not** part of `activation_gb`, which is per-layer in `d` and never touches
@@ -73,7 +87,10 @@ read them verbatim rather than guessing a longer form.
   Worth reading because it is **not** `RECOMPUTE_NUM_LAYERS` alone: a chunk is
   `layers_per_gpu / VP` layers, so the same `recompute_num_layers = 1` is ~100% of
   activations at PP=4/VP=20 and ~1.25% at PP=1. See "Activation recomputation".
-- `total_gb` - Total memory required (GB), including a 1.24x fragmentation factor
+- `total_gb` - Total memory required (GB), including a 1.02x allocator-overhead
+  factor. This was 1.24x, calibrated as measured-150/raw-121 GB on a single nsys
+  profile; the quantity it names is directly measurable as
+  `max-reserved / max-allocated` and reads 1.009-1.034 across six real runs.
 - `gpu_capacity_gb` - GPU memory capacity (GB)
 - `headroom_gb` - Remaining memory (GB)
 - `utilization_pct` - Memory utilization percentage
@@ -363,14 +380,29 @@ half were invariant and 29.167% if it saved at the dense rate. The threshold of
 21.875% was recorded before the jobs ran.
 
 So at FP8 both a dense and an MoE variant's `activation_gb` fall by
-`ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element = 29.17%). Before this, MoE
+`ACT_PRECISION_SAVING_FRACTION` (5.5 of 32 B/element = **17.19%**). Before this, MoE
 variants fell by only 5.5-17.5% depending on their expert share.
 
-The expert half reuses the dense constant rather than getting its own. The implied
-expert figure is 3.581 B/element against 3.500, but `peak - steady` also contains
-the fp8 parameter all-gather transient described above, which exists only on the
-fp8 arm -- so 29.505% is a lower bound and the implied value ranges over 3.58-5.55
-B/element. The sign and order are settled; the magnitude is not.
+That fraction read 29.17% (3.5 of 12) until the activation multiplier itself was
+measured. Both numbers moved together and from the same real pretraining pair, so
+the absolute GB saving the model predicts is roughly unchanged -- it is the fraction
+that the earlier measurement never licensed. One consequence to be aware of when
+reading the 376/377 figures above: the 29.167% symmetric prediction they were
+compared against was computed at the old 12 B/element, where that model's two
+activation halves happened to be exactly equal. At 32 they are 72.7/27.3, symmetry
+predicts 17.19%, and it under-predicts that pair by 12.3 pp rather than matching it.
+Symmetry still stands because invariance predicts 12.50% and is further away, and
+because the correction moved the pair's predicted TOTAL from 24.0 B/element (40.7%
+low) to 44.0 against 40.45 measured.
+
+The expert half reuses the dense constant rather than getting its own. Holding the
+dense half at its measured 17.19%, that pair implies an expert-side saving of
+**62.4%** -- above the 50% ceiling an FP8 storage swap can deliver, which points at
+the expert element count being under-counted rather than at a missing expert saving
+constant. (At the old multiplier this read as 3.581 B/element against 3.500, an
+apparent 2.3% agreement.) `peak - steady` also contains the fp8 parameter
+all-gather transient described above, present only on the fp8 arm, so 29.505% is
+itself a lower bound. The sign and order are settled; the magnitude is not.
 
 `PRECISION` also still changes Phase 3 training time, via the throughput peak.
 

@@ -25,7 +25,7 @@ Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSe
 
 ## Key Features
 
-- **MoE-aware memory**: Dispatch buffers, NCCL workspace scaling with EP, fragmentation factor (1.24×), EP/DP optimizer sharding
+- **MoE-aware memory**: Dispatch buffers, NCCL workspace scaling with EP (charged only when world size > 1), measured allocator overhead (1.02×), EP/DP optimizer sharding
 - **Virtual Pipeline Parallelism (VP)**: In-flight micro-batch activation overhead modeling
 - **Pipeline communication (Phase 6)**: NVLink vs EFA send/recv with bubble percentage and exposed latency
 - **Multi-platform comparison**: Sweep node counts across hardware platforms
