@@ -50,10 +50,11 @@ read them verbatim rather than guessing a longer form.
   reduces gradients in BF16 or higher, so this column does not halve at FP8.
 - `optim_gb` - Optimizer state memory (GB)
 - `activation_gb` - Activation memory (GB). The ONLY memory column that changes with
-  `PRECISION`: at FP8 the d-proportional per-layer part is lower by
-  `ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element, measured), scaled by
-  `(1 - recompute_fraction)` because a recomputed layer stores nothing for FP8 to
-  halve. The MoE routed-expert part does **not** scale. See "Precision" below.
+  `PRECISION`: at FP8 both the d-proportional per-layer part AND the MoE
+  routed-expert part are lower by `ACT_PRECISION_SAVING_FRACTION` (3.5 of 12
+  B/element, measured), scaled by `(1 - recompute_fraction)` because a recomputed
+  layer stores nothing for FP8 to halve. The expert part used to be excluded; jobs
+  376/377 measured it saving at the same rate. See "Precision" below.
 - `buffer_gb` - Communication buffer memory (GB)
 - `logits_gb` - Output-logits memory (GB): the `(micro, seq_len, vocab)` tensor plus
   its cross-entropy gradient, at `LOGITS_BYTES_PER_ELEMENT` (8) bytes per element.
@@ -351,12 +352,25 @@ carefully: *disabling* that feature costs **+13.959 GB** of steady memory, so
 `fp8_param_gather=True` is worth about +12.6 GB net. "FP8 weight cast copies are not
 resident" holds **because** fp8 parameter storage nets them out, not structurally.
 
-The saving is applied to the d-proportional per-layer term only, **not** to the MoE
-routed-expert intermediate, which keeps `ACT_BYTES_PER_ELEMENT`. The measurement is on a
-dense model; extending it to the expert term by symmetry is the move that produced the
-error corrected above. So a dense variant's `activation_gb` falls by exactly
-`ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element = 29.17%) and an MoE variant's
-falls by less -- measured at 5.5-17.5% across this catalog.
+The saving is applied to the d-proportional per-layer term **and** to the MoE
+routed-expert intermediate. This section used to say the expert term was excluded,
+on the grounds that the measurement was on a dense model and extending it by
+symmetry was the move that produced the error corrected above. Jobs 376/377 settled
+it with a controlled bf16/fp8 pair on Qwen3-30B-A3B (100% MoE, 16 GPUs, EP=8,
+recompute and CUDA graphs off on both arms, resolved configs differing only in
+precision): activation saving **29.505%**, against 14.583% predicted if the expert
+half were invariant and 29.167% if it saved at the dense rate. The threshold of
+21.875% was recorded before the jobs ran.
+
+So at FP8 both a dense and an MoE variant's `activation_gb` fall by
+`ACT_PRECISION_SAVING_FRACTION` (3.5 of 12 B/element = 29.17%). Before this, MoE
+variants fell by only 5.5-17.5% depending on their expert share.
+
+The expert half reuses the dense constant rather than getting its own. The implied
+expert figure is 3.581 B/element against 3.500, but `peak - steady` also contains
+the fp8 parameter all-gather transient described above, which exists only on the
+fp8 arm -- so 29.505% is a lower bound and the implied value ranges over 3.58-5.55
+B/element. The sign and order are settled; the magnitude is not.
 
 `PRECISION` also still changes Phase 3 training time, via the throughput peak.
 

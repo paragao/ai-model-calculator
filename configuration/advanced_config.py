@@ -396,20 +396,55 @@ ACT_PRECISION_SAVING_FRACTION = (
 #     derivation the same perturbation moves 352 of 352 dense rows and takes the
 #     multiplier to 18, with the shipped default byte-identical in BOTH precisions.
 #
-# (b) "Both halves are now precision-invariant." Only the EXPERT half is. The dense
-#     half became precision-AWARE when ACT_PRECISION_SAVING_FRACTION shipped, and the
-#     table that used to sit here -- arguing that making activations cheaper under
-#     FP8 moved the prediction FURTHER from reality (ratio 0.9028 against a measured
-#     1.0873) -- was fitted to the Llama-70B LoRA pair, which a frozen-base arm later
-#     showed measures that saving at exactly 0% against 29.2% trainable. It could
-#     never have tested the term, so that argument is withdrawn, not merely outdated.
+# (b) "Both halves are now precision-invariant." NEITHER is, as of jobs 376/377.
+#     The dense half became precision-AWARE when ACT_PRECISION_SAVING_FRACTION
+#     shipped, and the expert half now takes the SAME saving (see the CLOSED note
+#     below). The table that used to sit here -- arguing that making activations
+#     cheaper under FP8 moved the prediction FURTHER from reality (ratio 0.9028
+#     against a measured 1.0873) -- was fitted to the Llama-70B LoRA pair, which a
+#     frozen-base arm later showed measures that saving at exactly 0% against 29.2%
+#     trainable. It could never have tested the term, so that argument is withdrawn,
+#     not merely outdated.
 #
-# The asymmetry that remains is deliberate but is NOT physical, and is the open gap
-# here: at FP8 the dense half saves 29.17% and the expert half saves nothing, because
-# the 3.5 B/element was measured on a DENSE model (Llama-3.1-8B) and there is no
-# measurement for a routed-expert intermediate. Do not close it by symmetry -- that
-# would invent a constant for an unmeasured term. What would close it: a controlled
-# bf16/fp8 pair on an MoE pretraining recipe.
+# THE EXPERT ASYMMETRY IS NOW CLOSED, AND BY MEASUREMENT RATHER THAN BY SYMMETRY.
+# This note used to read: "The asymmetry that remains is deliberate but is NOT
+# physical ... at FP8 the dense half saves 29.17% and the expert half saves nothing
+# ... Do not close it by symmetry -- that would invent a constant for an unmeasured
+# term. What would close it: a controlled bf16/fp8 pair on an MoE pretraining
+# recipe." That pair has now run, so the expert half takes the saving.
+#
+# MEASURED, Slurm jobs 376 (bf16) / 377 (fp8_cs) -- Qwen3-30B-A3B pretraining, the
+# catalog's own variant, 100% MoE at 48 layers, 16 GPUs on p5en, EP=8, recompute off
+# and CUDA graphs forced off on BOTH arms. The resolved ConfigContainer.yaml of the
+# two arms differ ONLY in precision fields.
+#
+#     ACT = peak max-allocated - steady mem-allocated
+#     bf16   68.652 - 52.363 = 16.289 GB
+#     fp8    63.847 - 52.364 = 11.483 GB      -> saving 29.505%
+#
+# The model was picked because its two halves are EXACTLY equal in bytes -- dense
+# d*m = 2048*12 = 24576 and expert topk*e_ffn*2*bytes = 8*768*2*2 = 24576 -- so the
+# competing hypotheses differ by precisely a factor of two:
+#
+#     experts precision-INVARIANT (the old behaviour) -> predicted saving 14.583%
+#     experts take the SAME saving as the dense half  -> predicted saving 29.167%
+#
+# Measured 29.505% lands 0.338 pp from symmetry and 14.921 pp from invariance,
+# against a refutation threshold of 21.875% recorded in the submitter's header
+# BEFORE the jobs were submitted, so this was a test and not a fit.
+#
+# The expert half reuses THIS constant instead of getting its own. The implied
+# expert figure is 3.581 B/element against the dense 3.500, but `peak - steady`
+# also contains the FP8 parameter all-gather transient, which exists only on the
+# fp8 arm and inflates ACT_fp8 -- so 29.505% is a LOWER bound and the implied value
+# ranges over 3.58-5.55 B/element depending on that transient. The sign and the
+# order are settled; the magnitude is not, so no second constant is invented.
+# Pinning it needs a further pair with fp8_param_gather disabled on the fp8 arm.
+#
+# Also corroborated here, incidentally: steady memory was 52.363 vs 52.364 GB and
+# Megatron's own "weight and optimizer=51312.68 MB" was IDENTICAL across the arms,
+# so the refuted FP8 WEIGHT term stays refuted on an MoE model too -- the first
+# test of that null outside dense Llama.
 #
 # CORRECTION (measured, Slurm jobs 348/349 on H200, TE 2.9.0, Float8CurrentScaling):
 # an earlier version of this note claimed the two terms were "not separable from a
