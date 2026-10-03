@@ -1620,12 +1620,21 @@ def test_moe_expert_activation_does_not_scale_with_precision():
     memory under full pretraining and that is now shipped as
     ACT_PRECISION_SAVING_FRACTION; see test_fp8_changes_only_the_activation_term.
 
-    What this test still pins, and why it matters MORE now: the FP8 saving is
-    measured on a DENSE model and is deliberately NOT extended to the expert
-    intermediate. Physically an expert GEMM input should save too, but there is no
-    measurement, and extending a dense figure by symmetry is the move that produced
-    the error corrected above. So the expert term keeps act_bytes_per_element and
-    must stay invariant to param_bytes.
+    What this test still pins, and what it NO LONGER claims. It still pins that the
+    expert intermediate's per-element BF16 size is 2 bytes and does not track
+    param_bytes -- that remains correct, because the FP8 saving is applied as a
+    separate SCALE (ACT_PRECISION_SAVING_FRACTION) rather than by shrinking this
+    constant.
+
+    It used to add that the saving was "measured on a DENSE model and is deliberately
+    NOT extended to the expert intermediate ... there is no measurement, and
+    extending a dense figure by symmetry is the move that produced the error
+    corrected above." There is now a measurement. Jobs 376/377 ran a controlled
+    bf16/fp8 pair on Qwen3-30B-A3B (100% MoE, EP=8, recompute and CUDA graphs off
+    both arms) and measured a 29.505% activation saving against 14.583% predicted by
+    invariance and 29.167% by symmetry -- so the expert half DOES take the saving,
+    and test_fp8_saving_reaches_the_moe_expert_term_too pins that. The two facts are
+    compatible: this constant stays at 2 and precision enters through the scale.
     """
     from utils.core_calculations import calculate_memory_for_micro
     from configuration.advanced_config import ACT_BYTES_PER_ELEMENT
@@ -1927,17 +1936,28 @@ def test_fp8_saving_and_recompute_are_substitutes_not_additive():
     )
 
 
-def test_fp8_saving_does_not_reach_the_moe_expert_term():
-    """The dense saving must NOT be extended to the MoE expert intermediate.
+def test_fp8_saving_reaches_the_moe_expert_term_too():
+    """The FP8 saving applies to the MoE expert intermediate as well as the dense half.
 
-    The 2x4 design is a DENSE Llama-3.1-8B. Applying its figure to the expert
-    intermediate would be exactly the symmetry argument that produced the error
-    this round corrected, so the expert term keeps act_bytes_per_element and the
-    saving applies only to the d-proportional part.
+    This test used to assert the OPPOSITE -- that a MoE variant's activation ratio
+    sat STRICTLY ABOVE the dense ratio, because the expert intermediate was held
+    precision-invariant. The grounds were that the 3.5 B/element figure came from a
+    DENSE model (Llama-3.1-8B), so extending it to experts would have invented a
+    constant for an unmeasured term.
 
-    A MoE variant's activation ratio must therefore sit STRICTLY between the dense
-    ratio and 1.0: lower than 1.0 because its own d-proportional part does save,
-    and higher than the dense ratio because its expert part does not.
+    That is now measured. Slurm jobs 376 (bf16) / 377 (fp8_cs), Qwen3-30B-A3B
+    pretraining on 16 GPUs at EP=8, recompute and CUDA graphs off on BOTH arms,
+    resolved configs differing only in precision fields:
+
+        ACT = peak max-allocated - steady mem-allocated
+        bf16  68.652 - 52.363 = 16.289 GB
+        fp8   63.847 - 52.364 = 11.483 GB    -> saving 29.505%
+
+    That model's two halves are exactly equal in bytes (d*m = 2048*12 = 24576 and
+    topk*e_ffn*2*bytes = 8*768*2*2 = 24576), so invariance predicted 14.583% and
+    symmetry predicted 29.167%. Measured 29.505% is 0.338 pp from symmetry and
+    14.921 pp from invariance, against a 21.875% threshold recorded before the jobs
+    ran. So the ratio must now be EXACTLY 1 - s, not strictly above it.
     """
     from utils.core_calculations import calculate_memory_for_micro
 
@@ -1946,9 +1966,10 @@ def test_fp8_saving_does_not_reach_the_moe_expert_term():
            "dense_ffn": 12288, "expert_ffn": 1536, "shared_each": 0,
            "router_each": 524_288, "expert_each": 18_874_368, "vocab": 151_936}
 
-    def act(saving):
+    def act(saving, variant=None):
         return calculate_memory_for_micro(
-            micro=2, model_mem_gb=16.0, variant=moe, dp=8, layers_per_gpu=94,
+            micro=2, model_mem_gb=16.0, variant=variant or moe, dp=8,
+            layers_per_gpu=94,
             zero_strategy=1, seq_len=4096, topk=8, param_bytes=2,
             empirical_act_multiplier=12,
             selective_act_checkpointing_multiplier=0.45,
@@ -1957,12 +1978,32 @@ def test_fp8_saving_does_not_reach_the_moe_expert_term():
             act_precision_saving_fraction=saving,
         )["activation"]
 
+    # NON-VACUITY FIRST. A variant whose expert term contributes nothing would
+    # satisfy the ratio assertion below for the wrong reason -- its activation would
+    # be pure dense. So prove the expert term is actually in the figure before
+    # asserting anything about how it scales.
+    no_experts = dict(moe, expert_ffn=0)
+    assert act(0.0) > act(0.0, no_experts), (
+        "the expert intermediate contributes nothing to this variant's activation, "
+        "so this test cannot distinguish the expert half saving from it being absent"
+    )
+
     ratio = act(s) / act(0.0)
-    assert 1.0 - s < ratio < 1.0, (
-        f"MoE activation ratio {ratio:.6f} must lie strictly between the dense "
-        f"{1.0 - s:.6f} and 1.0. At or below the dense value the saving has been "
-        f"applied to the expert intermediate too, which no measurement supports; "
-        f"at 1.0 the MoE path's own dense term is not saving at all."
+    assert abs(ratio - (1.0 - s)) < 1e-12, (
+        f"MoE activation ratio {ratio:.12f} must equal 1 - s = {1.0 - s:.12f} "
+        f"EXACTLY, because jobs 376/377 measured the expert intermediate saving at "
+        f"the same rate as the dense half (29.505% against 29.167% predicted by "
+        f"symmetry). A ratio strictly above it means the saving is reaching only "
+        f"the d-proportional half -- the refuted asymmetry; below it means the "
+        f"saving is being applied more than once."
+    )
+
+    # And the same ratio on a DENSE variant, which is what 'the same rate' means:
+    # the two halves are no longer distinguishable by precision.
+    dense_ratio = act(s, no_experts) / act(0.0, no_experts)
+    assert abs(dense_ratio - ratio) < 1e-12, (
+        f"dense ratio {dense_ratio:.12f} and MoE ratio {ratio:.12f} must now agree; "
+        f"they differ only if one half is scaled differently from the other"
     )
 
 

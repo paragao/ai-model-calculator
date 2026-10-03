@@ -554,11 +554,16 @@ def calculate_memory_for_micro(
         cp: Context parallelism degree. Shards the sequence across cp ranks, so
             every token-count-dependent term sees seq_len/cp per GPU.
         act_bytes_per_element: Bytes per activation element for the MoE EXPERT
-            intermediate only. Precision-invariant, deliberately: the FP8 activation
-            saving below is measured on a DENSE model and is not extended to the
-            expert term by symmetry. See ACT_BYTES_PER_ELEMENT in advanced_config.
-        act_precision_saving_fraction: Share of a STORED layer's d-proportional
-            activation bytes that FP8 saves. 0.0 at BF16, so the default is exactly
+            intermediate only. This is the BF16 per-element size of that tensor; the
+            FP8 saving is applied separately via act_precision_saving_fraction, which
+            now scales the expert half as well as the dense half. It used to be
+            described as deliberately precision-invariant, on the grounds that the
+            FP8 saving was measured on a dense model; jobs 376/377 measured it on a
+            100% MoE model and refuted that. See ACT_BYTES_PER_ELEMENT in
+            advanced_config.
+        act_precision_saving_fraction: Share of a STORED layer's activation bytes
+            that FP8 saves, applied to BOTH the d-proportional dense half and the
+            MoE expert half. 0.0 at BF16, so the default is exactly
             inert. Applies to the stored portion only, which makes FP8 and
             recompute SUBSTITUTES -- see resolve_recompute_scale and
             ACT_PRECISION_SAVING_FRACTION, measured at 3.5 of 12 B/element.
@@ -755,8 +760,14 @@ def calculate_memory_for_micro(
     #                  intermediates). Present on EVERY layer, dense or MoE alike.
     #                  Measured to shrink under FP8; takes act_precision_saving.
     #   expert part -- the MoE routed-expert intermediate, on MoE layers only.
-    #                  Precision-invariant here because the measurement is on a
-    #                  dense model; see act_bytes_per_element above.
+    #                  ALSO measured to shrink under FP8, at a rate indistinguishable
+    #                  from the dense half (jobs 376/377, Qwen3-30B-A3B: 29.505%
+    #                  against 29.167% predicted by symmetry). Takes the SAME saving.
+    #
+    # The two are still computed separately because their FORMULAS differ -- the
+    # dense half is d * multiplier and the expert half is topk * expert_ffn * 2 *
+    # act_bytes_per_element -- and because the recompute blend may yet be shown to
+    # differ between them. They no longer differ in PRECISION.
     #
     # Algebraically identical to the single aggregate this replaces: that branch
     # computed moe_layers*(d*m + e) + (L - moe_layers)*d*m, which is L*d*m +
@@ -766,6 +777,18 @@ def calculate_memory_for_micro(
     act_expert_full = 0.0
     if is_moe and moe_layers_per_gpu > 0:
         # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output)
+        #
+        # KNOWN GAP, pre-existing and NOT addressed here: `topk` arrives from the
+        # global project_config.TOPK (= 8), not from the variant's own `topk` field,
+        # so 3 of 11 MoE variants are computed at the wrong routing width --
+        # Llama-4-Scout-17B-16E and Llama-4-Maverick-17B-128E carry topk=1 and
+        # Qwen3.5-397B-A17B carries topk=10 (DeepSeek-V4 carries none at all). The
+        # same global reaches the routing-buffer and all-to-all terms below. Found
+        # while validating the symmetry fix: recovering the implied expert share
+        # algebraically from a before/after sweep agreed with the catalog EXACTLY on
+        # every variant whose own topk is 8 and disagreed on precisely those three.
+        # Fixing it changes memory for those variants, so it is a separate change
+        # with its own baselines rather than a drive-by edit here.
         expert_ffn = variant.get("expert_ffn", 0)
         act_expert_full = (
             moe_layers_per_gpu * seq_len * micro
@@ -787,8 +810,48 @@ def calculate_memory_for_micro(
         recompute_boundary_bytes_per_element,
         act_precision_saving_fraction,
     )
-    # Same recompute blend, no precision saving. Taken from the SAME helper rather
-    # than written out here, so the recompute halves cannot drift apart.
+    # Same recompute blend AND the same precision saving. Taken from the SAME helper
+    # rather than written out here, so neither the recompute halves nor the precision
+    # halves can drift apart.
+    #
+    # This call passed 0.0 as the saving until the MoE pair below. The expert
+    # intermediate was held precision-invariant because the 3.5 B/element figure was
+    # measured on a DENSE model (Llama-3.1-8B), and extending it to experts by
+    # symmetry would have invented a constant for an unmeasured term.
+    #
+    # MEASURED, jobs 376/377 -- Qwen3-30B-A3B (100% MoE, 48 layers), 16 GPUs, EP=8,
+    # recompute off and CUDA graphs forced off on BOTH arms, resolved configs
+    # differing only in precision fields:
+    #
+    #     ACT = peak max-allocated - steady mem-allocated
+    #     bf16  68.652 - 52.363 = 16.289 GB
+    #     fp8   63.847 - 52.364 = 11.483 GB   -> saving 29.505%
+    #
+    # The model was chosen because its two activation halves are EXACTLY equal --
+    # dense d*m = 2048*12 = 24576 B and expert topk*e_ffn*2*bytes = 8*768*2*2 =
+    # 24576 B -- so the two hypotheses differ by exactly a factor of two:
+    #
+    #     experts precision-INVARIANT (what this line used to encode):  14.583%
+    #     experts take the SAME saving as dense:                        29.167%
+    #
+    # Measured 29.505% sits 0.338 pp from the symmetric prediction and 14.921 pp
+    # from the invariant one, against a refutation threshold of 21.875% recorded
+    # before the jobs were submitted. So the asymmetry is refuted and the expert
+    # half takes the saving.
+    #
+    # The expert half gets the SAME constant rather than its own. The implied expert
+    # figure is 3.581 B/element against the dense 3.500, but `peak - steady` also
+    # contains the FP8 parameter all-gather transient, which exists only in the fp8
+    # arm and inflates ACT_fp8 -- so 29.505% is a LOWER bound and the implied figure
+    # ranges over 3.58-5.55 B/element depending on that transient's size. The sign
+    # and order are settled; the magnitude is not, so no second constant is invented.
+    # Pinning it needs a pair with fp8_param_gather disabled on the fp8 arm.
+    #
+    # Note the RECOMPUTE blend is still shared between the halves and is NOT
+    # validated by this pair, which ran at f=0. A recomputed MoE layer arguably
+    # stores no expert intermediate at all, while this helper charges it the same
+    # boundary-tensor blend as the dense half. That is a separate, unmeasured
+    # question -- deliberately left alone here rather than changed by inference.
     _, expert_act_scale = resolve_recompute_scale(
         layers_per_gpu,
         vp,
@@ -796,7 +859,7 @@ def calculate_memory_for_micro(
         recompute_num_layers,
         empirical_act_multiplier,
         recompute_boundary_bytes_per_element,
-        0.0,
+        act_precision_saving_fraction,
     )
 
     activation_mem = (
