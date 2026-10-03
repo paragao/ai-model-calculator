@@ -753,8 +753,10 @@ def calculate_memory_for_micro(
         logits_mem = live_tokens * logits_vocab * logits_bytes_per_element / 1e9
 
     # --- Activation memory ---
-    # Split into the two parts that behave DIFFERENTLY under precision, rather than
-    # one aggregate:
+    # Split into two parts whose FORMULAS differ, rather than one aggregate. This
+    # sentence read "the two parts that behave DIFFERENTLY under precision" until
+    # jobs 376/377, which is now contradicted three lines below -- they behave the
+    # SAME under precision and differ only in how each is computed:
     #
     #   dense part  -- the d-proportional per-layer cost (attention and MLP
     #                  intermediates). Present on EVERY layer, dense or MoE alike.
