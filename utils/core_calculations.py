@@ -525,6 +525,7 @@ def calculate_memory_for_micro(
     pp=1,
     vp=1,
     cp=1,
+    tp=1,
     act_bytes_per_element=2,
     recompute_granularity=None,
     recompute_num_layers=0,
@@ -566,7 +567,10 @@ def calculate_memory_for_micro(
             MoE expert half. 0.0 at BF16, so the default is exactly
             inert. Applies to the stored portion only, which makes FP8 and
             recompute SUBSTITUTES -- see resolve_recompute_scale and
-            ACT_PRECISION_SAVING_FRACTION, measured at 3.5 of 12 B/element.
+            ACT_PRECISION_SAVING_FRACTION, measured at 5.5 of 32 B/element
+            (17.19%). It read 3.5 of 12 (29.17%) until the multiplier was
+            re-measured; both the base and the saved bytes come from the same real
+            pretraining pair now.
         recompute_granularity: None (store every layer's activations, the default
             and the behaviour before this existed) or "full" (recompute whole
             blocks, as recompute_granularity="full" in a Megatron/NeMo recipe).
@@ -762,9 +766,17 @@ def calculate_memory_for_micro(
     #                  intermediates). Present on EVERY layer, dense or MoE alike.
     #                  Measured to shrink under FP8; takes act_precision_saving.
     #   expert part -- the MoE routed-expert intermediate, on MoE layers only.
-    #                  ALSO measured to shrink under FP8, at a rate indistinguishable
-    #                  from the dense half (jobs 376/377, Qwen3-30B-A3B: 29.505%
-    #                  against 29.167% predicted by symmetry). Takes the SAME saving.
+    #                  ALSO measured to shrink under FP8 (jobs 376/377,
+    #                  Qwen3-30B-A3B: 29.505% measured). Takes the SAME saving.
+    #
+    #                  The "indistinguishable from the dense half" reading of that
+    #                  pair was CONDITIONAL ON THE OLD 12 B/element multiplier,
+    #                  which made symmetry predict 29.167%. At the measured 32 the
+    #                  same symmetry predicts 17.19% for that run, so it now
+    #                  under-predicts by 12.3 pp. Symmetry is still the better of
+    #                  the two options and stands -- invariance predicts 12.50%,
+    #                  further away -- but see ACT_PRECISION_SAVED_BYTES_PER_ELEMENT
+    #                  in advanced_config for what the residual now implies.
     #
     # The two are still computed separately because their FORMULAS differ -- the
     # dense half is d * multiplier and the expert half is topk * expert_ffn * 2 *
@@ -829,25 +841,38 @@ def calculate_memory_for_micro(
     #     bf16  68.652 - 52.363 = 16.289 GB
     #     fp8   63.847 - 52.364 = 11.483 GB   -> saving 29.505%
     #
-    # The model was chosen because its two activation halves are EXACTLY equal --
-    # dense d*m = 2048*12 = 24576 B and expert topk*e_ffn*2*bytes = 8*768*2*2 =
-    # 24576 B -- so the two hypotheses differ by exactly a factor of two:
+    # The model was chosen because its two activation halves were EXACTLY equal AT
+    # THE MULTIPLIER THEN SHIPPED -- dense d*m = 2048*12 = 24576 B and expert
+    # topk*e_ffn*2*bytes = 8*768*2*2 = 24576 B -- so the two hypotheses differed by
+    # exactly a factor of two:
     #
     #     experts precision-INVARIANT (what this line used to encode):  14.583%
     #     experts take the SAME saving as dense:                        29.167%
     #
-    # Measured 29.505% sits 0.338 pp from the symmetric prediction and 14.921 pp
+    # Measured 29.505% sat 0.338 pp from the symmetric prediction and 14.921 pp
     # from the invariant one, against a refutation threshold of 21.875% recorded
     # before the jobs were submitted. So the asymmetry is refuted and the expert
     # half takes the saving.
     #
-    # The expert half gets the SAME constant rather than its own. The implied expert
-    # figure is 3.581 B/element against the dense 3.500, but `peak - steady` also
-    # contains the FP8 parameter all-gather transient, which exists only in the fp8
-    # arm and inflates ACT_fp8 -- so 29.505% is a LOWER bound and the implied figure
-    # ranges over 3.58-5.55 B/element depending on that transient's size. The sign
-    # and order are settled; the magnitude is not, so no second constant is invented.
-    # Pinning it needs a pair with fp8_param_gather disabled on the fp8 arm.
+    # THAT NEAR-EXACT AGREEMENT DID NOT SURVIVE THE MULTIPLIER BEING MEASURED.
+    # At the corrected 32 B/element the halves are no longer equal -- dense
+    # 2048*32 = 65536 B against the same expert 24576 B, a 72.7/27.3 split -- and
+    # symmetry now predicts 17.19% for that run against the same measured 29.505%,
+    # i.e. UNDER by 12.3 pp where it once looked 0.34 pp over. The decision stands
+    # because invariance is worse still (12.50%), and because the correction moved
+    # the TOTAL much closer: 44.0 B/element predicted against 40.45 measured, where
+    # the old constants predicted 24.0, low by 40.7%.
+    #
+    # The expert half gets the SAME constant rather than its own. Holding the dense
+    # half at its measured 17.19%, this pair implies an expert-side saving of 62.4%
+    # -- which EXCEEDS the 50% ceiling an FP8 storage swap can deliver, so the
+    # residual is more likely an under-counted expert ELEMENT count than a missing
+    # expert saving constant. `peak - steady` also contains the FP8 parameter
+    # all-gather transient, present only in the fp8 arm, so 29.505% is itself a
+    # LOWER bound. Sign and order are settled; the magnitude is not, and no second
+    # constant is invented here. Pinning it needs a pair with fp8_param_gather
+    # disabled on the fp8 arm, plus a check of the expert element count against a
+    # gate/up/down decomposition.
     #
     # Note the RECOMPUTE blend is still shared between the halves and is NOT
     # validated by this pair, which ran at f=0. A recomputed MoE layer arguably
@@ -873,7 +898,10 @@ def calculate_memory_for_micro(
     # Each micro-batch occupies layers_per_virtual_chunk = layers_per_gpu / VP layers.
     # Total layer-activations stored = (PP-1) * layers_per_gpu (independent of VP).
     # But lower VP = fewer but larger chunks = less overhead from per-chunk metadata.
-    if vp > 1 and pp > 1:
+    # `vp and` guards vp=None, which a real recipe uses to mean "no interleaving"
+    # and which raised TypeError here on None > 1 for any direct caller. The
+    # internal caller passes VP=1 so the shipped sweep never hit it.
+    if vp and vp > 1 and pp > 1:
         layers_per_virtual_chunk = layers_per_gpu // vp
         inflight_micros = (pp - 1) * vp  # warmup micro-batches
         # Same dense/expert split as the base term above, so the precision saving
@@ -898,10 +926,22 @@ def calculate_memory_for_micro(
         activation_mem += vp_act_overhead
 
     # --- Buffer memory ---
-    # All-to-all routing buffers
-    a2a_buf = (
-        seq_len * micro * topk * d * fwd_bwd_routing_buff_passes * param_bytes / 1e9
-    )
+    # All-to-all routing buffers.
+    #
+    # GATED ON is_moe THIS ROUND. A dense model has no router and no expert
+    # all-to-all, so it has no routing buffer -- but this term was computed
+    # unconditionally from the GLOBAL topk (8), so every dense variant was charged
+    # one. It is small but it is not nothing: on a 0.6B model at seq 4096 it is
+    # 0.134 GB, and on a dense 70B it is 0.537 GB per micro-batch.
+    #
+    # Same oversight as the NCCL workspace below and the same evidence for it:
+    # moe_dispatch_buf, immediately after, is already gated on `is_moe and
+    # experts_per_gpu > 0`. Only this one was not.
+    a2a_buf = 0.0
+    if is_moe:
+        a2a_buf = (
+            seq_len * micro * topk * d * fwd_bwd_routing_buff_passes * param_bytes / 1e9
+        )
 
     # MoE dispatch buffers: send + recv permutation buffers per MoE layer
     moe_dispatch_buf = 0.0
@@ -911,8 +951,25 @@ def calculate_memory_for_micro(
             * (topk / experts_per_gpu) / 1e9
         )
 
-    # NCCL workspace: base + scaling with EP group size
-    nccl_workspace = nccl_mem_buf + nccl_ep_scaling_factor * max(0, ep - 1)
+    # NCCL workspace: base + scaling with EP group size.
+    #
+    # GATED ON WORLD SIZE. A single-GPU configuration has no communicator, so it
+    # pays no NCCL workspace. This term used to be ungated while every other
+    # buffer component here was gated on the parallelism that creates it
+    # (moe_dispatch_buf on experts_per_gpu, pp_buf on pp > 1), so a 1-GPU run was
+    # charged the full nccl_mem_buf -- 6.00 GB, which on a 0.6B model was 34% of
+    # the raw total and flipped micro-batch 4 from fitting to OOM.
+    #
+    # tp is included because tp > 1 is by definition multi-GPU; it reaches this
+    # function only because this round started forwarding it from
+    # calculate_viable_micro_batch_sizes, which had it in scope and dropped it.
+    # ep is deliberately NOT a factor: expert parallelism is carved out of the
+    # data-parallel group, so ep > 1 already implies dp > 1 and multiplying by it
+    # would overcount the world. It still scales the workspace below.
+    world_size = dp * tp * pp * cp
+    nccl_workspace = 0.0
+    if world_size > 1:
+        nccl_workspace = nccl_mem_buf + nccl_ep_scaling_factor * max(0, ep - 1)
 
     # PP pipeline send/recv buffers: each stage needs send+recv buffers for activations
     pp_buf = 0.0
@@ -1016,6 +1073,7 @@ def calculate_viable_micro_batch_sizes(
             ep=EP,
             pp=PP,
             vp=VP,
+            tp=tp,
             nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
             fragmentation_factor=FRAGMENTATION_FACTOR,
             experts_per_gpu=experts_per_gpu,

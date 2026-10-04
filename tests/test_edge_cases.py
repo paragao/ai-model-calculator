@@ -2105,13 +2105,18 @@ def test_act_bytes_per_element_is_live_for_dense_variants():
     these bytes. That made it DEAD for all 11 dense variants in the catalog:
     perturbing it 2 -> 3 moved 0 of 352 dense rows and all 352 MoE rows, and left
     EMPIRICAL_ACT_MULTIPLIER at 12. It is now derived, so the same perturbation
-    moves 352 of 352 dense rows and takes the multiplier to 18.
+    moves every dense row and rescales the multiplier with it.
 
     The AST half is what makes this non-vacuous. Asserting only
         EMPIRICAL_ACT_MULTIPLIER == ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
-    passes just as happily when someone re-hardcodes the multiplier back to 12,
-    because 6 * 2 == 12 -- the same vacuous-assertion trap that let
-    GRAD_BYTES * PARAM_BYTES == GRAD_BYTES_PER_PARAM vouch for nothing.
+    passes just as happily when someone re-hardcodes the multiplier to a literal,
+    because the product is the same either way -- the same vacuous-assertion trap
+    that let GRAD_BYTES * PARAM_BYTES == GRAD_BYTES_PER_PARAM vouch for nothing.
+
+    The worked figures above are the ORIGINAL ones, from when the count was 6 and
+    the multiplier 12; the count is now a measured 16 and the multiplier 32, so
+    "takes the multiplier to 18" no longer describes a 2 -> 3 perturbation. The
+    mechanism the test protects is unchanged.
     """
     import ast
 
@@ -2128,9 +2133,19 @@ def test_act_bytes_per_element_is_live_for_dense_variants():
         )
 
     # The derivation must not have changed the shipped values.
-    assert EMPIRICAL_ACT_MULTIPLIER == 12, EMPIRICAL_ACT_MULTIPLIER
+    #
+    # These were 12 / 2 / 6 and are now 32 / 2 / 16. The tensor count was MEASURED
+    # two independent ways on real Llama-3.1-8B pretraining and the old 6 was a
+    # hand count, low by 2.67x: a 4-point recompute-fraction sweep (jobs
+    # 352/354/361/363) gives 32.034 B/element with a 0.0004 GB worst residual over
+    # a 34.40 GB range, and a micro-batch sweep (jobs 387-390) gives 36.178, with
+    # mbs=4 and mbs=8 CUDA-OOMing exactly as the pre-registered refutation of the
+    # old constant required. If this assertion fails, update the prose in
+    # advanced_config's ACT_INTERMEDIATES_PER_ELEMENT block, which carries both
+    # sweeps, rather than only the number here.
+    assert EMPIRICAL_ACT_MULTIPLIER == 32, EMPIRICAL_ACT_MULTIPLIER
     assert RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT == ACT_BYTES_PER_ELEMENT == 2
-    assert ACT_INTERMEDIATES_PER_ELEMENT == 6
+    assert ACT_INTERMEDIATES_PER_ELEMENT == 16
 
     # Behavioural half: a DENSE variant's activation must scale exactly with the
     # byte figure. Driven through the production function, and the expected ratio is
@@ -2165,3 +2180,184 @@ def test_act_bytes_per_element_is_live_for_dense_variants():
         f"({at2} -> {at3}). A ratio of 1.0 means the dense term is still "
         f"independent of the byte figure."
     )
+
+
+def _mem_world(**over):
+    """Drive the production memory function with a dense single-GPU baseline.
+
+    Every caller overrides only what it is testing, so a figure that moves is
+    attributable to that one knob.
+    """
+    base = dict(
+        micro=1,
+        model_mem_gb=1.19,
+        variant=DENSE_VARIANT,
+        dp=1,
+        layers_per_gpu=DENSE_VARIANT["layers"],
+        zero_strategy=1,
+        seq_len=4096,
+        topk=8,
+        param_bytes=PARAM_BYTES,
+        empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
+        selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+        fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
+        nccl_mem_buf=NCCL_MEM_BUF,
+        optim_bytes=OPTIM_BYTES,
+        nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
+        fragmentation_factor=1.0,
+        grad_bytes=GRAD_BYTES,
+        ep=1,
+        pp=1,
+        vp=1,
+        cp=1,
+        tp=1,
+    )
+    base.update(over)
+    return calculate_memory_for_micro(**base)
+
+
+def test_nccl_workspace_is_gated_on_world_size():
+    """A single-GPU configuration has no communicator, so it pays no NCCL workspace.
+
+    This term used to be charged unconditionally while every other buffer component
+    beside it was gated on the parallelism that creates it. On a 0.6B model on one
+    g5.8xlarge that was 6.00 GB of a 17.41 GB raw total -- 34% -- and it decided the
+    answer: micro-batch 4 read as OOM with it and fits without it.
+
+    Isolated by DIFFERENCING against the same configuration with the constant
+    zeroed, so the assertion does not depend on what else the buffer contains.
+    """
+    def nccl_only(**par):
+        return (
+            _mem_world(**par)["buffer"]
+            - _mem_world(**{**par, "nccl_mem_buf": 0.0, "nccl_ep_scaling_factor": 0.0})["buffer"]
+        )
+
+    assert abs(nccl_only(dp=1, tp=1, pp=1, cp=1)) < 1e-12, (
+        "a single-GPU config must be charged NO NCCL workspace, got "
+        f"{nccl_only(dp=1, tp=1, pp=1, cp=1)} GB"
+    )
+
+    # Any one degree above 1 means more than one rank, so the workspace is real.
+    for par in (
+        dict(dp=2, tp=1, pp=1, cp=1),
+        dict(dp=1, tp=8, pp=1, cp=1),
+        dict(dp=1, tp=1, pp=2, cp=1),
+        dict(dp=1, tp=1, pp=1, cp=2),
+    ):
+        got = nccl_only(**par)
+        assert abs(got - NCCL_MEM_BUF) < 1e-12, (
+            f"world size {par['dp'] * par['tp'] * par['pp'] * par['cp']} must be "
+            f"charged the full {NCCL_MEM_BUF} GB workspace, got {got} GB for {par}"
+        )
+
+    # tp is the degree that only reaches this function because this round started
+    # forwarding it; without that a tp=8 single-process config reads as world 1.
+    assert abs(nccl_only(dp=1, tp=8, pp=1, cp=1) - NCCL_MEM_BUF) < 1e-12
+
+
+def test_a2a_routing_buffer_only_charged_for_moe():
+    """A dense model has no router, so it has no all-to-all routing buffer.
+
+    This was computed unconditionally from the GLOBAL topk, so every dense variant
+    paid one -- 0.134 GB on a 0.6B model at seq 4096, 0.537 GB on a dense 70B per
+    micro-batch. moe_dispatch_buf immediately after it was already gated.
+
+    Driven at world size 1 so the NCCL workspace is zero and the buffer total is
+    attributable to this term.
+    """
+    dense = _mem_world(variant=DENSE_VARIANT, dp=1, tp=1, pp=1, cp=1)
+    assert abs(dense["buffer"]) < 1e-12, (
+        f"a dense variant at world size 1 must have NO buffer memory, got "
+        f"{dense['buffer']} GB -- an ungated MoE routing buffer is the usual cause"
+    )
+
+    # Non-vacuity: the same call on an MoE variant must charge something, otherwise
+    # this test would pass with the routing buffer deleted outright.
+    moe = _mem_world(
+        variant=MOE_VARIANT,
+        layers_per_gpu=MOE_VARIANT["layers"],
+        experts_per_gpu=8,
+        dp=1, tp=1, pp=1, cp=1,
+    )
+    assert moe["buffer"] > 0.0, (
+        "an MoE variant must still be charged a routing buffer; a zero here means "
+        "the term was removed rather than gated"
+    )
+
+
+def test_gradients_are_fp32_main_grads():
+    """Megatron keeps an fp32 main-gradient buffer for bf16 training.
+
+    Read from the resolved ConfigContainer.yaml of real runs on this stack:
+    main_grads_dtype=torch.float32 with use_distributed_optimizer=true. So the
+    resident cost is 4 bytes/param, not the 2 this repo assumed.
+
+    The product assertion is the one that matters: GRAD_BYTES is a multiplier on
+    parameter memory which already carries PARAM_BYTES, so what must hold is
+    GRAD_BYTES * PARAM_STORAGE_BYTES == GRAD_BYTES_PER_PARAM. That pairing is
+    itself vacuous on its own -- it is true for any value -- so the literal is
+    pinned too, with the evidence in this docstring.
+    """
+    assert GRAD_BYTES_PER_PARAM == 4, (
+        f"gradients are fp32 main grads (4 B/param), got {GRAD_BYTES_PER_PARAM}. "
+        f"If this changes, update the measured-dtype block in advanced_config."
+    )
+    assert abs(GRAD_BYTES * PARAM_STORAGE_BYTES - GRAD_BYTES_PER_PARAM) < 1e-12
+
+    # Behavioural half: doubling the per-param figure must double grad memory, and
+    # must not touch any other term.
+    lo = _mem_world(grad_bytes=GRAD_BYTES)
+    hi = _mem_world(grad_bytes=GRAD_BYTES * 2)
+    assert abs(hi["grad"] / lo["grad"] - 2.0) < 1e-12
+    for term in ("model", "optim", "activation", "buffer"):
+        assert abs(hi[term] - lo[term]) < 1e-12, (
+            f"changing grad_bytes moved {term}, which it must not"
+        )
+
+
+def test_selective_checkpointing_multiplier_is_inert():
+    """The 0.45 blanket activation discount must stay removed.
+
+    It was applied unconditionally at the single activation site, with no branch on
+    whether any recompute was configured, so a recipe with
+    recompute_granularity=None took a 55% discount it had not earned. It cannot be
+    rescued as a selective-recompute factor either: resolve_recompute_scale accepts
+    only None and "full" and RAISES on anything else, so selective recompute is
+    unreachable and there is no configuration in which 0.45 is correct.
+
+    Together with the measured multiplier this is what took the effective figure
+    from 5.4 to 32 B/element against a measured 32.03.
+    """
+    assert SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER == 1.0, (
+        f"the selective multiplier must be exactly inert, got "
+        f"{SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER}. A non-1.0 value re-introduces a "
+        f"2.2x activation error on every row; see advanced_config before changing it."
+    )
+
+    # Non-vacuity: the parameter must still REACH the activation term, so that a
+    # future non-1.0 value is not silently ignored. If this ratio is 1.0 the
+    # constant is dead rather than inert, which is a different and worse state.
+    full = _mem_world(selective_act_checkpointing_multiplier=1.0)["activation"]
+    half = _mem_world(selective_act_checkpointing_multiplier=0.5)["activation"]
+    assert full > 0 and abs(half / full - 0.5) > 1e-12 or abs(half / full) < 1.0, (
+        "the selective multiplier no longer reaches the activation term"
+    )
+    assert half < full, (
+        "the selective multiplier is dead: halving it did not reduce activation "
+        "memory, so a future wrong value would be invisible"
+    )
+
+
+def test_vp_none_does_not_raise():
+    """vp=None means "no interleaving" in a real recipe and must not crash.
+
+    The VP in-flight branch tested `vp > 1`, which raises TypeError on None. The
+    internal sweep passes VP=1 so it never hit this; any direct caller did.
+    """
+    got = _mem_world(vp=None, pp=1)
+    assert got["total"] > 0
+
+    # The VP overhead branch requires pp > 1 as well, so None must be safe there too.
+    got2 = _mem_world(vp=None, pp=2)
+    assert got2["total"] > 0
