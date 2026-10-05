@@ -925,13 +925,22 @@ def run(variants, hardware, *, report=False):
             print(f"{'#' * 140}")
 
             for v in variants:
-                # Use best micro batch size from Phase 1 results if available
+                # Use best micro batch size from Phase 1 results if available.
+                #
+                # MATCHED TO THIS HARDWARE. This read phase1_result[-1], which is
+                # always the LAST of the 32 HARDWARE entries ("16 g6e"), while the
+                # enclosing loop walks all 32 -- so one hardware's best_micro was
+                # applied to every one of them, and `MBS=` printed constant across
+                # every block. On "512 p5" that reported 1 micro-batch/step and a
+                # 63.6% bubble, which then propagated into a phase 3 recommendation.
                 phase1_result = all_results["variants"].get(v["name"], [])
                 best_micro = 1
-                if phase1_result:
-                    last_result = phase1_result[-1] if phase1_result else None
-                    if last_result and last_result.get("best_micro"):
-                        best_micro = last_result["best_micro"]
+                matched = next(
+                    (r for r in phase1_result if r.get("hardware") == hw["name"]),
+                    None,
+                )
+                if matched and matched.get("best_micro"):
+                    best_micro = matched["best_micro"]
 
                 # GBS from tokens_per_batch / seq_len (per-variant sequence length)
                 v_seq_len = v.get("seq_len", SEQ_LEN)

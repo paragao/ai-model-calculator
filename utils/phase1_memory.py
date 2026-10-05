@@ -81,7 +81,8 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
         PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
-        tp=TP
+        tp=TP,
+        pp=PP,
     )
 
     # Try to calculate with micro=1 and best ZeRO strategy attempted
@@ -233,7 +234,8 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     model_mem_gb = calculate_model_memory_gb(
         variant, layers_per_gpu, experts_per_gpu,
         PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
-        tp=TP
+        tp=TP,
+        pp=PP,
     )
 
     # Try ZeRO-1 first (better efficiency)
@@ -359,7 +361,7 @@ def generate_recommendations(all_results):
     for variant_name, results_list in all_results["variants"].items():
         # Find best configuration for this variant
         best_config = None
-        best_headroom = -1
+        best_headroom = float("inf")
         oom_count = 0
 
         for result in results_list:
@@ -367,7 +369,15 @@ def generate_recommendations(all_results):
                 oom_count += 1
             elif result["efficiency_metrics"]:
                 headroom = result["efficiency_metrics"]["wasted_headroom"]
-                if headroom > best_headroom:
+                # TIGHTEST FIT, not loosest. This read `headroom > best_headroom`,
+                # selecting the config with the MOST unused memory and calling it
+                # best_config, while model_calculations.py:130 uses `<` for the
+                # same concept. The recommendation below then said "micro=1 limits
+                # throughput -- consider hardware with more memory" on the basis
+                # of whichever preset had the most memory left over: for
+                # Qwen2.5-72B that was `1 p6e-gb200` with 55.6 GB wasted, about
+                # the largest-memory preset in the catalog. Exactly backwards.
+                if headroom < best_headroom:
                     best_headroom = headroom
                     best_config = result
 

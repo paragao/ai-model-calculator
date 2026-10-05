@@ -6,6 +6,32 @@ Tests Qwen3-235B-A22B on 64 B300 GPUs (512 GPUs) against nsys profiling data.
 Validation targets (from actual B300 profiling):
 - PP=8, VP=4, EP=8, TP=1, MBS=1, seq=4096: should estimate ~140-160 GB (actual: 150 GB)
 - PP=8, VP=2, EP=8, TP=1, MBS=1, seq=4096: should estimate ~160-180 GB (actual: 171 GB)
+
+KNOWN RESIDUAL -- scenario 2 FAILS at 152.5 GB against its 160-180 GB target,
+and that is recorded rather than papered over.
+
+This harness used to pass BOTH scenarios (152.1 and 162.7 GB). It did so partly
+because calculate_model_memory_gb charged BOTH embedding tables on EVERY
+pipeline stage, which is not where Megatron puts them -- input embedding on
+stage 0, LM head on stage PP-1, nothing on the middle stages. The proof the old
+behaviour was wrong is the fleet-sum invariant: summing the old per-GPU figure
+across stages gave 30.77 GB for Llama-3.1-8B against a true whole-model 16.06
+GB, i.e. the model's parameters counted pp times over. Correcting the placement
+removes ~10.2 GB per GPU here and drops scenario 2 by exactly that.
+
+So the target was being met by a compensating error. The range has NOT been
+widened to restore a green check -- fitting a bound to a known-wrong term is how
+FRAGMENTATION_FACTOR ended up at 1.24 while the activation multiplier was 5.93x
+low underneath it.
+
+The residual is ~7.5 GB of UNDER-prediction on a 100% MoE model at VP=2, and the
+leading candidate is independently suspected: the MoE expert activation element
+count appears ~2.12x low (re-apportioning the dense/expert activation split
+moves the measured jobs-376/377 expert FP8 saving from an impossible 53.6% to a
+feasible 36.8%). That defect ADDS expert activation, which is the right sign and
+plausibly the right magnitude for this gap. Settling it closes both at once.
+Until then this scenario is expected to fail, and a PASS here would mean
+something re-introduced a compensating over-count.
 """
 
 import sys
@@ -43,6 +69,7 @@ def run_scenario(vp, mbs, label, target_low, target_high):
         variant, layers_per_gpu, experts_per_gpu,
         PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES,
         tp=_TP,
+        pp=_PP,
     )
 
     mem = calculate_memory_for_micro(

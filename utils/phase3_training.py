@@ -170,16 +170,33 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
             gbs = dp * micro * accum  # global batch in sequences
             tok_batch = gbs * seq_len
 
-            # Skip configurations that exceed the max tokens-per-batch cap
-            if tok_batch > MAX_TOKENS_PER_BATCH:
+            # Skip configurations that exceed the max tokens-per-batch cap.
+            #
+            # DERIVED, the same bound phase 2 applies, not the fixed
+            # MAX_TOKENS_PER_BATCH = 600e6 this used to read. The two disagreed:
+            # the constant is 8x looser than MIN_STEPS implies (phase2_batch.py
+            # already said so in a comment), so phase 3 exported exactly 47 rows
+            # that phase 2 refuses -- 134.2M to 268.4M tokens/batch, running
+            # 55,879 to 111,758 steps against MIN_STEPS = 200,000, i.e. up to
+            # 3.6x BELOW the minimum step count. That contradicted
+            # compute_absurd_step_ceiling's own claim that none can.
+            max_tok_batch = compute_max_tokens_per_batch(TOTAL_TOKENS, dp, seq_len)
+            if tok_batch > max_tok_batch:
                 continue
 
             steps = int(TOTAL_TOKENS / tok_batch) if tok_batch > 0 else 0
+
+            # Phase 3 never applied the absurdity check that phase 2 applies to
+            # the same arithmetic, so 2,096 of 4,016 rows (52.2%) exceeded it
+            # unflagged. Carried here so a consumer can see it rather than
+            # having to re-derive it from `steps`.
+            steps_absurd = steps > compute_absurd_step_ceiling(TOTAL_TOKENS)
 
             platform_name = f"{hw['name']} (m{micro}/a{accum}, {tok_batch / 1e6:.1f}M)"
 
             platforms.append({
                 "name": platform_name,
+                "steps_absurd": steps_absurd,
                 "gpus": total_gpus,
                 "zero": zero_config["zero"],
                 "eff": zero_config["eff"],
@@ -227,8 +244,9 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
             "platforms": [],
             "oom": True,
             "oom_reason": (
-                f"No micro×accum combination stays under the "
-                f"{MAX_TOKENS_PER_BATCH / 1e6:.0f}M tokens/batch cap"
+                f"No micro×accum combination stays under the derived "
+                f"{compute_max_tokens_per_batch(TOTAL_TOKENS, dp, seq_len) / 1e6:.0f}M "
+                f"tokens/batch cap"
             ),
         }
 
@@ -593,8 +611,9 @@ def export_training_results_csv(training_results, filename):
     with open(filename, 'w', newline='') as f:
         fieldnames = [
             'variant', 'platform', 'gpus', 'zero', 'micro', 'accum', 'seq_len', 'gbs',
-            'tok_batch', 'steps', 'est_months', 'rel_speed', 'months_low',
-            'months_high', 'bubble_pct', 'comm_overhead_pct', 'efficiency_rating'
+            'tok_batch', 'steps', 'steps_absurd', 'est_months', 'rel_speed',
+            'months_low', 'months_high', 'bubble_pct', 'comm_overhead_pct',
+            'efficiency_rating'
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -614,6 +633,7 @@ def export_training_results_csv(training_results, filename):
                     'gbs': platform.get('gbs', ''),
                     'tok_batch': platform['tok_batch'],
                     'steps': platform['steps'],
+                    'steps_absurd': platform.get('steps_absurd', ''),
                     'est_months': platform.get('est_months', 0),
                     'rel_speed': '' if rel_speed is None else rel_speed,
                     'months_low': platform.get('months_low', 0),

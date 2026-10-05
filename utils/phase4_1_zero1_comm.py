@@ -54,6 +54,7 @@ def analyze_zero1_communication_overhead(variant, hw, dp_values, layers_per_gpu,
         FFN_WEIGHT_MATRICES,
         NUM_EMBEDDINGS_TABLES,
         tp=TP,
+        pp=PP,
     )
 
     # Check viable micro batch sizes with ZeRO-1

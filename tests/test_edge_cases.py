@@ -19,8 +19,17 @@ from utils.core_calculations import (
     calculate_model_memory_gb,
     calculate_memory_for_micro,
     resolve_topk,
+    calculate_training_time_months_with_overhead,
 )
 from utils.phase5_alltoall_comm import calculate_alltoall_metrics
+from utils.phase7_tp_comm import calculate_tp_communication
+from utils.phase8_inference import (
+    kv_cache_bytes_per_token,
+    calculate_inference_memory,
+    calculate_ttft_ms,
+    calculate_tpot_ms,
+    size_for_slo,
+)
 from utils.phase6_pp_comm import calculate_pp_communication
 from utils.phase4_zero2_comm import calculate_communication_metrics
 from utils.phase4_1_zero1_comm import calculate_zero1_metrics
@@ -969,7 +978,13 @@ def test_higher_tp_never_raises_moe_optimizer_memory():
     recovered_fracs, optims = [], []
     try:
         for tp in (1, 2, 4):
-            cc.TP = tp
+            # tp is passed as an ARGUMENT now. This loop used to monkey-patch
+            # cc.TP because routed_mem and the ZeRO-3 transient read the module
+            # global and discarded the caller's tp -- so the activation term was
+            # identical at tp = 1, 2, 4 and 8 and the transient was pinned at
+            # 2.1013 GB. Patching the global is no longer how tp reaches the
+            # function, and a test that still did it would pass tp=1 silently.
+            cc.TP = tp  # retained only so a stale global cannot mask a regression
             dp = 512 // tp
             model_mem = cc.calculate_model_memory_gb(
                 v, layers_per_gpu, experts_global, PARAM_BYTES, VOCAB, LAYER_NORM,
@@ -978,7 +993,7 @@ def test_higher_tp_never_raises_moe_optimizer_memory():
                 1, model_mem, v, dp, layers_per_gpu, 1, seq_len, TOPK, PARAM_BYTES,
                 EMPIRICAL_ACT_MULTIPLIER, SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
                 FWD_BWD_ROUTING_BUFF_PASSES, NCCL_MEM_BUF, OPTIM_BYTES,
-                ep=EP, pp=1, vp=1,
+                ep=EP, pp=1, vp=1, tp=tp,
                 nccl_ep_scaling_factor=NCCL_EP_SCALING_FACTOR,
                 fragmentation_factor=FRAGMENTATION_FACTOR,
                 experts_per_gpu=experts_global)
@@ -2531,3 +2546,241 @@ def test_alltoall_volume_tracks_the_variants_routing_width():
         ]
         == at8["fwd_bwd_gb"]
     ), "the default did not fall back to the global TOPK = 8"
+
+
+def test_tp_shards_activation_memory():
+    """Activation must fall with TP, and the scale must be exact.
+
+    Korthikanti eq. 2 is s*b*h*(10 + 24/t + 5as/(h*t)): 10 of 34 B/element are
+    replicated on every TP rank and 24 are sharded. So the scale is
+    f + (1-f)/t with f = 10/34, which is EXACTLY 1.0 at t=1.
+
+    Before this, activation was identical at t = 1, 2, 4 and 8 -- the function
+    took a `tp` argument and the term ignored it, so TP delivered no modelled
+    memory saving at all.
+    """
+    v = next(x for x in LLAMA_DENSE_VARIANTS if x["name"] == "Llama-3.1-70B")
+    f = ACT_TP_REPLICATED_FRACTION
+
+    acts = {}
+    for tp in (1, 2, 4, 8):
+        acts[tp] = _mem_world(variant=v, tp=tp, pp=1, vp=1, cp=1)["activation"]
+
+    assert acts[1] > 0, "baseline activation must be non-zero for a real ratio"
+    # Non-vacuity: it must actually MOVE, or any scale assertion is decorative.
+    assert acts[8] < acts[1], (
+        "activation did not fall as TP rose, so the tp argument is not reaching "
+        "the activation term"
+    )
+    for tp in (2, 4, 8):
+        expected = f + (1.0 - f) / tp
+        assert abs(acts[tp] / acts[1] - expected) < 1e-12, (
+            f"tp={tp}: expected scale {expected:.9f}, got {acts[tp] / acts[1]:.9f}"
+        )
+
+    # The identity that makes this inert at the shipped TP=1.
+    assert f + (1.0 - f) / 1 == 1.0, "scale at tp=1 must be exactly 1.0"
+    # And a floor, not zero: TP can never remove the replicated part.
+    assert acts[8] / acts[1] > f, "activation fell below the replicated floor"
+
+
+def test_tp_communication_volume_matches_ring_all_reduce():
+    """4 all-reduces per layer per micro-batch, each 2V(t-1)/t per rank.
+
+    Megatron needs exactly two collectives forward (row-parallel attention
+    output, row-parallel MLP) and two backward. TP comm did not exist at all
+    before: a repo-wide grep for all_reduce returned one hit and it was prose,
+    so TP was free and a parallelism search would always have maximised it.
+    """
+    L, d, s, m = 10, 8192, 4096, 1
+    for tp in (2, 4, 8):
+        r = calculate_tp_communication(L, d, s, m, tp, num_microbatches=1,
+                                       dtype_bytes=2)
+        one_tensor = s * m * d * 2
+        expected_per_layer = 4 * 2 * one_tensor * (tp - 1) / tp / 1e9
+        assert abs(r["volume_per_layer_gb"] - expected_per_layer) < 1e-12, (
+            f"tp={tp}: per-layer volume {r['volume_per_layer_gb']} != "
+            f"{expected_per_layer}"
+        )
+        assert r["collectives_per_layer"] == 4
+
+    # tp=1 has no collective at all, so this is inert at the shipped config.
+    r1 = calculate_tp_communication(L, d, s, m, 1)
+    assert r1["volume_per_step_gb"] == 0.0 and r1["time_per_step_ms"] == 0.0
+
+    # TP is INNERMOST in tp-cp-ep-dp-pp, so a group is intra-node up to node size.
+    assert not calculate_tp_communication(L, d, s, m, 8, gpus_per_node=8)["is_inter_node"]
+    assert calculate_tp_communication(L, d, s, m, 16, gpus_per_node=8)["is_inter_node"]
+
+
+def test_end_to_end_mfu_is_not_derated_twice():
+    """An end-to-end MFU already contains bubble and comm, so they are NOT added.
+
+    MFU is achieved-FLOPs over peak across the whole run, so every idle cycle --
+    waiting on a collective, stalled in a pipeline bubble -- is already inside
+    it. This function used to compute
+        total = compute + compute*bf/(1-bf) + exposed_comm_ms*steps
+    on top of that, charging each stall twice and making every estimate
+    1.22x-2.75x pessimistic.
+
+    bubble_pct and comm_pct are still returned, as ATTRIBUTION of where the MFU
+    shortfall goes -- shares of the estimate, not additions to it.
+    """
+    base = dict(
+        total_tokens=1e12, active_params_b=8.0, num_gpus=512,
+        peak_tflops_per_gpu=989, mfu=0.40, efficiency=1.0, tok_batch=4e6,
+    )
+    no_overhead = calculate_training_time_months_with_overhead(
+        bubble_fraction=0.0, exposed_comm_ms_per_step=0.0, **base)
+    with_bubble = calculate_training_time_months_with_overhead(
+        bubble_fraction=0.50, exposed_comm_ms_per_step=0.0, **base)
+    with_comm = calculate_training_time_months_with_overhead(
+        bubble_fraction=0.0, exposed_comm_ms_per_step=500.0, **base)
+
+    assert no_overhead["est_months"] > 0, "need a real baseline for a ratio"
+    assert with_bubble["est_months"] == no_overhead["est_months"], (
+        f"a 50% bubble changed est_months "
+        f"{no_overhead['est_months']:.6f} -> {with_bubble['est_months']:.6f}; "
+        f"an end-to-end MFU already contains the bubble"
+    )
+    assert with_comm["est_months"] == no_overhead["est_months"], (
+        "exposed comm was added to an end-to-end MFU, double-counting the stall"
+    )
+    # Still attributed, or the diagnostic is lost.
+    assert with_bubble["bubble_pct"] == 50.0
+    assert with_comm["comm_pct"] > 0.0
+
+
+def test_embeddings_are_placed_on_end_pipeline_stages():
+    """Megatron puts the input embedding on stage 0 and the LM head on stage PP-1.
+
+    This charged BOTH on EVERY stage, so the fleet carried the model's
+    parameters pp times over: summing the per-GPU figure across stages gave
+    30.77 GB for Llama-3.1-8B at PP=8 against a true whole model of 16.06 GB.
+
+    pp defaults to 1 (the WHOLE model) on purpose: a caller reconciling against
+    a published parameter count must not silently get a per-stage figure.
+    """
+    v = next(x for x in LLAMA_DENSE_VARIANTS if x["name"] == "Llama-3.1-8B")
+    one_table = v["vocab"] * v["d"] * PARAM_STORAGE_BYTES / 1e9
+
+    def mem(pp, lpg):
+        return calculate_model_memory_gb(
+            v, lpg, 0, PARAM_STORAGE_BYTES, 151936, LAYER_NORM,
+            FFN_WEIGHT_MATRICES, NUM_EMBEDDINGS_TABLES, tp=1, pp=pp)
+
+    whole = mem(None, v["layers"])
+    assert abs(whole / PARAM_STORAGE_BYTES - v["total_params_B"]) / v["total_params_B"] < 0.01, (
+        f"default must return the WHOLE model: got {whole / PARAM_STORAGE_BYTES:.2f}B "
+        f"vs published {v['total_params_B']}B"
+    )
+
+    # The fleet must hold the model exactly ONCE at every pp.
+    for pp in (2, 4, 8):
+        per_gpu = mem(pp, v["layers"] // pp)
+        body = per_gpu - one_table          # end stage carries exactly one table
+        fleet = body * pp + 2 * one_table   # plus the two end tables
+        assert abs(fleet - whole) / whole < 1e-9, (
+            f"pp={pp}: fleet total {fleet:.4f} != whole model {whole:.4f} -- "
+            f"embeddings are counted on more than the two end stages"
+        )
+
+    # Non-vacuity: pp>1 must actually differ from pp=1.
+    assert mem(8, v["layers"] // 8) < mem(1, v["layers"] // 8), (
+        "pipeline placement had no effect, so both tables are still charged"
+    )
+
+
+def test_kv_cache_uses_mla_width_for_deepseek():
+    """MLA caches one compressed latent per token, not per-head K and V.
+
+    Applying the GQA formula to DeepSeek-V3 reads its kv_heads=128 and returns
+    1708 KiB/token against a real 68.6 -- a 24.9x over-estimate, because those
+    head counts describe the attention COMPUTE shape and not what is stored.
+    """
+    v3 = next(x for x in DEEPSEEK_VARIANTS if x["name"] == "DeepSeek-V3")
+    b, kind, flagged = kv_cache_bytes_per_token(v3, kv_dtype_bytes=2)
+    assert kind == "mla" and not flagged
+    expected = v3["layers"] * (v3["kv_lora_rank"] + v3["qk_rope_head_dim"]) * 2
+    assert b == expected, f"MLA cache {b} != {expected}"
+
+    naive = 2 * v3["layers"] * v3["kv_heads"] * (v3["d"] // v3["q_heads"]) * 2
+    assert naive / b > 20, (
+        "the GQA formula should be >20x larger here; if not, this test no longer "
+        "demonstrates why MLA needs its own branch"
+    )
+
+    # A GQA model must still take the GQA path, or the branch is over-eager.
+    llama = next(x for x in LLAMA_DENSE_VARIANTS if x["name"] == "Llama-3.1-70B")
+    b2, kind2, _ = kv_cache_bytes_per_token(llama, kv_dtype_bytes=2)
+    assert kind2 == "gqa"
+    # head_dim is absent on 15 of 22 variants and falls back to d/q_heads, which
+    # is what the module does; recomputing it here the same way is deliberate.
+    hd = llama.get("head_dim") or llama["d"] // llama["q_heads"]
+    assert b2 == 2 * llama["layers"] * llama["kv_heads"] * hd * 2
+
+    # An unpublished shape is FLAGGED, not quietly computed.
+    v4 = next(x for x in DEEPSEEK_VARIANTS if x["name"] == "DeepSeek-V4")
+    _, kind4, flagged4 = kv_cache_bytes_per_token(v4)
+    assert flagged4 and "unverified" in kind4
+
+
+def test_decode_is_bandwidth_bound_and_prefill_is_compute_bound():
+    """TPOT scales with HBM bandwidth; TTFT scales with FLOPS. Different regimes.
+
+    Decode reads every active weight plus the KV cache to produce one token, so
+    arithmetic intensity is ~1 FLOP/byte and the GPU stalls on memory -- peak
+    TFLOPS does not enter. Prefill is a dense GEMM over the whole prompt and is
+    compute-bound. Sizing that uses one model for both is wrong by orders of
+    magnitude.
+    """
+    v = next(x for x in LLAMA_DENSE_VARIANTS if x["name"] == "Llama-3.1-70B")
+
+    # TPOT halves when bandwidth doubles, and is INDEPENDENT of peak TFLOPS.
+    t_slow = calculate_tpot_ms(v, 1675, 1, context_len=4096, batch_size=1)
+    t_fast = calculate_tpot_ms(v, 3350, 1, context_len=4096, batch_size=1)
+    assert abs(t_slow / t_fast - 2.0) < 1e-9, "TPOT is not inversely linear in HBM BW"
+
+    # TTFT halves when FLOPS double, and is INDEPENDENT of bandwidth.
+    f_slow = calculate_ttft_ms(v, 4096, 500, 1)
+    f_fast = calculate_ttft_ms(v, 4096, 1000, 1)
+    assert abs(f_slow / f_fast - 2.0) < 1e-9, "TTFT is not inversely linear in FLOPS"
+
+    # Batching raises throughput without proportionally raising TPOT, because
+    # the weight read amortises across the batch.
+    t1 = calculate_tpot_ms(v, 3350, 8, context_len=4096, batch_size=1)
+    t32 = calculate_tpot_ms(v, 3350, 8, context_len=4096, batch_size=32)
+    assert t32 < 32 * t1, "weight read is not amortising across the batch"
+
+
+def test_slo_solver_returns_the_smallest_feasible_topology():
+    """Sizing means INVERTING an SLO into a topology, which is what was missing.
+
+    Every other phase evaluates a configuration the user supplies. This one
+    answers "how many GPUs do I need", and refuses rather than inventing an
+    answer when nothing fits.
+    """
+    from configuration.hardware_config import HARDWARE
+    hw = next(h for h in HARDWARE if h["name"] == "64 p5")  # H100 80GB
+
+    v70 = next(x for x in LLAMA_DENSE_VARIANTS if x["name"] == "Llama-3.1-70B")
+    r = size_for_slo(v70, hw, target_ttft_ms=500, target_tpot_ms=20,
+                     prompt_len=4096, output_len=512, required_concurrency=32)
+    assert r["recommended"] is not None, "70B must be servable on H100s"
+    # 141 GB of BF16 weights cannot fit on 1 or 2 x 80 GB.
+    assert r["recommended"]["tp"] == 4, (
+        f"expected the SMALLEST feasible tp to be 4, got {r['recommended']['tp']}"
+    )
+    assert [t for t, _ in r["rejected"]][:2] == [1, 2]
+    assert r["recommended"]["ttft_ms"] <= 500
+    assert r["recommended"]["tpot_ms"] <= 20
+
+    # And it must REFUSE when the model genuinely does not fit: DeepSeek-V3 is
+    # 671B, so 1342 GB of BF16 weights against 8 x 80 = 640 GB.
+    v3 = next(x for x in DEEPSEEK_VARIANTS if x["name"] == "DeepSeek-V3")
+    r3 = size_for_slo(v3, hw, target_ttft_ms=500, target_tpot_ms=20,
+                      required_concurrency=1)
+    assert r3["recommended"] is None and not r3["feasible"], (
+        "a 671B model must not report a feasible 8xH100 BF16 topology"
+    )
+    assert all("fit" in why for _, why in r3["rejected"])

@@ -396,6 +396,31 @@ ACT_BYTES_PER_ELEMENT = 2  # ONE stored activation tensor, resident BF16 at eith
 ACT_INTERMEDIATES_PER_ELEMENT = 16  # MEASURED; see the two sweeps above
 EMPIRICAL_ACT_MULTIPLIER = ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT
 
+# --- Tensor-parallel activation split (CITED split, MEASURED magnitude) --------
+# Tensor parallelism shards MOST of a layer's stored activations but not all of
+# them. Korthikanti et al. 2022 (arXiv:2205.05198) eq. 2 gives per-layer
+# activation memory under tensor parallelism t as
+#
+#     s*b*h * (10 + 24/t + 5*a*s/(h*t))
+#
+# so of their 34 bytes/element, 10 are REPLICATED on every tensor-parallel rank
+# (the two layer norms, the dropout masks and the block input/output that are not
+# partitioned) and 24 are SHARDED.
+#
+# This constant carries ONLY that split. The MAGNITUDE stays our own measured
+# EMPIRICAL_ACT_MULTIPLIER = 32, which was measured at TP=1 two independent ways
+# and lands within 6% of their 34 -- so importing their ratio onto our constant
+# is a far smaller extrapolation than the alternative the code shipped, which was
+# NO TP EFFECT AT ALL: activation was identical at t = 1, 2, 4 and 8.
+#
+# Applied as  multiplier * (frac + (1 - frac)/tp).
+#
+# At tp=1 that is EXACTLY 1.0, so this is provably inert at the shipped TP=1 and
+# the whole 704-row sweep stays byte-identical. It only fires for TP>1, which is
+# precisely the regime a parallelism search has to explore and the regime in which
+# the old behaviour made TP look useless for memory.
+ACT_TP_REPLICATED_FRACTION = 10.0 / 34.0  # Korthikanti: 10 of 34 B/element replicated
+
 # --- FP8 activation saving (MEASURED) -----------------------------------------
 # Of the EMPIRICAL_ACT_MULTIPLIER bytes a STORED layer costs per element, FP8 saves
 # this many. Measured two independent ways, and this supersedes open question 2
