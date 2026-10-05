@@ -32,6 +32,38 @@ def resolve_experts_per_gpu(variant, experts_per_gpu, ep=None):
     return experts_per_gpu
 
 
+def resolve_topk(variant, topk):
+    """Experts each token is routed to for this variant, overriding the global.
+
+    topk arrives from the caller as the global project_config.TOPK (= 8), which
+    is right only for a model that actually routes to 8 experts. A variant
+    declaring its own "topk" overrides it, because the global is wrong in both
+    directions: Llama-4-Scout-17B-16E and Llama-4-Maverick-17B-128E route to 1
+    (the global overstates them 8x), while Qwen3.5-397B-A17B routes to 10
+    (understated 1.25x).
+
+    Exactly the sibling of resolve_experts_per_gpu, and extracted for the same
+    reason: topk reaches the expert activation term, the MoE routing buffer and
+    the all-to-all volume from five separate call sites across phases 1, 3 and
+    5, which could otherwise disagree about one variant's routing width.
+
+    Falls back to the global when a variant declares no "topk" at all. That is
+    DeepSeek-V4 alone, and the fallback is right there rather than merely
+    tolerable: its own catalog arithmetic implies topk between 7.83 and 8.29
+    (from active_params_B = 49.0, the band being the unknown vocab), so 8 is
+    the best available estimate and this function leaves it unchanged.
+
+    Found while validating the expert-symmetry fix: recovering the implied
+    expert share algebraically from a before/after sweep agreed with the
+    catalog EXACTLY on every variant whose own topk is 8 and disagreed on
+    precisely those that declare something else.
+    """
+    variant_topk = variant.get("topk")
+    if variant_topk:
+        return variant_topk
+    return topk
+
+
 def calculate_model_memory_gb(
     variant,
     layers_per_gpu,
@@ -656,6 +688,12 @@ def calculate_memory_for_micro(
     # Using the raw global here was wrong for 7 of 11 MoE variants.
     experts_per_gpu = resolve_experts_per_gpu(variant, experts_per_gpu, ep)
 
+    # Same for the routing width. topk reaches the expert activation term, the
+    # MoE routing buffer and the dispatch split below, so it is resolved ONCE
+    # here rather than at each use. Using the raw global was wrong for 3 of 11
+    # MoE variants (Llama-4 Scout and Maverick route to 1, Qwen3.5-397B to 10).
+    topk = resolve_topk(variant, topk)
+
     # Estimate fraction of model memory that is MoE expert params vs non-MoE
     if is_moe and model_mem_gb > 0:
         # Expert memory fraction based on architecture. This MUST match
@@ -792,17 +830,22 @@ def calculate_memory_for_micro(
     if is_moe and moe_layers_per_gpu > 0:
         # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output)
         #
-        # KNOWN GAP, pre-existing and NOT addressed here: `topk` arrives from the
-        # global project_config.TOPK (= 8), not from the variant's own `topk` field,
-        # so 3 of 11 MoE variants are computed at the wrong routing width --
-        # Llama-4-Scout-17B-16E and Llama-4-Maverick-17B-128E carry topk=1 and
-        # Qwen3.5-397B-A17B carries topk=10 (DeepSeek-V4 carries none at all). The
-        # same global reaches the routing-buffer and all-to-all terms below. Found
-        # while validating the symmetry fix: recovering the implied expert share
-        # algebraically from a before/after sweep agreed with the catalog EXACTLY on
-        # every variant whose own topk is 8 and disagreed on precisely those three.
-        # Fixing it changes memory for those variants, so it is a separate change
-        # with its own baselines rather than a drive-by edit here.
+        # CLOSED. This block carried a KNOWN GAP note reading "pre-existing and
+        # NOT addressed here" -- `topk` arrived from the global
+        # project_config.TOPK (= 8) rather than the variant's own field. It is
+        # now resolved once at the top of this function via resolve_topk, which
+        # also covers the routing-buffer and dispatch terms below, so all three
+        # see the same width. Found while validating the symmetry fix:
+        # recovering the implied expert share algebraically from a before/after
+        # sweep agreed with the catalog EXACTLY on every variant whose own topk
+        # is 8 and disagreed on precisely those that declare something else.
+        #
+        # The old note said "3 of 11 MoE variants"; the real count is 3 that
+        # MOVE and a 4th that cannot. Llama-4-Scout-17B-16E and
+        # Llama-4-Maverick-17B-128E route to 1 (overstated 8x) and
+        # Qwen3.5-397B-A17B to 10 (understated 1.25x). DeepSeek-V4 declares no
+        # topk at all, so it keeps the global -- correctly, since its own
+        # active_params_B = 49.0 implies topk between 7.83 and 8.29.
         expert_ffn = variant.get("expert_ffn", 0)
         act_expert_full = (
             moe_layers_per_gpu * seq_len * micro
@@ -928,11 +971,15 @@ def calculate_memory_for_micro(
     # --- Buffer memory ---
     # All-to-all routing buffers.
     #
-    # GATED ON is_moe THIS ROUND. A dense model has no router and no expert
-    # all-to-all, so it has no routing buffer -- but this term was computed
-    # unconditionally from the GLOBAL topk (8), so every dense variant was charged
-    # one. It is small but it is not nothing: on a 0.6B model at seq 4096 it is
-    # 0.134 GB, and on a dense 70B it is 0.537 GB per micro-batch.
+    # GATED ON is_moe. A dense model has no router and no expert all-to-all, so
+    # it has no routing buffer -- but this term was computed unconditionally,
+    # so every dense variant was charged one. It is small but it is not
+    # nothing: on a 0.6B model at seq 4096 it is 0.134 GB, and on a dense 70B
+    # it is 0.537 GB per micro-batch.
+    #
+    # `topk` here is the width resolved at the top of this function, NOT the
+    # raw global it used to be -- so the buffer now also shrinks 8x for Llama-4
+    # Scout and Maverick and grows 1.25x for Qwen3.5-397B-A17B.
     #
     # Same oversight as the NCCL workspace below and the same evidence for it:
     # moe_dispatch_buf, immediately after, is already gated on `is_moe and

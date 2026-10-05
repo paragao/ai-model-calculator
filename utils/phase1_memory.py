@@ -95,6 +95,9 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
         layers_per_gpu=layers_per_gpu,
         zero_strategy=best_zero,
         seq_len=variant.get("seq_len", SEQ_LEN),
+        # FALLBACK. calculate_memory_for_micro resolves the variant's own
+        # "topk" over this via resolve_topk, exactly as it does the expert
+        # count, so the global applies only to a variant declaring none.
         topk=TOPK,
         param_bytes=PARAM_STORAGE_BYTES,
         empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
@@ -295,6 +298,9 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         layers_per_gpu=layers_per_gpu,
         zero_strategy=best_zero,
         seq_len=variant.get("seq_len", SEQ_LEN),
+        # FALLBACK. calculate_memory_for_micro resolves the variant's own
+        # "topk" over this via resolve_topk, exactly as it does the expert
+        # count, so the global applies only to a variant declaring none.
         topk=TOPK,
         param_bytes=PARAM_STORAGE_BYTES,
         empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
