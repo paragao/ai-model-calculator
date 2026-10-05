@@ -17,6 +17,7 @@ from .core_calculations import (
     calculate_training_time_months,
     calculate_training_time_months_with_overhead,
     compute_attention_flops_dim,
+    resolve_topk,
 )
 
 # Import communication models for overhead estimation
@@ -201,6 +202,14 @@ def generate_platform_configs(variant, hw, dp, layers_per_gpu, experts_per_gpu):
                 "pp": PP,
                 "vp": VP,
                 "ep": EP,
+                # Routing width for the MoE all-to-all model. Carried on the
+                # platform because calculate_platform_overhead receives only
+                # this dict and the "variant" key elsewhere is a NAME, not the
+                # dict -- so it cannot resolve the width itself. Resolved here,
+                # where the variant IS in scope, rather than reading the raw
+                # global as it did: that overstated Llama-4 Scout and Maverick
+                # (topk=1) 8x and understated Qwen3.5-397B-A17B (topk=10).
+                "topk": resolve_topk(variant, TOPK),
                 "hidden_dim": variant["d"],
                 # Width for the O(seq_len^2) attention FLOPs term ONLY. Distinct
                 # from hidden_dim, which stays `d` for the PP and MoE comm models
@@ -276,7 +285,13 @@ def calculate_platform_overhead(platform):
             gbs=platform["gbs"],
             dp=platform["dp"],
             ep=platform["ep"],
-            topk=TOPK,
+            topk=platform["topk"],
+            # DEAD PARAMETER: calculate_moe_all_to_all accepts num_experts and
+            # never reads it, so this raw global is inert and passing the
+            # variant's own count would change nothing. Left as-is deliberately
+            # rather than resolved, so the call site does not imply an effect
+            # the callee does not have. Verified by AST: the only Load of
+            # num_experts in that function is its own signature.
             num_experts=N_EXPERTS,
             dtype_bytes=PARAM_BYTES,
             intra_node_bw_gbps=platform["intra_node_bw_gbps"],

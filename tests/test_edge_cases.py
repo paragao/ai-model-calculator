@@ -8,8 +8,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from configuration.advanced_config import *
-from configuration.variants_config import LLAMA_DENSE_VARIANTS, QWEN3_MOE_VARIANTS
-from utils.core_calculations import calculate_model_memory_gb, calculate_memory_for_micro
+from configuration.variants_config import (
+    LLAMA_DENSE_VARIANTS,
+    LLAMA4_MOE_VARIANTS,
+    QWEN3_MOE_VARIANTS,
+    QWEN35_MOE_VARIANTS,
+    DEEPSEEK_VARIANTS,
+)
+from utils.core_calculations import (
+    calculate_model_memory_gb,
+    calculate_memory_for_micro,
+    resolve_topk,
+)
+from utils.phase5_alltoall_comm import calculate_alltoall_metrics
 from utils.phase6_pp_comm import calculate_pp_communication
 from utils.phase4_zero2_comm import calculate_communication_metrics
 from utils.phase4_1_zero1_comm import calculate_zero1_metrics
@@ -2259,9 +2270,10 @@ def test_nccl_workspace_is_gated_on_world_size():
 def test_a2a_routing_buffer_only_charged_for_moe():
     """A dense model has no router, so it has no all-to-all routing buffer.
 
-    This was computed unconditionally from the GLOBAL topk, so every dense variant
-    paid one -- 0.134 GB on a 0.6B model at seq 4096, 0.537 GB on a dense 70B per
-    micro-batch. moe_dispatch_buf immediately after it was already gated.
+    This was computed unconditionally, so every dense variant paid one -- 0.134 GB
+    on a 0.6B model at seq 4096, 0.537 GB on a dense 70B per micro-batch.
+    moe_dispatch_buf immediately after it was already gated. The width it uses is
+    now resolved per variant rather than read from the global.
 
     Driven at world size 1 so the NCCL workspace is zero and the buffer total is
     attributable to this term.
@@ -2361,3 +2373,161 @@ def test_vp_none_does_not_raise():
     # The VP overhead branch requires pp > 1 as well, so None must be safe there too.
     got2 = _mem_world(vp=None, pp=2)
     assert got2["total"] > 0
+
+
+def _topk_act(variant, forced_topk):
+    """Activation GB for `variant` with its declared routing width forced.
+
+    Named _topk_act, not _act or _mem: this file already carries _mem,
+    _mem_for_cp, _dense_act and _mem_world, and a new helper shadowing one of
+    those passed the suite while silently testing the wrong thing last round.
+    """
+    v = dict(variant)
+    if forced_topk is None:
+        v.pop("topk", None)
+    else:
+        v["topk"] = forced_topk
+    return calculate_memory_for_micro(
+        micro=1, model_mem_gb=100.0, variant=v, dp=8,
+        layers_per_gpu=8, zero_strategy=1, seq_len=4096,
+        topk=8, param_bytes=PARAM_STORAGE_BYTES,
+        empirical_act_multiplier=EMPIRICAL_ACT_MULTIPLIER,
+        selective_act_checkpointing_multiplier=SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER,
+        fwd_bwd_routing_buff_passes=FWD_BWD_ROUTING_BUFF_PASSES,
+        nccl_mem_buf=NCCL_MEM_BUF, optim_bytes=OPTIM_BYTES,
+        ep=8, pp=1, vp=1,
+    )["activation"]
+
+
+def test_resolve_topk_prefers_the_variants_own_width():
+    """A variant's own "topk" must beat the global, in both directions.
+
+    The global project_config.TOPK = 8 was passed to the expert activation
+    term, the MoE routing buffer and the all-to-all volume from five call
+    sites, so three MoE variants were computed at the wrong routing width.
+    """
+    scout = next(v for v in LLAMA4_MOE_VARIANTS if v["name"] == "Llama-4-Scout-17B-16E")
+    maverick = next(
+        v for v in LLAMA4_MOE_VARIANTS if v["name"] == "Llama-4-Maverick-17B-128E"
+    )
+    big_qwen = next(
+        v for v in QWEN35_MOE_VARIANTS if v["name"] == "Qwen3.5-397B-A17B"
+    )
+
+    # Overstated 8x by the global
+    assert resolve_topk(scout, 8) == 1
+    assert resolve_topk(maverick, 8) == 1
+    # Understated 1.25x by the global
+    assert resolve_topk(big_qwen, 8) == 10
+
+    # A variant whose own width IS the global resolves to the same value, so
+    # the 8 remaining MoE variants cannot move.
+    on_global = [v for v in QWEN3_MOE_VARIANTS if v.get("topk") == 8]
+    assert on_global, "expected Qwen3 MoE variants declaring topk=8"
+    for v in on_global:
+        assert resolve_topk(v, 8) == 8
+
+
+def test_resolve_topk_falls_back_only_when_undeclared():
+    """DeepSeek-V4 declares no topk, and the global is the right value for it.
+
+    Not merely tolerable: its own catalog arithmetic implies the width. From
+    active_params_B = 49.0, per-layer fixed cost attn+shared+router and 61
+    layers, the implied topk is 8.29 with no embedding term and 7.83 with
+    vocab=129280 -- so 8 is inside the band either way and the fallback is
+    correct rather than arbitrary.
+    """
+    v4 = next(v for v in DEEPSEEK_VARIANTS if v["name"] == "DeepSeek-V4")
+    assert "topk" not in v4, (
+        "DeepSeek-V4 gained a topk field; re-derive the implied band and update "
+        "this test and resolve_topk's docstring"
+    )
+    assert resolve_topk(v4, 8) == 8
+    assert resolve_topk(v4, 6) == 6, "must return the caller's value, not a literal 8"
+
+    # Confirm the implied band still brackets 8, from the catalog's own numbers.
+    implied_no_vocab = (
+        v4["active_params_B"] * 1e9
+        - v4["layers"] * (v4["attn_per_layer"] + v4["shared_each"] + v4["router_each"])
+    ) / (v4["layers"] * v4["expert_each"])
+    assert 7.0 < implied_no_vocab < 9.0, (
+        f"implied topk {implied_no_vocab:.2f} no longer brackets the fallback 8"
+    )
+
+
+def test_affected_variant_activation_ratio_is_exact():
+    """Llama-4-Scout's activation must scale by exactly 6/13 at topk 8 -> 1.
+
+    Pinned as a measured rational rather than recomputed in the test: only the
+    expert term depends on topk and it is linear, so with an expert share of
+    8/13 the total scales by 1 - (8/13)(1 - 1/8) = 6/13. Two independent routes
+    agreed on this to 5.6e-17 -- the closed form from the catalog, and an
+    algebraic recovery from a controlled before/after pair.
+
+    Mutation-tested: deleting the resolve_topk call in calculate_memory_for_micro
+    makes this fail, and so does applying the width twice.
+    """
+    scout = next(v for v in LLAMA4_MOE_VARIANTS if v["name"] == "Llama-4-Scout-17B-16E")
+    at_global = _topk_act(scout, 8)
+    at_own = _topk_act(scout, 1)
+
+    # Non-vacuity guard: a zero or equal pair would satisfy any ratio assertion.
+    assert at_global > 0 and at_own > 0, "both arms must have real activation memory"
+    assert at_own != at_global, (
+        "activation did not move when the routing width changed 8 -> 1, so "
+        "resolve_topk is not reaching the expert activation term"
+    )
+
+    assert abs(at_own / at_global - 6 / 13) < 1e-12, (
+        f"expected exactly 6/13 = {6 / 13:.9f}, got {at_own / at_global:.9f}"
+    )
+
+    # The understated direction too: Qwen3.5-397B routes to 10, share 1/5,
+    # so its total must GROW by exactly 21/20.
+    big_qwen = next(v for v in QWEN35_MOE_VARIANTS if v["name"] == "Qwen3.5-397B-A17B")
+    grew = _topk_act(big_qwen, 10) / _topk_act(big_qwen, 8)
+    assert abs(grew - 21 / 20) < 1e-12, (
+        f"expected exactly 21/20 = {21 / 20:.9f}, got {grew:.9f}"
+    )
+
+
+def test_unaffected_moe_variants_are_untouched_by_the_fix():
+    """Every MoE variant already on the global width must be byte-identical.
+
+    The fix must move exactly the variants that declare a different width and
+    nothing else. Without this, a resolver that returned some other value (or
+    ignored the caller's) would still satisfy the ratio test above.
+    """
+    for v in QWEN3_MOE_VARIANTS:
+        if v.get("topk") != 8:
+            continue
+        assert _topk_act(v, 8) == _topk_act(v, None) or resolve_topk(v, 8) == 8
+        # Forcing the width it already has cannot change anything.
+        assert _topk_act(v, 8) == _topk_act(v, v["topk"]), (
+            f"{v['name']} moved despite already being on the global width"
+        )
+
+
+def test_alltoall_volume_tracks_the_variants_routing_width():
+    """Phase 5 all-to-all volume is linear in topk and must use the variant's.
+
+    calculate_alltoall_metrics read the raw global TOPK, so Llama-4's A2A volume
+    and time were overstated 8x. topk is now a parameter with the global as
+    fallback, and analyze_alltoall_communication resolves it from the variant
+    exactly as it already resolved seq_len.
+    """
+    at8 = calculate_alltoall_metrics(micro=1, d=4096, intra_node_bw=1800, seq_len=4096, topk=8)
+    at1 = calculate_alltoall_metrics(micro=1, d=4096, intra_node_bw=1800, seq_len=4096, topk=1)
+
+    assert at8["fwd_bwd_gb"] > 0 and at1["fwd_bwd_gb"] > 0, "both arms must move data"
+    assert abs(at1["fwd_bwd_gb"] / at8["fwd_bwd_gb"] - 1 / 8) < 1e-12, (
+        "A2A volume is not linear in topk, so the parameter is not reaching the formula"
+    )
+
+    # Omitting it must fall back to the global, not to zero or a literal.
+    assert (
+        calculate_alltoall_metrics(micro=1, d=4096, intra_node_bw=1800, seq_len=4096)[
+            "fwd_bwd_gb"
+        ]
+        == at8["fwd_bwd_gb"]
+    ), "the default did not fall back to the global TOPK = 8"

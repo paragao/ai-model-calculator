@@ -183,10 +183,10 @@ Edit `configuration/project_config.py` before running:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `VOCAB` | 151,936 | Vocabulary size |
+| `VOCAB` | 151,936 | Vocabulary size. **Fallback** -- a variant's own `vocab` wins |
 | `SEQ_LEN` | 4,096 | Sequence length |
-| `N_EXPERTS` | 128 | Total experts (0 for dense) |
-| `TOPK` | 8 | Experts per token |
+| `N_EXPERTS` | 128 | Total experts (0 for dense). **Fallback** -- a variant's own `num_experts` wins |
+| `TOPK` | 8 | Experts per token. **Fallback** -- a variant's own `topk` wins (Llama-4 Scout/Maverick route to 1, Qwen3.5-397B-A17B to 10) |
 | `PP` | 8 | Pipeline parallelism |
 | `VP` | 4 | Virtual pipeline parallelism (1 = disabled) |
 | `TP` | 1 | Tensor parallelism |

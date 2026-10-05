@@ -666,6 +666,29 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V4",
+        # KNOWN CATALOG GAP, flagged not fixed: this entry carries no
+        # "num_experts", no "topk" and no "vocab", so all three fall back to the
+        # globals. Two are recoverable from the entry's own arithmetic and the
+        # third is wrong:
+        #
+        #   num_experts = 384, EXACTLY and integrally, from this entry's own
+        #     moe_layer_params: (25,435,963,392 - 66,060,288 - 2,752,512)
+        #     / 66,060,288 = 384.0. The global fallback is 128, understating the
+        #     expert count 3x. The Quick skill's SKILL.md independently
+        #     documents 384, which agrees.
+        #
+        #   topk = 8 is what active_params_B = 49.0 implies, so the global
+        #     fallback is already RIGHT here and nothing moves. Candidates:
+        #     topk=6 gives 41.64 B (-15.0%), topk=8 gives 49.70 B (+1.4%), and 8
+        #     is the closest of all twelve. (SKILL.md documented 6; corrected.)
+        #
+        #   vocab is MISSING and the fallback is wrong: it resolves to the Qwen3
+        #     default 151,936 where DeepSeek uses 129,280, overstating the two
+        #     embedding tables 17.5% (2.178 B vs 1.853 B params).
+        #
+        # Not fixed here because adding num_experts and vocab changes this
+        # variant's memory in every phase and needs its own baselines, which is
+        # separate work from the routing-width fix that found it.
         "layers": 61,
         "d": 7168,
         "expert_ffn": 3072,

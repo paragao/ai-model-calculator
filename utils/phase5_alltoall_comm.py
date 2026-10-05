@@ -11,6 +11,7 @@ from configuration.advanced_config import *
 
 # Import formatting utilities
 from .formatting_utils import color_text
+from .core_calculations import resolve_topk
 
 
 def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
@@ -32,11 +33,15 @@ def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
     v_name = variant["name"]
     intra_node_bw = hw["intra_node_bw_gbps"]
     seq_len = variant.get("seq_len", SEQ_LEN)
+    # Routing width from the variant, exactly as seq_len above takes its own key.
+    topk = resolve_topk(variant, TOPK)
 
     # Calculate metrics for each micro batch size
     a2a_metrics = []
     for micro in micro_batch_sizes:
-        metrics = calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=seq_len)
+        metrics = calculate_alltoall_metrics(
+            micro, d, intra_node_bw, seq_len=seq_len, topk=topk
+        )
         metrics["micro"] = micro
         a2a_metrics.append(metrics)
 
@@ -47,7 +52,7 @@ def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
     }
 
 
-def calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=None):
+def calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=None, topk=None):
     """
     Calculate all-to-all communication volume and time for MoE routing.
 
@@ -56,6 +61,9 @@ def calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=None):
         d: Hidden dimension
         intra_node_bw: Intra-node bandwidth in GB/s
         seq_len: Sequence length (defaults to the global SEQ_LEN when None)
+        topk: Experts each token is routed to. Defaults to the global TOPK when
+            None, which is correct ONLY for a model that actually routes to 8.
+            Callers with a variant in hand pass resolve_topk(variant, TOPK).
 
     Returns:
         dict with:
@@ -65,9 +73,16 @@ def calculate_alltoall_metrics(micro, d, intra_node_bw, seq_len=None):
     """
     if seq_len is None:
         seq_len = SEQ_LEN
+    if topk is None:
+        topk = TOPK
     # All-to-all for MoE routing: activations sent to experts
-    # Formula: seq_len * micro * TOPK * d * PARAM_BYTES
-    fwd_bytes = seq_len * micro * TOPK * d * PARAM_BYTES
+    # Formula: seq_len * micro * topk * d * PARAM_BYTES
+    #
+    # topk is a PARAMETER with the global as fallback, not the raw global it was:
+    # the caller resolves the variant's own routing width, because the global 8
+    # overstates Llama-4 Scout and Maverick (topk=1) 8x and understates
+    # Qwen3.5-397B-A17B (topk=10).
+    fwd_bytes = seq_len * micro * topk * d * PARAM_BYTES
     fwd_bwd_gb = fwd_bytes * 2 / 1e9  # Factor of 2 for forward + backward passes
 
     # Calculate communication time at intra-node bandwidth

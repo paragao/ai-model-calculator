@@ -8,8 +8,14 @@ that should be adjusted based on the model architecture and training goals.
 # Model architecture parameters
 VOCAB = 151_936      # Vocabulary size (Qwen3 default; Llama=128256, Qwen2.5=152064, DeepSeek=129280)
 SEQ_LEN = 4096       # Sequence length (context window)
-TOPK = 8             # Top-K experts selected per token in MoE routing (0 for dense)
-N_EXPERTS = 128      # Total number of experts in MoE layers (0 for dense)
+TOPK = 8             # FALLBACK only: a variant's own "topk" wins (see resolve_topk).
+                     # Correct for the Qwen3/Qwen3.5-A3B/A10B and DeepSeek-V3.x
+                     # entries; Llama-4 Scout and Maverick route to 1 and
+                     # Qwen3.5-397B-A17B to 10. DeepSeek-V4 declares none and so
+                     # uses this value, which its own params imply is right.
+N_EXPERTS = 128      # FALLBACK only: a variant's own "num_experts" wins (see
+                     # resolve_experts_per_gpu). Llama-4-Scout has 16, Qwen3.5-397B
+                     # 512 and the DeepSeek entries 256.
 
 # Parallelism configuration
 PP = 8   # Pipeline parallelism degree (layers split across pipeline stages)
