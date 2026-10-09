@@ -75,6 +75,7 @@ def calculate_model_memory_gb(
     num_embeddings_tables,
     tp=1,
     ep=None,
+    pp=None,
 ):
     """
     Calculate model memory in GB for a given variant.
@@ -166,7 +167,35 @@ def calculate_model_memory_gb(
         * param_bytes
     )
     embed_tables = 1 if variant.get("tied_embeddings") else num_embeddings_tables
-    embed_mem = embed_tables * variant.get("vocab", vocab) * d * param_bytes
+
+    # PIPELINE PLACEMENT. Megatron puts the input embedding on stage 0 and the
+    # output LM head on stage PP-1; the middle stages carry NEITHER. This term
+    # charged BOTH tables on EVERY stage, so the fleet carried the embeddings pp
+    # times over: summing the per-GPU figure across stages for Llama-3.1-8B gave
+    # 16.06 GB at PP=1 but 18.16 / 22.36 / 30.77 GB at PP=2 / 4 / 8, against a
+    # true whole-model 16.06 GB.
+    #
+    # What matters for SIZING is the worst-loaded stage, since that is what has
+    # to fit. Stage 0 and stage PP-1 are symmetric -- one vocab*d table each --
+    # so the peak stage carries exactly ONE table whenever pp > 1, and both only
+    # when pp == 1 and the two coincide on the single stage. A tied-embedding
+    # model at pp > 1 still carries one replicated copy on each end stage, so the
+    # peak is 1 there too.
+    #
+    # pp=1 is unchanged, which is why nothing caught this: the calibration
+    # harness validates a TOTAL against a range rather than per-stage placement,
+    # and at PP=1 the two placements are identical. A per-stage assertion now
+    # pins it.
+    # Defaults to 1, i.e. NO pipeline placement: both tables counted, which is
+    # the WHOLE model. That default matters -- a caller reconciling against a
+    # published parameter count is asking how big the model is, not how much
+    # lands on one stage, and defaulting to the global PP silently handed it a
+    # per-stage figure (Llama-3.1-8B read 7.50B against a published 8.03B, short
+    # by exactly one 128256x4096 table). Pipeline placement is opt-in: the
+    # per-GPU callers pass pp explicitly.
+    effective_pp = 1 if pp is None else pp
+    embed_tables_peak = embed_tables if effective_pp <= 1 else 1
+    embed_mem = embed_tables_peak * variant.get("vocab", vocab) * d * param_bytes
 
     # TP shards attention, FFN, expert, and embedding weights across tp GPUs.
     # Layer norm and router weights are small and replicated (not sharded).
@@ -437,30 +466,51 @@ def calculate_training_time_months_with_overhead(
     """
     _SECONDS_PER_MONTH = 24 * 3600 * 30.44
 
-    # Ideal compute time (FLOPs-based), in seconds.
-    compute_months = calculate_training_time_months(
+    # End-to-end time, from the END-TO-END MFU.
+    est_months = calculate_training_time_months(
         total_tokens, active_params_b, num_gpus, peak_tflops_per_gpu, mfu, efficiency,
         layers=layers, hidden_dim=hidden_dim, seq_len=seq_len,
         attention_flops_factor=attention_flops_factor,
     )
-    compute_seconds = compute_months * _SECONDS_PER_MONTH
+    total_seconds = est_months * _SECONDS_PER_MONTH
 
-    # Bubble inflates compute time. Clamp fraction to avoid blow-up at ~1.0.
+    # MFU HERE IS END-TO-END, SO BUBBLE AND COMM ARE NOT ADDED TO IT.
+    #
+    # A measured MFU is achieved-FLOPs over peak-FLOPs across the whole run, so
+    # every cycle a GPU spends idle is ALREADY inside it -- waiting on a
+    # collective to sync, stalled in a pipeline bubble, blocked on a slow rank.
+    # That is what makes it the end-to-end figure rather than the theoretical
+    # one you get from the model's own arithmetic.
+    #
+    # This function used to compute
+    #     total = compute + compute*bf/(1-bf) + exposed_comm_ms*steps
+    # on top of that MFU, charging each stall a second time. Stacked with the
+    # ZeRO `efficiency` multiplier it drove the effective MFU to 0.1455 at
+    # accum=1 and 0.3282 at accum=8 on Qwen3-235B-A22B/1024 H200 -- below any
+    # published figure -- making every estimate 1.22x-2.75x PESSIMISTIC, with a
+    # 2.22x spread inside a single hardware/variant pair that was pure artefact.
+    #
+    # `efficiency` is KEPT: MFU is calibrated end-to-end at ZeRO-1 (eff = 1.0),
+    # and the 0.9/0.8 values are the INCREMENTAL cost of ZeRO-2/ZeRO-3's extra
+    # collectives relative to that anchor, not a second absolute derate.
+    #
+    # bubble and comm are still computed and returned, as ATTRIBUTION: they say
+    # where the MFU shortfall comes from, and let a parallelism search prefer a
+    # configuration that exposes less communication. They are shares of the
+    # estimate, not additions to it.
     bf = max(0.0, min(0.99, bubble_fraction))
-    bubble_seconds = compute_seconds * bf / (1.0 - bf) if bf > 0 else 0.0
-
-    # Exposed comm added as absolute ms/step * number of steps.
     steps = total_tokens / tok_batch if tok_batch > 0 else 0
     comm_seconds = (exposed_comm_ms_per_step / 1000.0) * steps
 
-    total_seconds = compute_seconds + bubble_seconds + comm_seconds
+    # Attributed, not added. The bubble share of a step is bf by definition; the
+    # comm share is the modelled exposed comm against the real step time.
+    bubble_seconds = total_seconds * bf
+    bubble_pct = bf * 100.0
+    comm_pct = (comm_seconds / total_seconds * 100) if total_seconds > 0 else 0.0
 
-    est_months = total_seconds / _SECONDS_PER_MONTH
+    compute_months = (total_seconds - bubble_seconds) / _SECONDS_PER_MONTH
     bubble_months = bubble_seconds / _SECONDS_PER_MONTH
     comm_months = comm_seconds / _SECONDS_PER_MONTH
-
-    bubble_pct = (bubble_seconds / total_seconds * 100) if total_seconds > 0 else 0.0
-    comm_pct = (comm_seconds / total_seconds * 100) if total_seconds > 0 else 0.0
 
     return {
         "est_months": est_months,
@@ -571,6 +621,7 @@ def calculate_memory_for_micro(
     logits_bytes_per_element=0,
     logits_fused_ce=True,
     logits_chunk_tokens=1024,
+    act_tp_replicated_fraction=ACT_TP_REPLICATED_FRACTION,
 ):
     """
     Calculate total GPU memory required for a given micro batch size.
@@ -705,7 +756,7 @@ def calculate_memory_for_micro(
         # weights -- memory moving the wrong way as TP rises.
         routed_mem = (
             experts_per_gpu * moe_layers_per_gpu * variant["expert_each"]
-            * param_bytes / max(1, TP)
+            * param_bytes / max(1, tp)
         )
         total_model_bytes = model_mem_gb * 1e9
         moe_frac = min(1.0, routed_mem / total_model_bytes) if total_model_bytes > 0 else 0
@@ -768,7 +819,10 @@ def calculate_memory_for_micro(
             ffn_weight_matrices=FFN_WEIGHT_MATRICES,
             max_live_params=ZERO3_MAX_LIVE_PARAMS,
             prefetch_bucket_params=ZERO3_PREFETCH_BUCKET_PARAMS,
-            tp=TP,
+            # The ARGUMENT, not the global. This read `TP` directly, so the
+            # transient was 2.1013 GB at tp = 1, 2, 4 and 8 alike -- the caller's
+            # tp was accepted and discarded.
+            tp=tp,
         )
         zero3_transient = zero3_transient_detail["transient_gb"]
     else:
@@ -825,7 +879,21 @@ def calculate_memory_for_micro(
     # computed moe_layers*(d*m + e) + (L - moe_layers)*d*m, which is L*d*m +
     # moe_layers*e. The whole 704-pair sweep is byte-identical at the inert default,
     # and a test pins the equivalence.
-    act_dense_full = layers_per_gpu * seq_len * micro * d * empirical_act_multiplier
+    # TENSOR-PARALLEL SPLIT. Of the per-element cost, ACT_TP_REPLICATED_FRACTION
+    # is replicated on every TP rank and the rest is sharded across tp. Korthikanti
+    # et al. eq. 2 is s*b*h*(10 + 24/t + 5as/(h*t)): 10 of 34 B/element replicated.
+    #
+    # Collapses to EXACTLY 1.0 at tp=1, so the shipped sweep is byte-identical and
+    # this fires only for TP>1. Before this, activation memory was identical at
+    # t = 1, 2, 4 and 8 -- TP delivered no modelled memory saving at all, which is
+    # the opposite of why TP exists.
+    tp_eff = max(1, tp)
+    act_tp_scale = (
+        act_tp_replicated_fraction + (1.0 - act_tp_replicated_fraction) / tp_eff
+    )
+    act_dense_full = (
+        layers_per_gpu * seq_len * micro * d * empirical_act_multiplier * act_tp_scale
+    )
     act_expert_full = 0.0
     if is_moe and moe_layers_per_gpu > 0:
         # Expert intermediate = tokens * topk * expert_ffn * 2 (input + output)
@@ -847,9 +915,11 @@ def calculate_memory_for_micro(
         # topk at all, so it keeps the global -- correctly, since its own
         # active_params_B = 49.0 implies topk between 7.83 and 8.29.
         expert_ffn = variant.get("expert_ffn", 0)
+        # Expert FFN weights are column/row-partitioned by TP exactly as the dense
+        # MLP is, so the expert intermediate shards on the same act_tp_scale.
         act_expert_full = (
             moe_layers_per_gpu * seq_len * micro
-            * topk * expert_ffn * 2 * act_bytes_per_element
+            * topk * expert_ffn * 2 * act_bytes_per_element * act_tp_scale
         )
 
     # Activation recomputation and FP8 precision saving. A recomputed block stores
@@ -954,12 +1024,17 @@ def calculate_memory_for_micro(
         # not, which left the VP term as the single largest activation contributor
         # for a recipe that recomputes: at PP=2/VP=20 it was 16.106 of 23.354 GB on
         # Llama-3.1-70B.
-        dense_act_per_layer = seq_len * micro * d * empirical_act_multiplier
+        # act_tp_scale is applied to BOTH halves here, the same way the base term
+        # above applies it, so the TP split cannot drift between the two.
+        dense_act_per_layer = (
+            seq_len * micro * d * empirical_act_multiplier * act_tp_scale
+        )
         expert_act_per_layer = 0.0
         if is_moe and moe_layers_per_gpu > 0:
             expert_ffn = variant.get("expert_ffn", 0)
             expert_act_per_layer = (
                 seq_len * micro * topk * expert_ffn * 2 * act_bytes_per_element
+                * act_tp_scale
             )
         avg_act_per_layer = (
             dense_act_per_layer * dense_act_scale

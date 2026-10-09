@@ -578,6 +578,19 @@ DEEPSEEK_VARIANTS = [
         # widths and cannot derive them from d / q_heads for MLA.
         "qk_head_dim": 192,
         "v_head_dim": 128,
+        # MLA KV-CACHE DIMENSIONS, for inference sizing. DeepSeek uses
+        # Multi-head Latent Attention: the cache stores a COMPRESSED latent
+        # per token, not per-head K and V. config.json gives
+        # kv_lora_rank=512 and qk_rope_head_dim=64, so the cache is
+        # (512 + 64) = 576 elements per layer per token.
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        #
+        # Without these, a naive 2*layers*kv_heads*head_dim cache formula
+        # reads kv_heads=128 and overstates this model 1708 KiB/token against
+        # a real ~70 KiB/token -- a >20x error, because those head counts
+        # describe the attention COMPUTE shape, not what is cached.
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
@@ -612,6 +625,19 @@ DEEPSEEK_VARIANTS = [
         # widths and cannot derive them from d / q_heads for MLA.
         "qk_head_dim": 192,
         "v_head_dim": 128,
+        # MLA KV-CACHE DIMENSIONS, for inference sizing. DeepSeek uses
+        # Multi-head Latent Attention: the cache stores a COMPRESSED latent
+        # per token, not per-head K and V. config.json gives
+        # kv_lora_rank=512 and qk_rope_head_dim=64, so the cache is
+        # (512 + 64) = 576 elements per layer per token.
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        #
+        # Without these, a naive 2*layers*kv_heads*head_dim cache formula
+        # reads kv_heads=128 and overstates this model 1708 KiB/token against
+        # a real ~70 KiB/token -- a >20x error, because those head counts
+        # describe the attention COMPUTE shape, not what is cached.
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
@@ -646,6 +672,19 @@ DEEPSEEK_VARIANTS = [
         # widths and cannot derive them from d / q_heads for MLA.
         "qk_head_dim": 192,
         "v_head_dim": 128,
+        # MLA KV-CACHE DIMENSIONS, for inference sizing. DeepSeek uses
+        # Multi-head Latent Attention: the cache stores a COMPRESSED latent
+        # per token, not per-head K and V. config.json gives
+        # kv_lora_rank=512 and qk_rope_head_dim=64, so the cache is
+        # (512 + 64) = 576 elements per layer per token.
+        # https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json
+        #
+        # Without these, a naive 2*layers*kv_heads*head_dim cache formula
+        # reads kv_heads=128 and overstates this model 1708 KiB/token against
+        # a real ~70 KiB/token -- a >20x error, because those head counts
+        # describe the attention COMPUTE shape, not what is cached.
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
         "kv_heads": 128,
         "dense_layers": 3,
         "total_params_B": 671.0,
@@ -666,6 +705,15 @@ DEEPSEEK_VARIANTS = [
     },
     {
         "name": "DeepSeek-V4",
+        # KV-CACHE SHAPE UNVERIFIED. This entry carries no kv_lora_rank and
+        # no head_dim, and its q_heads=128 / kv_heads=1 is MQA-shaped where
+        # every other DeepSeek uses MLA. So neither the MLA formula nor the
+        # GQA one can be trusted here: the GQA fallback reads 13.3 KiB/token
+        # against its siblings' real 68.6, an UNDER-estimate that would
+        # overstate how many concurrent sequences fit. Flagged explicitly
+        # rather than detected by heuristic, because the honest statement is
+        # that the shape is unpublished, not that it resembles something.
+        "kv_cache_unverified": True,
         # KNOWN CATALOG GAP, flagged not fixed: this entry carries no
         # "num_experts", no "topk" and no "vocab", so all three fall back to the
         # globals. Two are recoverable from the entry's own arithmetic and the
