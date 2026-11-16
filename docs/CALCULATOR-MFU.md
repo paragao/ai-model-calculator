@@ -116,37 +116,37 @@ Refit: `python3 validation_runs.py --fit`; the test fails if the constants diffe
 Nemotron-4 340B, MT-NLG 530B, Qwen3 8B and 30B-A3B), H100 / H200 / H800 / B200 / B300 / A100, BF16 and
 FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
 
-| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Set |
-|---|---|---|---|---|---|---|---|---|---|
-| nemo-h100-llama3-8b | Llama-3-8B | 8 | dgx-h100 | fp8 | tokens_per_gpu | 14,744 tok/s/GPU | 14,697 tok/s/GPU | -0.3% | fit |
-| nemo-h100-llama3-70b | Llama-3-70B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 1,663 tok/s/GPU | 1,671 tok/s/GPU | +0.5% | fit |
-| nemo-h100-llama31-405b | Llama-3.1-405B | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 320 tok/s/GPU | 297 tok/s/GPU | -7.3% | hold-out |
-| nemo-h100-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 8,275 tok/s/GPU | 8,087 tok/s/GPU | -2.3% | fit |
-| nemo-h100-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,280 tok/s/GPU | 1,296 tok/s/GPU | +1.2% | hold-out |
-| nemo-h100-deepseek-v3 | DeepSeek-V3 | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 887 tok/s/GPU | 1,000 tok/s/GPU | +12.7% | fit |
-| nemo-h100-gpt3-175b | GPT-3-175B | 512 | dgx-h100 | fp8 | tokens_per_gpu | 824 tok/s/GPU | 760 tok/s/GPU | -7.8% | hold-out |
-| nemo-h100-nemotron4-340b | Nemotron-4-340B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 335 tok/s/GPU | 360 tok/s/GPU | +7.4% | hold-out |
-| nemo-b200-llama3-8b | Llama-3-8B | 8 | dgx-b200 | fp8 | tokens_per_gpu | 30,131 tok/s/GPU | 32,369 tok/s/GPU | +7.4% | fit |
-| nemo-b200-llama3-70b | Llama-3-70B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 3,690 tok/s/GPU | 3,468 tok/s/GPU | -6.0% | fit |
-| nemo-b200-llama31-405b | Llama-3.1-405B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 674 tok/s/GPU | 657 tok/s/GPU | -2.5% | hold-out |
-| nemo-b200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 16,384 tok/s/GPU | 17,302 tok/s/GPU | +5.6% | hold-out |
-| nemo-b200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 2,548 tok/s/GPU | 2,670 tok/s/GPU | +4.8% | hold-out |
-| nemo-b200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-b200 | fp8 | tokens_per_gpu | 1,640 tok/s/GPU | 2,001 tok/s/GPU | +22.0% | hold-out |
-| nemo-b200-gpt3-175b | GPT-3-175B | 512 | dgx-b200 | fp8 | tokens_per_gpu | 1,523 tok/s/GPU | 1,586 tok/s/GPU | +4.2% | hold-out |
-| nemo-b200-nemotron4-340b | Nemotron-4-340B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 632 tok/s/GPU | 725 tok/s/GPU | +14.7% | hold-out |
-| meta-llama3-405b-8k-gpus | Llama-3.1-405B | 8192 | meta-h100-roce | bf16 | mfu | 43.0% | 50.5% | +17.4% | hold-out |
-| meta-llama3-405b-16k-gpus | Llama-3.1-405B | 16384 | meta-h100-roce | bf16 | mfu | 41.0% | 47.9% | +16.8% | hold-out |
-| deepseek-v3-paper | DeepSeek-V3 | 2048 | deepseek-h800 | fp8 | tokens_per_gpu_wallclock | 1,543 tok/s/GPU | 2,022 tok/s/GPU | +31.0% | hold-out |
-| mtnlg-530b-2240-gpus | MT-NLG-530B | 2240 | dgx-a100-40g | bf16 | mfu | 40.4% | 40.4% | -0.0% | fit |
-| mtnlg-530b-2800-gpus | MT-NLG-530B | 2800 | dgx-a100-40g | bf16 | mfu | 38.8% | 39.2% | +1.0% | hold-out |
-| mtnlg-530b-3360-gpus | MT-NLG-530B | 3360 | dgx-a100-40g | bf16 | mfu | 36.2% | 38.0% | +5.0% | hold-out |
-| repo-llama70b-bf16-p5en | Llama-3-70B | 64 | p5en.48xlarge | bf16 | tokens_per_gpu | 1,200 tok/s/GPU | 1,133 tok/s/GPU | -5.6% | fit |
-| repo-llama70b-fp8-p5en | Llama-3-70B | 64 | p5en.48xlarge | fp8 | tokens_per_gpu | 1,831 tok/s/GPU | 1,679 tok/s/GPU | -8.3% | hold-out |
-| repo-llama70b-bf16-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | bf16 | tokens_per_gpu | 1,860 tok/s/GPU | 1,960 tok/s/GPU | +5.3% | fit |
-| repo-llama70b-fp8-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | fp8 | tokens_per_gpu | 3,474 tok/s/GPU | 3,468 tok/s/GPU | -0.2% | hold-out |
-| repo-qwen3-8b-bf16-p5en | Qwen3-8B | 16 | p5en.48xlarge | bf16 | tokens_per_gpu | 10,125 tok/s/GPU | 10,728 tok/s/GPU | +6.0% | fit |
-| repo-qwen3-8b-bf16-b300 | Qwen3-8B | 16 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 19,875 tok/s/GPU | 18,877 tok/s/GPU | -5.0% | fit |
-| repo-qwen3-30b-a3b-bf16-p5en | Qwen3-30B-A3B | 64 | p5en.48xlarge | bf16 | mfu | 33.7% | 32.8% | -2.8% | fit |
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-h100-llama3-8b | Llama-3-8B | 8 | dgx-h100 | fp8 | tokens_per_gpu | 14,744 tok/s/GPU | 14,697 tok/s/GPU | -0.3% | 43.0% | 98.1 / 98.4 | fit |
+| nemo-h100-llama3-70b | Llama-3-70B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 1,663 tok/s/GPU | 1,671 tok/s/GPU | +0.5% | 40.6% | 108.7 / 108.2 | fit |
+| nemo-h100-llama31-405b | Llama-3.1-405B | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 320 tok/s/GPU | 297 tok/s/GPU | -7.3% | 39.3% | 35.3 / 38.1 | hold-out |
+| nemo-h100-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 8,275 tok/s/GPU | 8,087 tok/s/GPU | -2.3% | 33.9% | 21.9 / 22.4 | fit |
+| nemo-h100-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,280 tok/s/GPU | 1,296 tok/s/GPU | +1.2% | 33.0% | 35.3 / 34.9 | hold-out |
+| nemo-h100-deepseek-v3 | DeepSeek-V3 | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 887 tok/s/GPU | 1,000 tok/s/GPU | +12.7% | 14.7% | 12.7 / 11.3 | fit |
+| nemo-h100-gpt3-175b | GPT-3-175B | 512 | dgx-h100 | fp8 | tokens_per_gpu | 824 tok/s/GPU | 760 tok/s/GPU | -7.8% | 41.3% | 27.4 / 29.8 | hold-out |
+| nemo-h100-nemotron4-340b | Nemotron-4-340B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 335 tok/s/GPU | 360 tok/s/GPU | +7.4% | 38.3% | 135.0 / 125.6 | hold-out |
+| nemo-b200-llama3-8b | Llama-3-8B | 8 | dgx-b200 | fp8 | tokens_per_gpu | 30,131 tok/s/GPU | 32,369 tok/s/GPU | +7.4% | 41.7% | 48.0 / 44.7 | fit |
+| nemo-b200-llama3-70b | Llama-3-70B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 3,690 tok/s/GPU | 3,468 tok/s/GPU | -6.0% | 37.1% | 49.0 / 52.1 | fit |
+| nemo-b200-llama31-405b | Llama-3.1-405B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 674 tok/s/GPU | 657 tok/s/GPU | -2.5% | 38.3% | 134.2 / 137.7 | hold-out |
+| nemo-b200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 16,384 tok/s/GPU | 17,302 tok/s/GPU | +5.6% | 31.9% | 11.0 / 10.5 | hold-out |
+| nemo-b200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 2,548 tok/s/GPU | 2,670 tok/s/GPU | +4.8% | 29.9% | 17.7 / 16.9 | hold-out |
+| nemo-b200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-b200 | fp8 | tokens_per_gpu | 1,640 tok/s/GPU | 2,001 tok/s/GPU | +22.0% | 12.9% | 27.6 / 22.6 | hold-out |
+| nemo-b200-gpt3-175b | GPT-3-175B | 512 | dgx-b200 | fp8 | tokens_per_gpu | 1,523 tok/s/GPU | 1,586 tok/s/GPU | +4.2% | 37.9% | 14.8 / 14.3 | hold-out |
+| nemo-b200-nemotron4-340b | Nemotron-4-340B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 632 tok/s/GPU | 725 tok/s/GPU | +14.7% | 33.9% | 143.1 / 124.8 | hold-out |
+| meta-llama3-405b-8k-gpus | Llama-3.1-405B | 8192 | meta-h100-roce | bf16 | mfu | 43.0% | 50.5% | +17.4% | 50.5% | – | hold-out |
+| meta-llama3-405b-16k-gpus | Llama-3.1-405B | 16384 | meta-h100-roce | bf16 | mfu | 41.0% | 47.9% | +16.8% | 47.9% | – | hold-out |
+| deepseek-v3-paper | DeepSeek-V3 | 2048 | deepseek-h800 | fp8 | tokens_per_gpu_wallclock | 1,543 tok/s/GPU | 2,022 tok/s/GPU | +31.0% | 33.0% | 3.7 / 2.8 | hold-out |
+| mtnlg-530b-2240-gpus | MT-NLG-530B | 2240 | dgx-a100-40g | bf16 | mfu | 40.4% | 40.4% | -0.0% | 40.4% | – | fit |
+| mtnlg-530b-2800-gpus | MT-NLG-530B | 2800 | dgx-a100-40g | bf16 | mfu | 38.8% | 39.2% | +1.0% | 39.2% | – | hold-out |
+| mtnlg-530b-3360-gpus | MT-NLG-530B | 3360 | dgx-a100-40g | bf16 | mfu | 36.2% | 38.0% | +5.0% | 38.0% | – | hold-out |
+| repo-llama70b-bf16-p5en | Llama-3-70B | 64 | p5en.48xlarge | bf16 | tokens_per_gpu | 1,200 tok/s/GPU | 1,133 tok/s/GPU | -5.6% | 55.2% | 150.7 / 159.6 | fit |
+| repo-llama70b-fp8-p5en | Llama-3-70B | 64 | p5en.48xlarge | fp8 | tokens_per_gpu | 1,831 tok/s/GPU | 1,679 tok/s/GPU | -8.3% | 40.8% | 98.8 / 107.7 | hold-out |
+| repo-llama70b-bf16-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | bf16 | tokens_per_gpu | 1,860 tok/s/GPU | 1,960 tok/s/GPU | +5.3% | 41.9% | 97.2 / 92.3 | fit |
+| repo-llama70b-fp8-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | fp8 | tokens_per_gpu | 3,474 tok/s/GPU | 3,468 tok/s/GPU | -0.2% | 37.1% | 52.1 / 52.1 | hold-out |
+| repo-qwen3-8b-bf16-p5en | Qwen3-8B | 16 | p5en.48xlarge | bf16 | tokens_per_gpu | 10,125 tok/s/GPU | 10,728 tok/s/GPU | +6.0% | 57.1% | 71.4 / 67.4 | fit |
+| repo-qwen3-8b-bf16-b300 | Qwen3-8B | 16 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 19,875 tok/s/GPU | 18,877 tok/s/GPU | -5.0% | 44.2% | 36.4 / 38.3 | fit |
+| repo-qwen3-30b-a3b-bf16-p5en | Qwen3-30B-A3B | 64 | p5en.48xlarge | bf16 | mfu | 33.7% | 32.8% | -2.8% | 32.8% | – | fit |
 
 | Set | Runs | Median abs error | Max abs error |
 |---|---|---|---|
@@ -155,7 +155,10 @@ FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
 | Fit | 12 | 5.2% | 12.7% |
 | Old calculator (fixed 40% MFU), same runs | 29 | 38.0% | 143.6% |
 
-Throughput errors equal days errors (days = tokens / throughput).
+Days per 1T tokens = 1e12 / (tokens/s/GPU x GPUs) / 86400, from the reported and the predicted
+throughput, so its error equals the throughput error. MFU-only runs (Meta, MT-NLG, Qwen3-30B-A3B)
+publish no tokens/s; for those the MFU is compared directly. The only published wall time in the
+set is DeepSeek-V3's (GPU-hours), compared with the 90% goodput applied.
 
 Sources: NeMo 25.07 and 25.04 performance summaries
 ([25.07](https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html),

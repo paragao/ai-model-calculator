@@ -247,14 +247,39 @@ def fit():
             "moe_expert_factor": moe_factor, "moe_expert_half_ffn": moe_half, "fit_runs": [r["id"] for r in RUNS if r["fit"]]}
 
 
+def days_per_trillion(row, value):
+    """Days to train 1T tokens on the run's GPUs at a tokens/s/GPU value (None for MFU-only runs)."""
+    if row["metric"] == "mfu":
+        return None
+    return 1e12 / (value * row["gpus"]) / 86400
+
+
 def markdown(rows):
-    out = ["| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Set |",
-           "|---|---|---|---|---|---|---|---|---|---|"]
+    out = ["| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | "
+           "Predicted MFU | Days per 1T tokens, reported / predicted | Set |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for x in rows:
         fmt = (lambda v: f"{v * 100:.1f}%") if x["metric"] == "mfu" else (lambda v: f"{v:,.0f} tok/s/GPU")
+        dr, dp = days_per_trillion(x, x["reported"]), days_per_trillion(x, x["predicted"])
+        days = f"{dr:,.1f} / {dp:,.1f}" if dr else "–"
         out.append(f"| {x['id']} | {x['model']} | {x['gpus']} | {x['hardware']} | {x['precision']} | {x['metric']} | "
-                   f"{fmt(x['reported'])} | {fmt(x['predicted'])} | {x['error_pct']:+.1f}% | {'fit' if x['fit'] else 'hold-out'} |")
+                   f"{fmt(x['reported'])} | {fmt(x['predicted'])} | {x['error_pct']:+.1f}% | "
+                   f"{x['predicted_mfu'] * 100:.1f}% | {days} | {'fit' if x['fit'] else 'hold-out'} |")
     return "\n".join(out)
+
+
+def html_table(rows):
+    """One-line HTML table (for an MR description pushed as a git push option)."""
+    cells = ["<tr><th>Run</th><th>GPUs</th><th>Hardware</th><th>Prec</th><th>Reported</th><th>Predicted</th>"
+             "<th>Error</th><th>Pred. MFU</th><th>Days/1T rep. / pred.</th><th>Set</th></tr>"]
+    for x in rows:
+        fmt = (lambda v: f"{v * 100:.1f} pct MFU") if x["metric"] == "mfu" else (lambda v: f"{v:,.0f} tok/s/GPU")
+        dr, dp = days_per_trillion(x, x["reported"]), days_per_trillion(x, x["predicted"])
+        days = f"{dr:,.1f} / {dp:,.1f}" if dr else "-"
+        cells.append(f"<tr><td>{x['id']}</td><td>{x['gpus']}</td><td>{x['hardware']}</td><td>{x['precision']}</td>"
+                     f"<td>{fmt(x['reported'])}</td><td>{fmt(x['predicted'])}</td><td>{x['error_pct']:+.1f} pct</td>"
+                     f"<td>{x['predicted_mfu'] * 100:.1f} pct</td><td>{days}</td><td>{'fit' if x['fit'] else 'hold-out'}</td></tr>")
+    return "<table>" + "".join(cells) + "</table>"
 
 
 if __name__ == "__main__":

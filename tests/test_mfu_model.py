@@ -129,6 +129,10 @@ class Validation(unittest.TestCase):
         self.assertEqual(mm.VALIDATION_SUMMARY["max_abs_error_pct"], s["all"]["max_abs_error_pct"])
         self.assertEqual(mm.VALIDATION_SUMMARY["hold_out_median_abs_error_pct"], s["hold_out"]["median_abs_error_pct"])
 
+    def test_docs_table_is_current(self):
+        doc = (Path(__file__).parent.parent / "docs" / "CALCULATOR-MFU.md").read_text()
+        self.assertIn(vr.markdown(self.rows), doc)
+
     def test_known_runs_llama3_405b_and_deepseek_v3(self):
         by_id = {r["id"]: r for r in self.rows}
         for rid in ("meta-llama3-405b-8k-gpus", "meta-llama3-405b-16k-gpus", "deepseek-v3-paper",
