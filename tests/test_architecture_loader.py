@@ -154,3 +154,95 @@ def test_cli_hf_config_runs_end_to_end(capsys):
                               "--hw-name", HARDWARE[0]["name"], "--report"])
     out = capsys.readouterr().out
     assert "Param2-17B" in out and "Phase 1" in out
+
+
+# ---- generic parsing: published configs, no per-model branches ---------------
+# (config fields as published; expected = published total / active parameters, billions)
+
+def _cfg(**kw):
+    return kw
+
+
+PUBLISHED = [
+    # name, config, total_B, active_B, attention kind, tolerance (fraction)
+    ("Llama-3.1-8B dense GQA",
+     _cfg(num_hidden_layers=32, hidden_size=4096, intermediate_size=14336, num_attention_heads=32,
+          num_key_value_heads=8, vocab_size=128256, tie_word_embeddings=False),
+     8.03, 8.03, "GQA", 0.005),
+    ("Llama-3.1-70B dense GQA",
+     _cfg(num_hidden_layers=80, hidden_size=8192, intermediate_size=28672, num_attention_heads=64,
+          num_key_value_heads=8, vocab_size=128256, tie_word_embeddings=False),
+     70.55, 70.55, "GQA", 0.005),
+    ("Mixtral-8x7B MoE GQA (num_local_experts)",
+     _cfg(num_hidden_layers=32, hidden_size=4096, intermediate_size=14336, num_attention_heads=32,
+          num_key_value_heads=8, vocab_size=32000, tie_word_embeddings=False,
+          num_local_experts=8, num_experts_per_tok=2),
+     46.7, 12.9, "GQA", 0.01),
+    ("Qwen3-30B-A3B MoE GQA, explicit head_dim",
+     _cfg(num_hidden_layers=48, hidden_size=2048, intermediate_size=6144, num_attention_heads=32,
+          num_key_value_heads=4, head_dim=128, vocab_size=151936, tie_word_embeddings=False,
+          num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768),
+     30.5, 3.3, "GQA", 0.02),
+    ("DeepSeek-V3 MoE MLA, 1 shared expert, 3 dense layers",
+     _cfg(num_hidden_layers=61, hidden_size=7168, intermediate_size=18432, num_attention_heads=128,
+          num_key_value_heads=128, vocab_size=129280, tie_word_embeddings=False,
+          n_routed_experts=256, n_shared_experts=1, num_experts_per_tok=8, moe_intermediate_size=2048,
+          first_k_dense_replace=3, q_lora_rank=1536, kv_lora_rank=512, qk_nope_head_dim=128,
+          qk_rope_head_dim=64, v_head_dim=128),
+     671.0, 37.0, "MLA", 0.02),  # published count includes the MTP module the shape omits
+]
+
+
+def test_published_configs_reproduce_published_parameter_counts():
+    for name, cfg, total, active, kind, tol in PUBLISHED:
+        v = variant_from_architecture(cfg, name)
+        assert v["attention"] == kind, name
+        assert abs(v["total_params_B"] - total) / total <= tol, (name, v["total_params_B"], total)
+        assert abs(v["active_params_B"] - active) / active <= max(tol, 0.02), (name, v["active_params_B"], active)
+
+
+def test_dense_models_have_no_expert_fields():
+    v = variant_from_architecture(PUBLISHED[0][1], "dense")
+    assert v["expert_ffn"] == 0 and v["shared_each"] == 0 and "num_experts" not in v
+    assert v["dense_layers"] == v["layers"]
+    assert v["active_params_B"] == v["total_params_B"]
+
+
+def test_gqa_attention_is_smaller_than_mha_with_same_heads():
+    base = dict(PUBLISHED[0][1])
+    mha = variant_from_architecture({**base, "num_key_value_heads": 32}, "mha")
+    gqa = variant_from_architecture(base, "gqa")
+    assert gqa["attn_per_layer"] < mha["attn_per_layer"]
+    assert mha["attention"] == "MHA" and gqa["attention"] == "GQA"
+
+
+def test_moe_active_is_below_total_and_grows_with_topk():
+    base = dict(PUBLISHED[3][1])
+    lo = variant_from_architecture({**base, "num_experts_per_tok": 2}, "k2")
+    hi = variant_from_architecture({**base, "num_experts_per_tok": 8}, "k8")
+    assert lo["total_params_B"] == hi["total_params_B"]
+    assert lo["active_params_B"] < hi["active_params_B"] < hi["total_params_B"]
+
+
+def test_each_shared_expert_spelling_gives_the_same_width():
+    base = dict(PUBLISHED[3][1], first_k_dense_replace=0)
+    qwen_style = variant_from_architecture({**base, "shared_expert_intermediate_size": 1536}, "a")
+    count_style = variant_from_architecture({**base, "n_shared_experts": 2}, "b")      # 2 x 768
+    explicit = variant_from_architecture({**base, "moe_shared_expert_intermediate_size": 1536}, "c")
+    assert qwen_style["shared_each"] == count_style["shared_each"] == explicit["shared_each"] == 3 * 2048 * 1536
+
+
+def test_hybrid_linear_attention_changes_attention_only():
+    base = dict(PUBLISHED[0][1])
+    hybrid = variant_from_architecture(
+        {**base, "linear_attn_layers": 24, "linear_attn_heads": 32, "linear_attn_head_dim": 128}, "h")
+    plain = variant_from_architecture(base, "p")
+    assert hybrid["attn_per_layer"] != plain["attn_per_layer"]
+    assert hybrid["expert_each"] == plain["expert_each"] and hybrid["dense_layers"] == plain["dense_layers"]
+    assert "linear attention in 24" in hybrid["attention"]
+
+
+def test_missing_required_fields_are_rejected():
+    import pytest
+    with pytest.raises(ValueError):
+        variant_from_architecture({"hidden_size": 1024}, "bad")
