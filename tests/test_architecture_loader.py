@@ -13,11 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.architecture_loader import (
     architecture_from_config,
-    attention_params,
     variant_from_architecture,
     load_variant_from_hf_config,
-    _num,
 )
+from utils import mfu_model as mm
 from utils.core_calculations import calculate_model_memory_gb
 from utils.phase6_pp_comm import calculate_pp_communication, microbatches_per_step
 
@@ -72,7 +71,8 @@ def test_mla_attention_formula():
     d, h = 4096, 64
     arch = {"kv_lora_rank": 512, "q_lora_rank": 1536, "qk_nope_head_dim": 256,
             "qk_rope_head_dim": 0, "v_head_dim": 256}
-    total, kind = attention_params(_num(arch), d, 1, h, h, 0)
+    a = mm.attention_shape({**arch, "num_attention_heads": h, "num_key_value_heads": h}, d, 1)
+    total, kind = a["params"], a["kind"]
     q = d * 1536 + 1536 * h * 256
     kv = d * 512 + 512 * h * (256 + 256)
     o = h * 256 * d
@@ -83,13 +83,14 @@ def test_mla_attention_formula():
 def test_mla_with_zero_head_dim_is_not_zero():
     """A plain GQA formula on head_dim=0 returns 0 attention parameters."""
     arch = {"kv_lora_rank": 512, "qk_nope_head_dim": 128, "qk_rope_head_dim": 64, "v_head_dim": 128}
-    total, _ = attention_params(_num(arch), 7168, 1, 128, 128, 0)
+    total = mm.attention_shape({**arch, "num_attention_heads": 128, "num_key_value_heads": 128}, 7168, 1)["params"]
     assert total > 0
 
 
 def test_linear_attention_layers_use_their_own_width():
     arch = {"linear_attn_layers": 3, "linear_attn_heads": 8, "linear_attn_head_dim": 64}
-    total, kind = attention_params(_num(arch), 1024, 4, 16, 16, 64)
+    a = mm.attention_shape({**arch, "num_attention_heads": 16, "num_key_value_heads": 16, "head_dim": 64}, 1024, 4)
+    total, kind = a["params"], a["kind"]
     full = 2 * 1024 * (16 + 16) * 64
     linear = 4 * 1024 * 8 * 64
     assert total == full + 3 * linear

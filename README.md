@@ -23,6 +23,23 @@ Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSe
 | 5. MoE All-to-All | Intra-node communication for expert routing |
 | 6. PP SendRecv | Pipeline parallelism latency — NVLink (intra-node) vs EFA (inter-node), bubble % |
 
+### Phase 9: estimated MFU, plan search, days and cost
+
+`--estimate` replaces the fixed `MFU = 0.40` with an estimate from the architecture, the parallel plan
+and the hardware, and searches every TP x PP x EP plan that divides the GPU count (memory checked with
+that plan). It prints the plan, MFU, tokens/s, days (90% goodput), cost and the parts of the step time.
+
+```bash
+python3 ai_model_calculator.py --hf-config config.json --estimate --instance h200 --num-gpus 64 --tokens-b 1000
+python3 ai_model_calculator.py --model Llama-3.1-70B --estimate --num-gpus auto --target-days 30 --tokens-b 15000
+```
+
+Options: `--instance`, `--num-gpus N|auto`, `--tokens-b`, `--seq-len`, `--precision bf16|fp8`,
+`--tp/--pp/--ep` (fix a degree), `--vp`, `--gbs`, `--mfu` (override), `--target-days`, `--format text|json`.
+Formulas, constants and sources: [docs/CALCULATOR-MFU.md](docs/CALCULATOR-MFU.md). Accuracy against
+29 published runs: `python3 -m utils.validation_runs` (median error 5.6%, max 31.0%). The six-phase
+analysis still uses `project_config.MFU`.
+
 ## Key Features
 
 - **MoE-aware memory**: Dispatch buffers, NCCL workspace scaling with EP (charged only when world size > 1), measured allocator overhead (1.02×), EP/DP optimizer sharding
