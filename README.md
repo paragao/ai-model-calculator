@@ -48,6 +48,11 @@ python3 ai_model_calculator.py --model llama-3.1-8b
 # Analyze a custom architecture from a JSON file (replaces built-in variants)
 python3 ai_model_calculator.py --json my_model.json
 
+# Analyze a model straight from its Hugging Face config.json (parameters, shared
+# experts, MLA and linear-attention layers are derived; --params-total-b is the
+# exact total from the safetensors index, optional)
+python3 ai_model_calculator.py --hf-config config.json --params-total-b 321.32
+
 # Analyze against a custom hardware set from a JSON file (replaces built-in hardware)
 python3 ai_model_calculator.py --hardware my_hardware.json
 
@@ -72,6 +77,8 @@ No external dependencies — Python standard library only.
 |--------|-------------|
 | `--model NAME` | Analyze only the variant named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--json` list when combined. Unknown names print the available variants and exit non-zero. |
 | `--json FILE` | Analyze the variant(s) defined in `FILE` **only** (replaces the built-in variants). |
+| `--hf-config FILE` | Analyze the model described by a Hugging Face `config.json` **only**. Derives total and active parameters (shared experts included), MLA and hybrid linear attention. Multimodal configs are read from `text_config`. Not combinable with `--json`. |
+| `--params-total-b B` | With `--hf-config`: exact total parameters in billions. Wins over the count derived from the shape. |
 | `--hardware FILE` | Analyze against the hardware config(s) defined in `FILE` **only** (replaces the built-in hardware list). |
 | `--hw-name NAME` | Analyze only the hardware entry named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--hardware` list when combined. Unknown names print the available hardware and exit non-zero. |
 | `--report` | Emit a concise markdown-style summary instead of the full per-phase output. |

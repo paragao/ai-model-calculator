@@ -6,11 +6,17 @@ actual six-phase computation to ``model_calculations.run``.
 
 Usage:
     python3 ai_model_calculator.py [--model NAME] [--json FILE]
+                                   [--hf-config FILE [--params-total-b B]]
                                    [--hardware FILE] [--hw-name NAME] [--report]
 
 Resolution:
     --json FILE     Compute ONLY the variant(s) defined in FILE (replaces the
                     project's built-in variants). Derived fields are auto-computed.
+    --hf-config FILE
+                    Compute ONLY the model described by a Hugging Face config.json.
+                    Parameters, active parameters, shared experts, MLA and
+                    linear-attention layers are derived from the config.
+                    --params-total-b B gives the exact total (safetensors index).
     --model NAME    Restrict the run to a single variant matched by name
                     (case-insensitive, exact). Applies to either the built-in
                     list or the --json list.
@@ -48,6 +54,22 @@ def build_parser():
              "provided, ONLY these variants are analyzed (replaces built-ins).",
     )
     parser.add_argument(
+        "--hf-config",
+        metavar="FILE",
+        dest="hf_config",
+        help="Path to a Hugging Face config.json. The variant (total and active "
+             "parameters, shared experts, MLA / linear attention) is derived from "
+             "it, and ONLY this variant is analyzed. Not combinable with --json.",
+    )
+    parser.add_argument(
+        "--params-total-b",
+        metavar="B",
+        type=float,
+        dest="params_total_b",
+        help="With --hf-config: exact total parameters in billions, e.g. from the "
+             "safetensors index. Wins over the count derived from the shape.",
+    )
+    parser.add_argument(
         "--hardware",
         metavar="FILE",
         dest="hardware_file",
@@ -81,6 +103,26 @@ def resolve_variants(args):
         select_variant_by_name,
         VariantNotFoundError,
     )
+
+    if args.hf_config and args.json_file:
+        print("Error: --hf-config and --json cannot be combined.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.hf_config:
+        import os
+        from utils.architecture_loader import load_variant_from_hf_config
+        name = os.path.splitext(os.path.basename(args.hf_config))[0]
+        try:
+            variants = [load_variant_from_hf_config(
+                args.hf_config, name=args.model or name,
+                params_total_b=args.params_total_b)]
+        except FileNotFoundError:
+            print(f"Error: config file not found: {args.hf_config}", file=sys.stderr)
+            sys.exit(1)
+        except (ValueError, KeyError) as e:
+            print(f"Error: invalid config.json ({args.hf_config}): {e}", file=sys.stderr)
+            sys.exit(1)
+        return variants
 
     if args.json_file:
         from configuration.project_config import N_EXPERTS

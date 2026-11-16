@@ -944,7 +944,9 @@ def run(variants, hardware, *, report=False):
 
                 # GBS from tokens_per_batch / seq_len (per-variant sequence length)
                 v_seq_len = v.get("seq_len", SEQ_LEN)
-                gbs = int(TOKENS_PER_BATCH / v_seq_len)
+                # At least one micro-batch per data-parallel rank; a smaller batch
+                # would give 0 micro-batches and a 100% bubble.
+                gbs = max(int(TOKENS_PER_BATCH / v_seq_len), best_micro * dp)
 
                 pp_metrics = calculate_pp_communication(
                     layers=v["layers"],

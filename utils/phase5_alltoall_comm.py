@@ -12,6 +12,7 @@ from configuration.advanced_config import *
 # Import formatting utilities
 from .formatting_utils import color_text
 from .core_calculations import resolve_topk
+from .phase6_pp_comm import microbatches_per_step
 
 
 def analyze_alltoall_communication(variant, hw, micro_batch_sizes):
@@ -256,7 +257,7 @@ def calculate_moe_all_to_all(layers_per_gpu, hidden_dim, seq_len, mbs, gbs, dp, 
     a2a_per_microbatch_bytes = layers_per_gpu * a2a_per_layer_bytes
 
     # Number of micro-batches per training step
-    num_microbatches = gbs // (mbs * dp) if (mbs * dp) > 0 else 1
+    num_microbatches = microbatches_per_step(gbs, mbs, dp)
 
     # Total A2A per training step
     total_a2a_bytes = a2a_per_microbatch_bytes * num_microbatches
