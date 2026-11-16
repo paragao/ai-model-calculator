@@ -1,0 +1,443 @@
+"""
+Expected-MFU model for LLM pre-training: architecture + parallel plan + hardware -> MFU,
+throughput, and the parts that make it up.
+
+ONE module, stdlib only, no globals read from elsewhere, so it can be ported 1:1
+(docs/CALCULATOR-MFU.md lists every formula and constant with its source).
+
+Conventions
+-----------
+- Parallel plan uses the Megatron-Core layout: N = TP x PP x CP x DP. EP is carved
+  out of DP (EP divides DP x CP); expert weights are sharded EP ways (and TP ways).
+- Model FLOPs per token (PaLM appendix B convention, fwd + bwd = 3 x fwd):
+      F = 6 x N_matmul + 6 x H x S x (d_qk + d_v) x L_full + 12 x H_lin x d_lin^2 x L_linear
+  N_matmul = active parameters that take part in a matmul (input embedding excluded,
+  LM head included). Full attention is counted non-causal, as PaLM and Megatron do.
+- MFU = F x tokens_per_step / (N x peak x step_time), peak = dense tensor peak of the
+  training precision (BF16 or FP8).
+
+Step-time model (per GPU, one optimizer step)
+---------------------------------------------
+  t_compute = F x tokens_per_step / N / (peak x eta)
+      eta = 1 / ((1 - f_e) / eta_base + f_e / (eta_base x moe_factor))
+      moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+      f_e = share of F spent in routed-expert matmuls
+  t_pipe    = t_compute / (1 - bubble),  bubble = (PP - 1) / (VP x m + PP - 1)
+      m = micro-batches per DP rank per step = GBS / (DP x MBS)
+  t_step    = t_pipe + exposed(TP) + exposed(CP) + exposed(EP) + exposed(DP)
+      exposed(x) = max(t_x x (1 - OVERLAP_x), t_x - t_compute)
+      t_x = bytes_x / (link_bandwidth x LINK_EFFICIENCY)
+Communication volumes are listed in each function below.
+"""
+from __future__ import annotations
+
+import math
+
+MODEL_VERSION = "mfu-model-1"
+
+# --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
+# peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
+#       B200 and B300: 2250 BF16, 4500 FP8 dense; HGX B300 = 36 PFLOPS FP8 dense / 8 GPUs).
+# nvlink: per GPU total NVLink bandwidth / 2 (H100/H200 900 GB/s, B200/B300 1800 GB/s,
+#       A100 600 GB/s, H800 400 GB/s).
+# net: scale-out bandwidth per GPU = instance (node) network bandwidth / 8 GPUs.
+#       AWS: p5/p5e/p5en/p6-b200 3200 Gbps EFA, p6-b300 6400 Gbps, p4d/p4de 400 Gbps.
+#       DGX H100 / DGX B200: 8 x 400 Gb/s ConnectX-7; DGX A100: 8 x 200 Gb/s HDR;
+#       Meta Llama 3 cluster: 400 Gbps RoCE per GPU; DeepSeek H800: 400 Gbps IB per GPU.
+HARDWARE = {
+    "p5.48xlarge":      {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
+    "p5e.48xlarge":     {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
+    "p5en.48xlarge":    {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
+    "p6-b200.48xlarge": {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
+    "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
+    "p4d.24xlarge":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
+    "p4de.24xlarge":    {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
+    # Non-AWS systems, used only by the validation set (published runs).
+    "dgx-h100":         {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
+    "dgx-b200":         {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
+    "dgx-a100-40g":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 25.0,  "gpn": 8},
+    "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
+    "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
+}
+
+# --- Calibration (fitted by validation_runs.fit() on the FIT subset; see docs) ---------------
+# eta_base: fraction of dense peak reached by the per-GPU compute of the step, before bubble
+# and exposed communication. One value per GPU family and precision, never per model.
+BASE_EFFICIENCY = {
+    ("hopper", "bf16"): 0.573,
+    ("hopper", "fp8"): 0.45,
+    ("blackwell", "bf16"): 0.443,
+    ("blackwell", "fp8"): 0.417,
+    ("ampere", "bf16"): 0.471,
+}
+# Routed-expert matmuls (grouped GEMMs, permute/unpermute, routing) run at
+#   moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+# of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
+MOE_EXPERT_FACTOR = 0.8
+MOE_EXPERT_HALF_FFN = 512
+
+# --- Stated assumptions (not fitted) ---------------------------------------------------------
+LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80}
+# nvlink 0.76: our DeepEP intranode dispatch 340 GB/s on p5en vs 450 GB/s per direction
+#   (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes). net 0.80: assumption (NCCL ring busbw).
+OVERLAP = {"tp": 0.5, "cp": 0.9, "ep": 0.0, "dp": 0.9, "fsdp": 0.8}
+# Share of each communication hidden behind compute (assumptions: Megatron-Core TP-comm
+# overlap, ring-attention CP, distributed-optimizer grad/param overlap). EP all-to-all is not
+# overlapped by default (Megatron-Core 1F1B); a plan may set overlap_ep (DualPipe: 0.95).
+GRAD_BYTES = 2      # BF16 gradient reduce-scatter
+PARAM_BYTES = 2     # BF16 parameter all-gather
+ACT_BYTES = 2       # BF16 activations on the wire (FP8 dispatch not modelled)
+
+# Wall-clock goodput: share of wall time spent in training steps (restarts, checkpoints and
+# evaluation take the rest). Llama 3 paper, Sec. 3.3.4: "higher than 90% effective training time".
+GOODPUT = 0.90
+
+# Default global batch when the request gives none: 16M tokens per step, the Llama 3 405B
+# setting (Llama 3 paper, Table 4); at least one micro-batch per DP rank.
+DEFAULT_TOKENS_PER_STEP = 16 * 1024 * 1024
+
+GATED_ACTIVATIONS = ("silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh")
+
+# Pinned result of validation_runs.py (test_mfu_model checks it is current).
+VALIDATION_SUMMARY = {"runs": 29, "hold_out_runs": 17, "median_abs_error_pct": 5.6, "max_abs_error_pct": 31.0,
+                      "hold_out_median_abs_error_pct": 7.3, "hold_out_max_abs_error_pct": 31.0,
+                      "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
+
+SOURCES = {
+    "llama3_table4": "https://arxiv.org/abs/2407.21783 (The Llama 3 Herd of Models, Table 4)",
+    "palm_flops": "https://arxiv.org/abs/2204.02311 (PaLM, Appendix B: model FLOPs)",
+    "megatron_bubble": "https://arxiv.org/abs/2104.04473 (Narayanan et al. 2021: bubble (p-1)/(v m))",
+    "nemo_perf": "https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html",
+}
+
+
+# === Shape: any Hugging Face config.json -> parameter and FLOP counts ==========================
+
+def _num(cfg, *keys, default=0):
+    for k in keys:
+        v = cfg.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return int(v)
+    return default
+
+
+def ffn_matrices(cfg):
+    """3 for a gated FFN (SwiGLU/GeGLU), 2 for a plain one (GELU/ReLU/ReLU^2).
+
+    GPT-2/OPT/BLOOM-style configs name the activation `activation_function`; those are gated
+    only if the name contains 'glu'. Otherwise hidden_act / hidden_activation decides; an
+    unknown or missing activation counts as gated (Llama-family default).
+    """
+    if isinstance(cfg.get("activation_function"), str):
+        return 3 if "glu" in cfg["activation_function"].lower() else 2
+    act = str(cfg.get("hidden_act") or cfg.get("hidden_activation") or "").lower()
+    if not act:
+        return 3
+    return 3 if act in GATED_ACTIVATIONS or "glu" in act else 2
+
+
+def moe_layer_count(cfg, layers, n_experts):
+    """MoE layers: explicit count, every k-th layer, or all after the first dense ones."""
+    if not n_experts:
+        return 0
+    if _num(cfg, "moe_layers"):
+        return min(layers, _num(cfg, "moe_layers"))
+    step = _num(cfg, "decoder_sparse_step", "interleave_moe_layer_step", "moe_layer_freq")
+    if step > 1:
+        return layers // step
+    return layers - min(layers, _num(cfg, "first_k_dense_replace"))
+
+
+def attention_shape(cfg, d, layers):
+    """Attention parameters (all layers) and the per-layer dims that set its FLOPs."""
+    heads = _num(cfg, "num_attention_heads", "n_head", default=max(1, d // 128))
+    kv_heads = _num(cfg, "num_key_value_heads", "num_kv_heads", default=heads)
+    if cfg.get("multi_query") is True:
+        kv_heads = 1
+    head_dim = _num(cfg, "head_dim", default=d // heads)
+    kv_lora = _num(cfg, "kv_lora_rank")
+    if kv_lora:  # MLA
+        rope = _num(cfg, "qk_rope_head_dim")
+        qk = (_num(cfg, "qk_nope_head_dim") + rope) or _num(cfg, "qk_head_dim") or head_dim
+        v = _num(cfg, "v_head_dim", default=qk)
+        q_lora = _num(cfg, "q_lora_rank")
+        q = d * q_lora + q_lora * heads * qk if q_lora else d * heads * qk
+        full = q + d * (kv_lora + rope) + kv_lora * heads * (qk - rope + v) + heads * v * d
+        kind = "MLA"
+    else:
+        qk = v = head_dim
+        full = d * head_dim * (2 * heads + 2 * kv_heads)
+        kind = "MQA" if kv_heads == 1 and heads > 1 else ("GQA" if kv_heads < heads else "MHA")
+    linear = min(layers, _num(cfg, "linear_attn_layers"))
+    lin_heads = _num(cfg, "linear_attn_heads", default=heads)
+    lin_dim = _num(cfg, "linear_attn_head_dim", default=head_dim)
+    params = full * (layers - linear) + 4 * d * lin_heads * lin_dim * linear
+    if linear:
+        kind = f"{kind} in {layers - linear} layers, linear attention in {linear}"
+    return {"kind": kind, "params": params, "per_layer_avg": params // layers, "heads": heads,
+            "kv_heads": kv_heads, "d_qk": qk, "d_v": v, "full_layers": layers - linear,
+            "linear_layers": linear, "lin_heads": lin_heads, "lin_dim": lin_dim}
+
+
+def model_shape(cfg, params_total_b=None):
+    """Parameter counts (total, active, experts) and FLOP inputs of any decoder-only config.
+
+    params_total_b (an exact count, e.g. the safetensors index) rescales the totals; the shape
+    sum is kept as shape_total_b. Returns plain numbers only.
+    """
+    layers = _num(cfg, "num_hidden_layers", "num_layers", "n_layer")
+    d = _num(cfg, "hidden_size", "d_model", "n_embd")
+    if not layers or not d:
+        raise ValueError("architecture needs num_hidden_layers and hidden_size")
+    vocab = _num(cfg, "vocab_size")
+    tied = cfg.get("tie_word_embeddings", True) is not False
+    mats = ffn_matrices(cfg)
+    dense_ffn = _num(cfg, "intermediate_size", "ffn_dim", "ffn_hidden_size", default=4 * d)
+    n_experts = _num(cfg, "n_routed_experts", "num_experts", "num_local_experts")
+    topk = _num(cfg, "num_experts_per_tok", "moe_topk", "top_k", default=1) if n_experts else 0
+    expert_ffn = _num(cfg, "moe_intermediate_size", default=dense_ffn) if n_experts else 0
+    shared_ffn = 0
+    if n_experts:
+        shared_ffn = (_num(cfg, "shared_expert_intermediate_size")
+                      or _num(cfg, "n_shared_experts", "num_shared_experts") * expert_ffn
+                      or _num(cfg, "moe_shared_expert_intermediate_size"))
+    moe_layers = moe_layer_count(cfg, layers, n_experts)
+    dense_layers = layers - moe_layers
+    attn = attention_shape(cfg, d, layers)
+
+    expert_each = mats * d * expert_ffn
+    shared = mats * d * shared_ffn
+    router = d * n_experts
+    dense_mlp = mats * d * dense_ffn
+    embed_in = vocab * d
+    lm_head = 0 if tied else vocab * d
+    expert_total = moe_layers * n_experts * expert_each
+    nonexpert = attn["params"] + dense_layers * dense_mlp + moe_layers * (shared + router) + embed_in + lm_head
+    shape_total = nonexpert + expert_total
+    expert_active = moe_layers * topk * expert_each
+    active = nonexpert + expert_active
+    scale = (float(params_total_b) * 1e9 / shape_total) if params_total_b else 1.0
+    # Matmul parameters per token: everything active except the input-embedding lookup
+    # (a tied LM head is still a matmul over the vocabulary).
+    matmul = active - embed_in + (embed_in if tied else 0)
+    # Multi-token prediction (num_nextn_predict_layers, DeepSeek-V3 / GLM): each MTP module is one
+    # more decoder layer, a 2d -> d projection and an LM-head pass. Compute only: checkpoints
+    # count these weights separately from the published total.
+    mtp = _num(cfg, "num_nextn_predict_layers")
+    layer_active = attn["per_layer_avg"] + ((shared + router + topk * expert_each) if n_experts else dense_mlp)
+    mtp_matmul = mtp * (layer_active + 2 * d * d + vocab * d)
+    mtp_expert = mtp * topk * expert_each if n_experts else 0
+    return {
+        "layers": layers, "d": d, "vocab": vocab, "tied_embeddings": tied, "ffn_matrices": mats,
+        "dense_ffn": dense_ffn, "dense_layers": dense_layers, "moe_layers": moe_layers,
+        "n_experts": n_experts, "topk": topk,
+        "n_group": _num(cfg, "n_group", default=1), "topk_group": _num(cfg, "topk_group", default=topk), "expert_ffn": expert_ffn, "shared_ffn": shared_ffn,
+        "attention": attn,
+        "attn_per_layer": attn["per_layer_avg"], "expert_each": expert_each, "shared_each": shared,
+        "router_each": router, "dense_layer_params": attn["per_layer_avg"] + dense_mlp,
+        "moe_layer_params": n_experts * expert_each + shared + router,
+        "shape_total_b": round(shape_total / 1e9, 2),
+        "total_b": round(shape_total * scale / 1e9, 2),
+        "active_b": round(active * scale / 1e9, 2),
+        "expert_total_b": round(expert_total * scale / 1e9, 4),
+        "matmul_active": (matmul + mtp_matmul) * scale,
+        "expert_active_matmul": (expert_active + mtp_expert) * scale,
+        "mtp_layers": mtp,
+        "scale": scale,
+    }
+
+
+def moe_expert_factor(expert_ffn):
+    return MOE_EXPERT_FACTOR * expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+
+
+def flops_per_token(shape, seq):
+    """Training model FLOPs per token (fwd + bwd), PaLM convention (see module docstring)."""
+    a = shape["attention"]
+    dense = 6.0 * shape["matmul_active"]
+    attn = 6.0 * a["heads"] * seq * (a["d_qk"] + a["d_v"]) * a["full_layers"]
+    linear = 12.0 * a["lin_heads"] * a["lin_dim"] ** 2 * a["linear_layers"]
+    return {"total": dense + attn + linear, "matmul": dense, "attention": attn + linear,
+            "experts": 6.0 * shape["expert_active_matmul"]}
+
+
+# === Plan -> step time and MFU ==================================================================
+
+def _bw(hw, kind):
+    return hw[kind] * LINK_EFFICIENCY[kind] * 1e9  # bytes/s
+
+
+def _span_bw(hw, inner, group):
+    """Collective bandwidth of `group` ranks spaced `inner` apart (ring/tree, NCCL-style).
+
+    Inside one node: NVLink. Across nodes: the group has r = gpn / inner ranks on each node and
+    its traffic leaves through those r GPUs' NICs, so bandwidth = min(NVLink, r x NIC per GPU).
+    """
+    if inner * group <= hw["gpn"]:
+        return _bw(hw, "nvlink")
+    r = max(1, hw["gpn"] // inner)
+    return min(hw["nvlink"] * LINK_EFFICIENCY["nvlink"], r * hw["net"] * LINK_EFFICIENCY["net"]) * 1e9
+
+
+def default_global_batch(seq, dp, mbs, tokens_per_step=DEFAULT_TOKENS_PER_STEP):
+    """Sequences per step: tokens_per_step / seq, rounded to whole micro-batches per DP rank (>= 1)."""
+    per_rank = max(1, round(tokens_per_step / seq / (dp * mbs)))
+    return per_rank * dp * mbs
+
+
+def estimate(shape, hw, plan, precision="bf16"):
+    """Expected step time, throughput and MFU of one plan, with every part.
+
+    plan: num_gpus, tp, pp, cp, vp, ep, mbs, seq, gbs (sequences; None = default),
+          zero (1 = distributed optimizer, 2 = grads reduce-scattered per micro-batch),
+          fsdp (bool: params gathered per micro-batch).
+    """
+    n = int(plan["num_gpus"])
+    tp, pp, cp = int(plan.get("tp", 1)), int(plan.get("pp", 1)), int(plan.get("cp", 1))
+    vp, ep, mbs = int(plan.get("vp", 1)), int(plan.get("ep", 1)), int(plan.get("mbs", 1))
+    seq = int(plan["seq"])
+    if n % (tp * pp * cp):
+        raise ValueError(f"TP x PP x CP = {tp * pp * cp} does not divide {n} GPUs")
+    dp = n // (tp * pp * cp)
+    # Expert layout (Megatron-Core): N / PP = ETP x EP x expert-DP. Expert TP = TP when that
+    # divides, else 1 (as the NeMo DeepSeek-V3 / Mixtral recipes set it).
+    per_stage = n // pp
+    etp = int(plan.get("etp") or (tp if per_stage % (tp * ep) == 0 else 1))
+    if per_stage % (etp * ep):
+        raise ValueError(f"EP {ep} x expert TP {etp} does not divide {per_stage} GPUs per pipeline stage")
+    prec = "fp8" if str(precision).lower() == "fp8" else "bf16"
+    peak = hw[prec] * 1e12
+    gbs_given = plan.get("gbs")
+    gbs = int(gbs_given) if gbs_given else default_global_batch(seq, dp, mbs)
+    m = max(1.0, gbs / (dp * mbs))
+    tokens_step = gbs * seq
+
+    fl = flops_per_token(shape, seq)
+    f_gpu = fl["total"] * tokens_step / n
+    eta_base = BASE_EFFICIENCY.get((hw["family"], prec)) or BASE_EFFICIENCY[(hw["family"], "bf16")]
+    f_e = fl["experts"] / fl["total"] if fl["total"] else 0.0
+    moe_factor = moe_expert_factor(shape["expert_ffn"]) if f_e else 1.0
+    eta = 1.0 / ((1 - f_e) / eta_base + f_e / (eta_base * moe_factor))
+    t_compute = f_gpu / (peak * eta)
+    bubble = (pp - 1) / (vp * m + pp - 1)
+    t_pipe = t_compute / (1 - bubble)
+
+    d, layers = shape["d"], shape["layers"]
+    layers_stage = layers / pp
+    moe_stage = shape["moe_layers"] / pp
+    tokens_mb = mbs * seq / cp  # tokens of one micro-batch on one CP rank
+
+    def exposed(t, overlap):
+        return max(t * (1 - overlap), t - t_compute) if t > 0 else 0.0
+
+    # TP with sequence parallel: per layer per micro-batch 4 all-gathers + 4 reduce-scatters
+    # (fwd 2+2, bwd 2+2), each moving (tp-1)/tp of the micro-batch activations.
+    t_tp = 0.0
+    if tp > 1:
+        b = 8 * (tp - 1) / tp * tokens_mb * d * ACT_BYTES * layers_stage * m
+        t_tp = b / _span_bw(hw, 1, tp)
+    # CP ring attention: per full-attention layer per micro-batch, K and V chunks pass cp-1
+    # times forward and twice that backward (3 x total).
+    t_cp = 0.0
+    a = shape["attention"]
+    if cp > 1:
+        kv = tokens_mb * 2 * a["kv_heads"] * a["d_qk"] * ACT_BYTES
+        b = 3 * (cp - 1) * kv * (a["full_layers"] / pp) * m
+        t_cp = b / _span_bw(hw, tp, cp)
+    # EP all-to-all: per MoE layer per micro-batch, dispatch + combine forward and backward
+    # (4 x), of the rank's tokens x top-k x hidden, (ep-1)/ep of it leaving the rank.
+    t_ep = 0.0
+    if ep > 1 and shape["moe_layers"]:
+        per_copy = 4 * (tokens_mb / tp) * d * ACT_BYTES * (ep - 1) / ep * moe_stage * m
+        on_node = max(1, hw["gpn"] // etp)
+        off = max(0.0, 1 - on_node / ep)
+        # Group-limited routing (config n_group > 1, topk_group): a token reaches at most
+        # topk_group groups, so at most that many copies cross the network.
+        # Only a dispatcher that de-duplicates per node (DeepEP; plan dedup_by_group) uses it.
+        grouped = shape["n_group"] > 1 and plan.get("dedup_by_group")
+        remote = min(shape["topk"], shape["topk_group"]) if grouped else shape["topk"]
+        t_ep = max(per_copy * remote * off / _bw(hw, "net"), per_copy * shape["topk"] * (1 - off) / _bw(hw, "nvlink"))
+    # DP: reduce-scatter grads + all-gather params over the DP group, (g-1)/g of the local
+    # shard each. Dense params: group DP x CP. Expert params: group DP x CP / EP, shard / EP.
+    expert_p = shape["expert_total_b"] * 1e9
+    dense_p = shape["total_b"] * 1e9 - expert_p
+    local_dense = dense_p / (tp * pp)
+    local_expert = expert_p / (etp * pp * max(ep, 1))
+    g_dense, g_expert = dp * cp, max(1, per_stage // (etp * max(ep, 1)))
+    per_byte = GRAD_BYTES + PARAM_BYTES
+
+    def dp_time(local, g):
+        if g <= 1:
+            return 0.0
+        return (g - 1) / g * local * per_byte / _span_bw(hw, tp, g)
+
+    t_dp = dp_time(local_dense, g_dense) + dp_time(local_expert, g_expert)
+    overlap_dp = OVERLAP["dp"]
+    if plan.get("fsdp"):
+        # FSDP: params gathered for fwd and bwd and grads reduce-scattered every micro-batch.
+        t_dp *= 1.5 * m
+        overlap_dp = OVERLAP["fsdp"]
+    elif int(plan.get("zero", 1)) >= 2:
+        t_dp = t_dp / 2 * (1 + m)  # grads reduce-scattered every micro-batch, params once
+    ov_ep = float(plan.get("overlap_ep", OVERLAP["ep"]))  # a schedule such as DualPipe hides more
+    e_tp, e_cp, e_ep = exposed(t_tp, OVERLAP["tp"]), exposed(t_cp, OVERLAP["cp"]), exposed(t_ep, ov_ep)
+    e_dp = exposed(t_dp, overlap_dp)
+    t_step = t_pipe + e_tp + e_cp + e_ep + e_dp
+    mfu = f_gpu / (peak * t_step)
+    return {
+        "model_version": MODEL_VERSION,
+        "precision": prec,
+        "peak_tflops_per_gpu": hw[prec],
+        "plan": {"num_gpus": n, "tp": tp, "pp": pp, "cp": cp, "vp": vp, "ep": ep, "etp": etp, "dp": dp, "mbs": mbs,
+                 "gbs": gbs, "gbs_source": "request" if gbs_given else "default_16M_tokens",
+                 "micro_batches": round(m, 2), "tokens_per_step": tokens_step},
+        "flops_per_token": fl["total"],
+        "attention_flops_share": round(fl["attention"] / fl["total"], 4) if fl["total"] else 0,
+        "expert_flops_share": round(f_e, 4),
+        "base_efficiency": eta_base,
+        "moe_expert_factor": round(moe_factor, 4) if f_e else None,
+        "compute_efficiency": round(eta, 4),
+        "bubble_fraction": round(bubble, 4),
+        "time_s": {"compute": t_compute, "bubble": t_pipe - t_compute, "tp_exposed": e_tp, "cp_exposed": e_cp,
+                   "ep_exposed": e_ep, "dp_exposed": e_dp, "tp_total": t_tp, "cp_total": t_cp,
+                   "ep_total": t_ep, "dp_total": t_dp, "step": t_step},
+        "mfu": mfu,
+        "model_tflops_per_gpu": f_gpu / t_step / 1e12,
+        "tokens_per_second": tokens_step / t_step,
+        "tokens_per_second_per_gpu": tokens_step / t_step / n,
+    }
+
+
+def mfu_factors(est):
+    """MFU as a product: base x MoE x (1 - bubble) x compute / (compute + bubble + exposed)."""
+    t = est["time_s"]
+    exposed = t["tp_exposed"] + t["cp_exposed"] + t["ep_exposed"] + t["dp_exposed"]
+    return {
+        "compute_efficiency": est["compute_efficiency"],
+        "pipeline_factor": round(1 - est["bubble_fraction"], 4),
+        "communication_factor": round((t["compute"] + t["bubble"]) / t["step"], 4),
+        "exposed_comm_share_of_step": round(exposed / t["step"], 4),
+        "mfu": est["mfu"],
+    }
+
+
+def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096):
+    """Plans the search tries: TP in {1,2,4,8} (<= node), PP up to 16 (layer divisors and powers
+    of 2), CP 1 (CP > 1 only for sequences >= 32K), EP powers of 2 dividing the experts."""
+    tps = [t for t in (1, 2, 4, 8) if t <= gpn and num_gpus % t == 0]
+    divisors = {p for p in range(1, layers + 1) if layers % p == 0}
+    pps = sorted({p for p in divisors | {1, 2, 4, 8, 16} if p <= min(16, layers)})
+    cps = [1] + ([2, 4, 8] if seq >= 32768 else [])
+    eps = [1] + [e for e in (2, 4, 8, 16, 32, 64, 128, 256) if n_experts and n_experts % e == 0]
+    out = []
+    for tp in tps:
+        for pp in pps:
+            for cp in cps:
+                if num_gpus % (tp * pp * cp):
+                    continue
+                dp = num_gpus // (tp * pp * cp)
+                for ep in eps:
+                    if ep > 1 and (num_gpus // pp) % ep:
+                        continue
+                    out.append({"tp": tp, "pp": pp, "cp": cp, "ep": ep, "dp": dp})
+    return out

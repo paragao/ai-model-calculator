@@ -23,6 +23,23 @@ Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSe
 | 5. MoE All-to-All | Intra-node communication for expert routing |
 | 6. PP SendRecv | Pipeline parallelism latency — NVLink (intra-node) vs EFA (inter-node), bubble % |
 
+### Phase 9: estimated MFU, plan search, days and cost
+
+`--estimate` replaces the fixed `MFU = 0.40` with an estimate from the architecture, the parallel plan
+and the hardware, and searches every TP x PP x EP plan that divides the GPU count (memory checked with
+that plan). It prints the plan, MFU, tokens/s, days (90% goodput), cost and the parts of the step time.
+
+```bash
+python3 ai_model_calculator.py --hf-config config.json --estimate --instance h200 --num-gpus 64 --tokens-b 1000
+python3 ai_model_calculator.py --model Llama-3.1-70B --estimate --num-gpus auto --target-days 30 --tokens-b 15000
+```
+
+Options: `--instance`, `--num-gpus N|auto`, `--tokens-b`, `--seq-len`, `--precision bf16|fp8`,
+`--tp/--pp/--ep` (fix a degree), `--vp`, `--gbs`, `--mfu` (override), `--target-days`, `--format text|json`.
+Formulas, constants and sources: [docs/CALCULATOR-MFU.md](docs/CALCULATOR-MFU.md). Accuracy against
+29 published runs: `python3 -m utils.validation_runs` (median error 5.6%, max 31.0%). The six-phase
+analysis still uses `project_config.MFU`.
+
 ## Key Features
 
 - **MoE-aware memory**: Dispatch buffers, NCCL workspace scaling with EP (charged only when world size > 1), measured allocator overhead (1.02×), EP/DP optimizer sharding
@@ -48,6 +65,11 @@ python3 ai_model_calculator.py --model llama-3.1-8b
 # Analyze a custom architecture from a JSON file (replaces built-in variants)
 python3 ai_model_calculator.py --json my_model.json
 
+# Analyze a model straight from its Hugging Face config.json (parameters, shared
+# experts, MLA and linear-attention layers are derived; --params-total-b is the
+# exact total from the safetensors index, optional)
+python3 ai_model_calculator.py --hf-config config.json --params-total-b 321.32
+
 # Analyze against a custom hardware set from a JSON file (replaces built-in hardware)
 python3 ai_model_calculator.py --hardware my_hardware.json
 
@@ -72,6 +94,8 @@ No external dependencies — Python standard library only.
 |--------|-------------|
 | `--model NAME` | Analyze only the variant named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--json` list when combined. Unknown names print the available variants and exit non-zero. |
 | `--json FILE` | Analyze the variant(s) defined in `FILE` **only** (replaces the built-in variants). |
+| `--hf-config FILE` | Analyze the model described by a Hugging Face `config.json` **only**. Derives total and active parameters (shared experts included), MLA and hybrid linear attention. Multimodal configs are read from `text_config`. Not combinable with `--json`. |
+| `--params-total-b B` | With `--hf-config`: exact total parameters in billions. Wins over the count derived from the shape. |
 | `--hardware FILE` | Analyze against the hardware config(s) defined in `FILE` **only** (replaces the built-in hardware list). |
 | `--hw-name NAME` | Analyze only the hardware entry named `NAME` (case-insensitive, exact match). Applies to the built-in list, or to the `--hardware` list when combined. Unknown names print the available hardware and exit non-zero. |
 | `--report` | Emit a concise markdown-style summary instead of the full per-phase output. |

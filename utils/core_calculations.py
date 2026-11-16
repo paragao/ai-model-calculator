@@ -726,11 +726,13 @@ def calculate_memory_for_micro(
     total_layers = variant["layers"]
     moe_layers_per_gpu = int(layers_per_gpu * moe_layers / total_layers) if total_layers > 0 else 0
 
-    # --- Optimizer memory with EP/DP interaction fix ---
-    # When EP subdivides DP (dp > ep), MoE params are only shared within dp/ep ranks.
-    # When dp <= ep, optimizer uses full dp normally (all experts already distributed).
-    if is_moe and ep > 1 and dp > ep:
-        eff_dp_moe = dp // ep
+    # --- Optimizer memory with EP/DP interaction ---
+    # EP subdivides DP (Megatron): each expert shard is replicated on dp/ep ranks only, so
+    # its optimizer state is sharded dp/ep ways (1 when EP = DP). The old rule used the full
+    # DP whenever dp <= ep, which under-counted expert optimizer memory by up to EP times
+    # (e.g. GLM-5.3-Flash on 16 GPUs looked like a fit).
+    if is_moe and ep > 1:
+        eff_dp_moe = max(1, dp // ep)
     else:
         eff_dp_moe = dp
 

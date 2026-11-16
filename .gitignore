@@ -10,6 +10,7 @@ __pycache__/
 !README*.md
 !model_variant_template.json
 !hardware_variant_template.json
+!tests/fixtures/*.json
 
 # OS files
 .DS_Store

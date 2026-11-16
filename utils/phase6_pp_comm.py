@@ -14,6 +14,21 @@ from configuration.advanced_config import *
 EFA_PP_EFFICIENCY = 0.016
 
 
+def microbatches_per_step(gbs, mbs, dp):
+    """Micro-batches each data-parallel rank runs per optimizer step: gbs / (mbs * dp).
+
+    A step always runs at least one. A global batch smaller than mbs * dp sequences
+    cannot be split that finely, and floor division then returned 0. With 0
+    micro-batches the bubble formula reads (pp - 1) / (pp - 1) = 100%, and the send
+    count, traffic and exposed time all collapse to 0, so the whole PP section was
+    wrong without any error. Example: 2048 GPUs, PP=8, DP=256, micro batch 4 and the
+    976-sequence batch from TOKENS_PER_BATCH gave 976 // 1024 = 0.
+    """
+    if mbs * dp <= 0:
+        return 1
+    return max(1, gbs // (mbs * dp))
+
+
 def calculate_pp_communication(layers, hidden_dim, seq_len, mbs, gbs, pp, vp, dp, ep,
                                 dtype_bytes=2, inter_node_bw_gb=400,
                                 intra_node_bw_gbps=1800, gpus_per_node=8):
@@ -42,7 +57,7 @@ def calculate_pp_communication(layers, hidden_dim, seq_len, mbs, gbs, pp, vp, dp
         return {
             "activation_size_mb": 0,
             "sends_per_microbatch": 0,
-            "num_microbatches": gbs // (mbs * dp) if (mbs * dp) > 0 else 0,
+            "num_microbatches": microbatches_per_step(gbs, mbs, dp),
             "total_sends_per_step": 0,
             "total_traffic_gb": 0,
             "pipeline_bubble_pct": 0,
@@ -65,7 +80,7 @@ def calculate_pp_communication(layers, hidden_dim, seq_len, mbs, gbs, pp, vp, dp
         sends_per_microbatch = 2 * (pp - 1)
 
     # Number of micro-batches per training step
-    num_microbatches = gbs // (mbs * dp) if (mbs * dp) > 0 else 1
+    num_microbatches = microbatches_per_step(gbs, mbs, dp)
 
     # Total sends per step
     total_sends_per_step = sends_per_microbatch * num_microbatches
