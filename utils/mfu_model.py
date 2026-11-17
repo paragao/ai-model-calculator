@@ -61,7 +61,40 @@ HARDWARE = {
     "dgx-a100-40g":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 25.0,  "gpn": 8},
     "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
+    # --- Rack-scale systems: one NVLink domain of 72 (or 36) GPUs. ---------------------------------
+    # Three sizes that are all "8" on an HGX node differ here, so each has its own field:
+    #   domain_gpus   GPUs one NVLink domain reaches (what "gpn" means to the formulas below)
+    #   instance_gpus GPUs of the smallest launchable instance (p6e-gb200.36xlarge: 4)
+    #   billing_gpus  GPUs bought as one unit (a Capacity Block buys whole UltraServers)
+    # GB200 (p6e-gb200), per GPU:
+    #   bf16 2500, fp8 5000: dense; 360 PFLOPS FP8 dense / 72 GPUs
+    #       https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-p6e-gb200-ultraservers-gpu-performance-ec2
+    #       (BF16 = half of FP8, as for B200; NVIDIA lists 360 PF sparse BF16 = 180 PF dense / 72 = 2500:
+    #       https://www.nvidia.com/en-us/data-center/gb200-nvl72/)
+    #   nvlink 900: 1.8 TB/s per GPU total NVLink5 / 2 (130 TB/s / 72 GPUs), same page
+    #   net 100: p6e-gb200.36xlarge 3200 Gigabit EFA / 4 GPUs = 800 Gbps = 100 GB/s per GPU
+    #       https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (same column as every other row here)
+    #   u-p6e-gb200x72 = 18 instances = 72 GPUs, u-p6e-gb200x36 = 9 instances = 36 GPUs (AWS launch page above)
+    "u-p6e-gb200x72":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
+    "u-p6e-gb200x36":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
+                         "gpn": 36, "domain_gpus": 36, "instance_gpus": 4, "billing_gpus": 36},
 }
+
+
+def domain_gpus(hw):
+    """GPUs one NVLink domain reaches: 8 on an HGX node, 72 on a GB200 NVL72 UltraServer."""
+    return int(hw.get("domain_gpus") or hw["gpn"])
+
+
+def instance_gpus(hw):
+    """GPUs of the smallest launchable instance (4 for p6e-gb200.36xlarge, else the node)."""
+    return int(hw.get("instance_gpus") or hw["gpn"])
+
+
+def billing_gpus(hw):
+    """GPUs bought as one unit: the node, or the whole UltraServer."""
+    return int(hw.get("billing_gpus") or hw["gpn"])
 
 # --- Calibration (fitted by validation_runs.fit() on the FIT subset; see docs) ---------------
 # eta_base: fraction of dense peak reached by the per-GPU compute of the step, before bubble
@@ -99,7 +132,8 @@ GOODPUT = 0.90
 # H100/H200/H800: 132 (NVIDIA H100 Tensor Core GPU Architecture whitepaper, H100 SXM5);
 # A100: 108 (NVIDIA A100 whitepaper); B200: 148 (74 per die, chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut);
 # B300: 160 (NVIDIA "Inside NVIDIA Blackwell Ultra" blog: up to 160, varies by SKU).
-SMS_PER_GPU = {"H100": 132, "H200": 132, "H800": 132, "A100": 108, "B200": 148, "B300": 160}
+# GB200 carries the B200 die (148 SMs, same source); the Blackwell Ultra die of GB300 is the B300 die (160).
+SMS_PER_GPU = {"H100": 132, "H200": 132, "H800": 132, "A100": 108, "B200": 148, "B300": 160, "GB200": 148}
 # Token dispatchers whose all-to-all runs as SM kernels (DeepEP, NVIDIA HybridEP). When the plan
 # overlaps the all-to-all with compute (plan a2a_overlap), those SMs are not available to the GEMMs.
 SM_DISPATCHERS = ("deepep", "hybridep")
