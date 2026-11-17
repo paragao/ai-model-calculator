@@ -2,7 +2,7 @@
 
 Analyze GPU memory, batch configuration, training time, and communication overhead for LLM training on AWS hardware.
 
-Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSeek V3/V3.1/V3.2/V4, Qwen3-MoE, Llama 4 Scout/Maverick) on AWS GPU instances (p5/H100, p5en/H200, p6-b200/B200, p6-b300/B300 Ultra). Other platforms, including p6e-gb200/GB200 NVL, can be supplied with `--hardware`.
+Supports dense models (Llama 3.1/3.2/3.3, Qwen 2.5/3/3.5) and MoE models (DeepSeek V3/V3.1/V3.2/V4, Qwen3-MoE, Llama 4 Scout/Maverick) on AWS GPU instances (p5/H100, p5en/H200, p6-b200/B200, p6-b300/B300 Ultra, p6e-gb200/GB200 NVL72). Other platforms can be supplied with `--hardware`.
 
 ## Modes of Operation
 
@@ -228,12 +228,15 @@ Built-in cluster presets (28 in total), selectable with `--hw-name`. Preset name
 | p5.48xlarge | H100 SXM | 80 GB | 989 |
 | p5en.48xlarge | H200 SXM | 141 GB | 989 |
 | p6-b200.48xlarge | B200 | 180 GB | 2,250 |
-| p6-b300.48xlarge | B300 Ultra | 268 GB | 3,375 |
+| p6-b300.48xlarge | B300 Ultra | 268 GB | 2,250 |
 | g5.48xlarge | A10G | 24 GB | 35 |
 | g6.48xlarge | L4 | 24 GB | 121 |
 | g6e.48xlarge | L40S | 48 GB | 366 |
+| p6e-gb200 (`u-p6e-gb200x72` UltraServer: 72 GPUs, one NVLink domain) | GB200 | 185 GB | 2,500 |
 
-`p6e-gb200.36xlarge` (GB200 NVL, 185 GB, 2,500 peak BF16 TFLOPS, 4 GPUs per node) is **not** a built-in preset. Supply it with `--hardware your_hardware.json`; see `hardware_variant_template.json` for the required fields.
+B300 BF16 is 2,250, the same as B200: Blackwell Ultra's 1.5x uplift is FP4 only (see the note in `configuration/hardware_config.py`). Every figure is dense (no sparsity).
+
+GB200 is a built-in preset. The calculator sizes the UltraServer (72 GPUs, or `u-p6e-gb200x36` with 36), the unit EC2 Capacity Blocks sell; a `p6e-gb200.36xlarge` instance is 4 GPUs of it. Run it with `--hw-name "1 p6e-gb200"` (phases 1-8) or `--estimate --instance gb200` (phase 9). AWS publishes no on-demand price for it, so the estimate shows no cost. Sources for every GB200 and GB300 number: `docs/CALCULATOR-HARDWARE.md`.
 
 ## Repository Structure
 

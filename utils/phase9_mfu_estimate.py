@@ -34,11 +34,22 @@ HARDWARE_ALIASES = {
     "p6-b300.48xlarge": "p6-b300.48xlarge", "p6-b300": "p6-b300.48xlarge", "b300": "p6-b300.48xlarge",
     "p4d.24xlarge": "p4d.24xlarge", "p4d": "p4d.24xlarge", "a100": "p4d.24xlarge", "a100-40gb": "p4d.24xlarge",
     "p4de.24xlarge": "p4de.24xlarge", "p4de": "p4de.24xlarge", "a100-80gb": "p4de.24xlarge",
+    # GB200: the calculator sizes the UltraServer (the unit a Capacity Block buys). p6e-gb200.36xlarge is one
+    # 4-GPU instance of it; with no size given the 72-GPU UltraServer is meant.
+    "u-p6e-gb200x72": "u-p6e-gb200x72", "p6e-gb200": "u-p6e-gb200x72", "gb200": "u-p6e-gb200x72",
+    "p6e-gb200.36xlarge": "u-p6e-gb200x72", "gb200-nvl72": "u-p6e-gb200x72", "gb200x72": "u-p6e-gb200x72",
+    "p6e-gb200-ultraserver": "u-p6e-gb200x72", "gb200-ultraserver": "u-p6e-gb200x72",
+    "u-p6e-gb200x36": "u-p6e-gb200x36", "gb200x36": "u-p6e-gb200x36", "gb200-nvl36": "u-p6e-gb200x36",
+    # GB300: AWS has published no instance type names. The calculator's own label is the UltraServer (72 GPUs).
+    "p6e-gb300-ultraserver": "p6e-gb300-ultraserver", "gb300": "p6e-gb300-ultraserver", "p6e-gb300": "p6e-gb300-ultraserver",
+    "gb300-nvl72": "p6e-gb300-ultraserver", "gb300-ultraserver": "p6e-gb300-ultraserver",
 }
 GPU_OF_INSTANCE = {
     "p5.48xlarge": "H100 80GB", "p5e.48xlarge": "H200 141GB", "p5en.48xlarge": "H200 141GB",
     "p6-b200.48xlarge": "B200 180GB", "p6-b300.48xlarge": "B300 268GB",
     "p4d.24xlarge": "A100 40GB", "p4de.24xlarge": "A100 80GB",
+    "u-p6e-gb200x72": "GB200 185GB", "u-p6e-gb200x36": "GB200 185GB",
+    "p6e-gb300-ultraserver": "GB300 279GB",
 }
 # Memory and bandwidth per instance, in the units of configuration/hardware_config.py
 # (tests/test_mfu_model.py checks the shared entries against that file).
@@ -50,6 +61,13 @@ INSTANCE_SPECS = {
     "p6-b300.48xlarge": {"mem_gb": 268, "inter_node_bw_gb": 800, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2250},
     "p4d.24xlarge": {"mem_gb": 40, "inter_node_bw_gb": 100, "intra_node_bw_gbps": 600, "peak_tflops_bf16": 312},
     "p4de.24xlarge": {"mem_gb": 80, "inter_node_bw_gb": 100, "intra_node_bw_gbps": 600, "peak_tflops_bf16": 312},
+    # GB200 UltraServer: memory per GPU from the instance table (4 x 185 GiB); EFA 100 GB/s per GPU
+    # (3200 Gigabit / 4 GPUs), so 7,200 GB/s for 72 GPUs and 3,600 for 36. Sources: configuration/hardware_config.py.
+    "u-p6e-gb200x72": {"mem_gb": 185, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
+    # per-GPU figure. EFA 100 GB/s per GPU x 72 = 7,200 GB/s per UltraServer (paragao, 2026-11-17; see mfu_model.HARDWARE).
+    "p6e-gb300-ultraserver": {"mem_gb": 279, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
 }
 # On-demand USD per instance-hour (an estimate, not a quote).
 INSTANCE_COST_PER_HOUR = {
@@ -57,7 +75,29 @@ INSTANCE_COST_PER_HOUR = {
     "p6-b200.48xlarge": 180.00, "p6-b300.48xlarge": 250.00,
     "p4d.24xlarge": 32.77, "p4de.24xlarge": 40.97,
 }
+# No public on-demand price: GB200 UltraServers are sold through EC2 Capacity Blocks for ML and the price is set at
+# purchase (https://aws.amazon.com/ec2/capacityblocks/pricing/). The estimate shows no cost; it never invents one.
+PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver")
+PRICE_UNKNOWN_NOTE = ("Price unknown: this hardware is sold through EC2 Capacity Blocks for ML and AWS publishes no "
+                      "on-demand price, so no cost is estimated. GPU count, time and billed units are still given.")
 MAX_AUTO_GPUS = 4096
+
+
+def default_gpus_per_node(instance):
+    """GPUs billed as one node: 8 for an HGX instance, the whole UltraServer (72 or 36) for GB200."""
+    hw = mm.HARDWARE.get(instance)
+    return mm.billing_gpus(hw) if hw else 8
+
+
+def unit_fields(mm_hw, num_nodes):
+    """Result fields for hardware whose domain, instance and billing sizes differ (empty for HGX nodes)."""
+    if mm.billing_gpus(mm_hw) == mm.instance_gpus(mm_hw) == mm.domain_gpus(mm_hw):
+        return {}
+    return {"domain_gpus": mm.domain_gpus(mm_hw), "instance_gpus": mm.instance_gpus(mm_hw),
+            "billing_gpus": mm.billing_gpus(mm_hw), "billed_units": num_nodes,
+            "billing_unit": f"UltraServer ({mm.billing_gpus(mm_hw)} GPUs)",
+            **({"unknowns": list(mm_hw["unknowns"])} if mm_hw.get("unknowns") else {}),
+            **({"user_provided": list(mm_hw["user_provided"])} if mm_hw.get("user_provided") else {})}
 
 
 def normalise_hardware(value):
@@ -83,6 +123,9 @@ def instance_specs(instance):
 
 
 def instance_cost(instance):
+    """On-demand USD per instance-hour, or None when AWS publishes no price (never a guess)."""
+    if instance in PRICE_UNKNOWN_HARDWARE:
+        return None
     return INSTANCE_COST_PER_HOUR.get(instance, 98.32)
 
 
@@ -119,7 +162,43 @@ def shape_from_preset(v, vocab):
 
 
 def estimate_training(config, variant):
-    """Plan search + MFU + days + cost for one GPU count.
+    """One GPU count. On rack-scale hardware (72-GPU NVLink domain) a count that is not a power of two is also tried
+    as the largest power of two below it (64 of 72): EP 64 and other power-of-two layouts need it, and the whole
+    UltraServer is billed either way. The faster plan that fits wins; the result says which GPUs it used."""
+    hw = mm.HARDWARE.get(config["hardware"])
+    n = int(config["num_gpus"])
+    alts = mm.rack_alternatives(hw, n) if hw else []
+    best = estimate_plan(config, variant)
+    if not alts:
+        return best
+    considered = [{"gpus": n, "tokens_per_second": best.get("training_time", {}).get("tokens_per_second"),
+                   "fits": best.get("fits_in_memory"), "error": best.get("error")}]
+    for m in alts:
+        alt = estimate_plan({**config, "num_gpus": m, "_billed_gpus": n}, variant)
+        considered.append({"gpus": m, "tokens_per_second": alt.get("training_time", {}).get("tokens_per_second"),
+                           "fits": alt.get("fits_in_memory"), "error": alt.get("error")})
+        if "error" in alt:
+            continue
+        if "error" in best or (alt["fits_in_memory"] and not best["fits_in_memory"]) or (
+                alt["fits_in_memory"] == best["fits_in_memory"]
+                and alt["training_time"]["tokens_per_second"] > best["training_time"]["tokens_per_second"]):
+            best = alt
+    if "error" in best:
+        return best
+    used = best["parallelism"]["total_gpus"]
+    best["rack_layout"] = {
+        "requested_gpus": n, "used_gpus": used, "idle_gpus": n - used,
+        "billed_units": best["parallelism"]["num_nodes"],
+        "considered": [{k: v for k, v in c.items() if v is not None} for c in considered],
+        "note": (f"{used} of the {n} GPUs are used: a power-of-two layout (EP {best['parallelism']['expert_parallel']}, "
+                 f"TP x PP x DP = {used}) is faster than {n}. The {n - used} idle GPUs are still billed." if used != n else
+                 f"All {n} GPUs are used; using the largest power of two below it was slower."),
+    }
+    return best
+
+
+def estimate_plan(config, variant):
+    """Plan search + MFU + days + cost for exactly config["num_gpus"] GPUs.
 
     config keys: hardware (instance type), num_gpus, precision ("bf16" | "fp8"), sequence_length,
     total_tokens_b, tensor_parallel / pipeline_parallel / expert_parallel (fix a degree; 1 =
@@ -150,7 +229,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     precision = str(config.get("precision", "bf16")).lower()
     hardware_type = config["hardware"]
     num_gpus = int(config["num_gpus"])
-    gpus_per_node = int(config.get("gpus_per_node") or 8)
+    gpus_per_node = int(config.get("gpus_per_node") or default_gpus_per_node(hardware_type))
     tp = int(config.get("tensor_parallel", 1) or 1)
     pp = int(config.get("pipeline_parallel", 1) or 1)
     ep = int(config.get("expert_parallel", 1) or 1)
@@ -164,7 +243,8 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         variant.setdefault("topk", pc.TOPK)
     n_experts = variant.get("num_experts", 0)
     topk = variant.get("topk", 0)
-    num_nodes = max(1, math.ceil(num_gpus / gpus_per_node))  # a partial node is still paid for
+    # a partial node is still paid for (and a partial UltraServer is a whole UltraServer)
+    num_nodes = max(1, math.ceil(int(config.get("_billed_gpus") or num_gpus) / gpus_per_node))
 
     saved_vocab = pc.VOCAB
     pc.VOCAB = variant.get("vocab") or saved_vocab
@@ -274,8 +354,9 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     wall_tokens_per_second = tokens_per_second * mm.GOODPUT
     training_hours = total_tokens_b * 1e9 / wall_tokens_per_second / 3600
     training_days = training_hours / 24
-    cost_per_hour = instance_cost(hardware_type) * num_nodes
-    total_cost = cost_per_hour * training_hours
+    price = instance_cost(hardware_type)
+    cost_per_hour = price * num_nodes if price is not None else None
+    total_cost = cost_per_hour * training_hours if price is not None else None
 
     is_oom = p1["best_zero"] == -1
     memory_breakdown = p1.get("memory_breakdown")
@@ -296,11 +377,12 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "instance": hardware_type,
             "gpu": GPU_OF_INSTANCE.get(hardware_type, ""),
             "gpus_per_node": gpus_per_node,
+            **unit_fields(mm_hw, num_nodes),
             "peak_tflops_bf16_per_gpu": mm_hw["bf16"],
             "peak_tflops_fp8_per_gpu": mm_hw["fp8"],
             "nvlink_gb_s_per_gpu": mm_hw["nvlink"],
             "network_gb_s_per_gpu": mm_hw["net"],
-            "price_per_instance_hour_usd": instance_cost(hardware_type),
+            "price_per_instance_hour_usd": price,
         },
         "inputs": {
             "precision": precision.upper(),
@@ -344,11 +426,10 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "mfu": round(mfu_value, 4),
             "model_tflops_per_gpu": round(mfu_value * est["peak_tflops_per_gpu"], 1),
         },
-        "cost_estimate": {
-            "cost_per_hour_usd": round(cost_per_hour, 2),
-            "total_cost_usd": round(total_cost, 0),
-            "note": "On-demand pricing estimate",
-        },
+        "cost_estimate": (
+            {"cost_per_hour_usd": round(cost_per_hour, 2), "total_cost_usd": round(total_cost, 0),
+             "note": "On-demand pricing estimate"} if price is not None else
+            {"cost_per_hour_usd": None, "total_cost_usd": None, "price_known": False, "note": PRICE_UNKNOWN_NOTE}),
         "mfu_breakdown": {
             "model_version": mm.MODEL_VERSION,
             "precision_peak_tflops_per_gpu": est["peak_tflops_per_gpu"],
@@ -357,6 +438,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "expert_flops_share": est["expert_flops_share"],
             "base_efficiency": est["base_efficiency"],
             "base_efficiency_key": f"{mm_hw['family']}/{est['precision']}",
+            **({"power_gain": est["tgp_gain"]} if est["tgp_gain"] != 1.0 else {}),
             "moe_expert_factor": est["moe_expert_factor"],
             "compute_efficiency": est["compute_efficiency"],
             "bubble_fraction": est["bubble_fraction"],
@@ -436,22 +518,25 @@ def run_estimate(config, variant):
     fits in memory and meets config["target_days"] when num_gpus is None / "auto"."""
     config = dict(config or {})
     config["hardware"] = normalise_hardware(config.get("hardware") or "p5.48xlarge")
-    gpus_per_node = int(config.get("gpus_per_node") or 8)
+    gpus_per_node = int(config.get("gpus_per_node") or default_gpus_per_node(config["hardware"]))
     num_gpus = config.get("num_gpus")
     if num_gpus in (None, "", 0, "auto"):
         target_days = config.get("target_days")
-        tried, n, result = [], gpus_per_node, None
-        while n <= MAX_AUTO_GPUS:
-            result = estimate_training({**config, "num_gpus": n}, variant)
+        mm_hw = mm.HARDWARE.get(config["hardware"]) or mm.HARDWARE["p5.48xlarge"]
+        tried, result = [], None
+        for n in mm.auto_gpu_counts(mm_hw, gpus_per_node, MAX_AUTO_GPUS):
+            result = estimate_plan({**config, "num_gpus": n}, variant)
             if "error" in result:
                 return result
             days = result["training_time"]["training_days"]
             tried.append({"num_gpus": n, "fits": result["fits_in_memory"], "training_days": days})
             if result["fits_in_memory"] and (not target_days or days <= float(target_days)):
                 break
-            n *= 2
+        counts = ("whole {0}-GPU nodes, doubling".format(gpus_per_node) if not mm.is_rack_scale(mm_hw) else
+                  "steps of {0} GPUs inside one {1}-GPU NVLink domain, then {2} or {1} GPUs per domain".format(
+                      mm.instance_gpus(mm_hw), mm.domain_gpus(mm_hw), mm.rack_share(mm_hw)))
         result["gpu_count_search"] = {
-            "basis": f"smallest GPU count (whole {gpus_per_node}-GPU nodes, doubling) that fits"
+            "basis": f"smallest GPU count ({counts}) that fits"
                      + (f" and trains in <= {target_days} days" if target_days else " in memory"),
             "tried": tried,
         }
@@ -472,11 +557,13 @@ def format_estimate(r):
         f"{p['micro_batches_per_step']} micro-batches/step, {p['global_batch_tokens'] / 1e6:.1f}M tokens/step "
         f"({p['global_batch_source']})",
         f"- **Fits in memory**: {'yes' if r['fits_in_memory'] else 'NO (out of memory)'}",
+        *([f"- **GPUs**: {r['rack_layout']['note']}"] if r.get("rack_layout") and r["rack_layout"]["idle_gpus"] else []),
         f"- **MFU**: {t['mfu'] * 100:.1f}% ({r['inputs']['mfu_source']}), {t['model_tflops_per_gpu']} TFLOPS/GPU",
         f"- **Throughput**: {t['tokens_per_second']:,} tokens/s ({t['tokens_per_second_wall_clock']:,} wall clock "
         f"at {t['goodput'] * 100:.0f}% goodput)",
         f"- **Time**: {t['training_days']:,.1f} days for {t['total_tokens_b']:,.0f}B tokens",
-        f"- **Cost**: ${c['total_cost_usd']:,.0f} (${c['cost_per_hour_usd']:,.2f}/h, {c['note']})",
+        (f"- **Cost**: ${c['total_cost_usd']:,.0f} (${c['cost_per_hour_usd']:,.2f}/h, {c['note']})"
+         if c["total_cost_usd"] is not None else f"- **Cost**: unknown. {c['note']}"),
         f"- **Bubble**: {b['bubble_fraction'] * 100:.1f}%, step {b['step_time_s']} s "
         f"(compute {b['compute_s']}, bubble {b['bubble_s']}, exposed TP {b['tp_exposed_s']} "
         f"EP {b['ep_exposed_s']} DP {b['dp_exposed_s']})",

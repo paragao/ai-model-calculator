@@ -127,12 +127,13 @@ steady state (1F1B); its fill and drain is the bubble term.
 |---|---|---|
 | Peak BF16 / FP8 dense TFLOPS | H100, H200, H800 989 / 1979; A100 312; B200, B300 2250 / 4500 | NVIDIA datasheets; HGX B300 36 PFLOPS FP8 dense / 8 |
 | NVLink per direction, GB/s | H100/H200 450, B200/B300 900, A100 300, H800 200 | half of total NVLink bandwidth per GPU |
-| Network per GPU, GB/s | p5/p5e/p5en/p6-b200 50 (3200 Gbps EFA / 8), p6-b300 100 (6400 Gbps), p4d/p4de 6.25 (400 Gbps); DGX H100/B200 50, DGX B300 100 (8 x 800 Gb/s ConnectX-8), DGX A100 25, Meta Llama 3 RoCE 50, DeepSeek H800 IB 50 | AWS instance pages; NVIDIA DGX datasheets; Llama 3 paper Sec. 3.3.1; DeepSeek-V3 paper Sec. 3.1 |
+| Network per GPU, GB/s | p5/p5e/p5en/p6-b200 50 (3200 Gbps EFA / 8), p6-b300 100 (6400 Gbps), p4d/p4de 6.25 (400 Gbps), GB200 100 (3200 Gbps per 4-GPU instance), GB300 100 (8 x 400 Gbps per 4-GPU server, paragao 2026-11-17); DGX H100/B200 50, DGX B300 100 (8 x 800 Gb/s ConnectX-8), DGX A100 25, Meta Llama 3 RoCE 50, DeepSeek H800 IB 50 | AWS instance pages; NVIDIA DGX datasheets; Llama 3 paper Sec. 3.3.1; DeepSeek-V3 paper Sec. 3.1 |
 | BASE_EFFICIENCY hopper/bf16, hopper/fp8, blackwell/bf16, blackwell/fp8, ampere/bf16 | 0.573, 0.45, 0.443, 0.417, 0.471 | fitted (geometric mean per cell) on the dense fit runs |
 | MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN | 0.78, 1024 | fitted (grid, least squares of log error) on the MoE fit runs |
 | LINK_EFFICIENCY nvlink / net | 0.76 / 0.80 | nvlink: our DeepEP intranode 340 GB/s vs 450 (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes); net: assumption |
 | OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.3 / 0.9 / 0.8 | assumptions, except EP: fitted with the MoE constants (grid 0 / 0.3 / 0.5 / 0.7 / 0.9); a plan may set `overlap_ep` (DualPipe 0.95) |
 | SMS_PER_GPU | H100 / H200 / H800 132, A100 108, B200 148, B300 160 | NVIDIA H100 and A100 whitepapers; [B200: 74 per die](https://chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut); [B300: up to 160](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) |
+| TGP_EXPONENT | 1.25 | fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01; applies to systems with `tgp_w` and `tgp_ref_w` (GB300: 1,400 W against 1,200 W); section 7b |
 | COMM_SMS | 20 | DeepSeek-V3 paper Sec. 3.2.2 |
 | DEFAULT_TOKENS_PER_STEP | 16,777,216 (16M) | Llama 3 405B, Llama 3 paper Table 4 |
 | GOODPUT | 0.90 | Llama 3 paper Sec. 3.3.4 (> 90% effective training time) |
@@ -255,6 +256,116 @@ Runs above 15%, and why:
 Families with no published plan and throughput we could find (not in the set): Grok-1, Qwen2.5/Qwen3
 from the Qwen team, OPT-175B (FSDP plan and network not published in enough detail).
 
+### 7a. Rack-scale hold-out: DGX GB200 (NVL72), NeMo 25.07
+
+Added with the GB200 hardware step. 8 rows of the NeMo 25.07 performance summary
+([source](https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html)), FP8, the first plan of each table row (the numbers in parentheses are other
+settings). They are the same models and recipes as the DGX-B200 rows above, so they test what changes with a
+72-GPU NVLink domain on the same Blackwell GPU. All are hold-out: no constant was fitted or changed for them
+(`validation_runs.RACK_RUNS`, kept apart from the 38-run set so every number above is untouched).
+`dgx-gb200` has 50 GB/s of network per GPU (4 x ConnectX-7 NDR 400 Gb/s per 4-GPU compute tray, [NVIDIA DGX
+SuperPOD GB200 reference architecture](https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html)).
+Not included: Nemotron5-H-56B, a hybrid Mamba-Transformer that the parser does not cover.
+
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-gb200-llama3-8b | Llama-3-8B | 8 | dgx-gb200 | fp8 | tokens_per_gpu | 31,737 tok/s/GPU | 35,962 tok/s/GPU | +13.3% | 41.6% | 45.6 / 40.2 | hold-out |
+| nemo-gb200-llama3-70b | Llama-3-70B | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 4,066 tok/s/GPU | 4,069 tok/s/GPU | +0.1% | 39.2% | 44.5 / 44.4 | hold-out |
+| nemo-gb200-llama31-405b | Llama-3.1-405B | 128 | dgx-gb200 | fp8 | tokens_per_gpu | 706 tok/s/GPU | 730 tok/s/GPU | +3.5% | 38.4% | 128.1 / 123.8 | hold-out |
+| nemo-gb200-llama4-scout | Llama-4-Scout | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 13,783 tok/s/GPU | 14,778 tok/s/GPU | +7.2% | 35.8% | 13.1 / 12.2 | hold-out, layout unverified |
+| nemo-gb200-llama4-maverick | Llama-4-Maverick | 128 | dgx-gb200 | fp8 | tokens_per_gpu | 11,682 tok/s/GPU | 15,803 tok/s/GPU | +35.3% | 38.3% | 7.7 / 5.7 | hold-out, layout unverified |
+| nemo-gb200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 17,246 tok/s/GPU | 18,516 tok/s/GPU | +7.4% | 30.7% | 10.5 / 9.8 | hold-out |
+| nemo-gb200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-gb200 | fp8 | tokens_per_gpu | 2,869 tok/s/GPU | 3,432 tok/s/GPU | +19.6% | 34.6% | 15.8 / 13.2 | hold-out, layout unverified |
+| nemo-gb200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-gb200 | fp8 | tokens_per_gpu | 2,327 tok/s/GPU | 4,241 tok/s/GPU | +82.3% | 24.7% | 19.4 / 10.7 | hold-out, layout unverified |
+
+Median absolute error 10.4%, worst 82.3% over 8 rows (the bar is 15% typical,
+30% worst). **Two rows miss the 30% bar and nothing was refitted:**
+- `nemo-gb200-deepseek-v3` +82%: NeMo 25.07 software. The same pattern as the two superseded DeepSeek-V3 rows
+  above (the same model on the same GPUs runs 2x faster in later releases); NeMo 26.08.01 publishes 4,912 tok/s/GPU
+  for DeepSeek-V3 on 256 GB200 (MXFP8, PP 4, VP 4, EP 64). The dispatcher is assumed (`unverified`).
+- `nemo-gb200-llama4-maverick` +35%: the token dispatcher and recompute settings are not recorded (`unverified`).
+
+The same-GPU ratio the step is about: predicted GB200 / B200 against published for the same recipe is within
+15% for Llama 3 70B and Mixtral 8x7B (`test_same_recipe_on_b200_and_gb200_keeps_its_ratio`).
+
+### 7b. GB300 against GB200, same recipe (NeMo 26.04.01 and 26.08.01)
+
+Added with the GB300 hardware step. 12 pairs of NeMo / Megatron-Bridge results
+([26.08.01](https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html), [26.04.01](https://docs.nvidia.com/nemo/megatron-bridge/nightly/performance-summary-archive.html)): the same model, global batch and sequence on DGX-GB300 and DGX-GB200, MXFP8 or FP8 counted
+as FP8, BF16 for GPT-OSS 26.04.01. The check is the **ratio** GB300 / GB200: published against predicted, each system with its own
+published plan. `dgx-gb300` has 100 GB/s of network per GPU (4 x ConnectX-8 800 Gb/s per compute tray, [NVIDIA DGX SuperPOD GB300
+reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf)).
+
+**The cause of the gap and the term** (full analysis in `docs/CALCULATOR-HARDWARE.md` section 6): at the same listed dense FP8 peak and the same
+HBM bandwidth, Blackwell Ultra's board power is up to 1,400 W against 1,200 W ([NVIDIA Table 2](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/)),
+and large-GEMM training runs at the power limit. Sustained tensor efficiency is scaled by
+`(tgp_w / tgp_ref_w) ** TGP_EXPONENT`; the exponent is one constant, `TGP_EXPONENT = 1.25`, fitted on the two dense FP8 pairs (`fit_tgp_exponent`),
+and applied to GB300 only. Before it, GB300 had the same efficiency as GB200 and the model predicted a ratio of about 1.0.
+
+Before and after (ratio GB300 / GB200):
+
+| Pair | Set | Ratio reported | Ratio before | Error before | Ratio after | Error after |
+|---|---|---|---|---|---|---|
+| gb300-vs-gb200-llama3-70b-fp8-2604 | fit | 1.242 | 1.000 | -19.5% | 1.205 | -3.1% |
+| gb300-vs-gb200-llama31-405b-fp8-2604 | fit | 1.185 | 1.001 | -15.6% | 1.199 | +1.2% |
+| gb300-vs-gb200-llama3-70b-mxfp8-2604 | hold-out | 1.310 | 1.013 | -22.7% | 1.228 | -6.3% |
+| gb300-vs-gb200-llama31-405b-mxfp8-2604 | hold-out | 1.200 | 1.033 | -13.9% | 1.247 | +3.9% |
+| gb300-vs-gb200-dsv3-2604 | hold-out | 1.173 | 1.005 | -14.3% | 1.188 | +1.3% |
+| gb300-vs-gb200-gpt-oss-120b-2604 | hold-out | 1.154 | 1.000 | -13.3% | 1.196 | +3.7% |
+| gb300-vs-gb200-qwen3-30b-2604 | hold-out | 1.216 | 1.000 | -17.7% | 1.165 | -4.2% |
+| gb300-vs-gb200-qwen3-235b-2604 | hold-out | 1.223 | 1.004 | -17.9% | 1.177 | -3.7% |
+| gb300-vs-gb200-dsv3 | hold-out | 1.280 | 1.008 | -21.2% | 1.192 | -6.9% |
+| gb300-vs-gb200-gpt-oss-120b | hold-out | 1.157 | 1.004 | -13.2% | 1.189 | +2.8% |
+| gb300-vs-gb200-qwen3-30b | hold-out | 1.087 | 1.000 | -8.0% | 1.165 | +7.1% |
+| gb300-vs-gb200-qwen3-235b | hold-out | 1.216 | 1.004 | -17.4% | 1.177 | -3.2% |
+
+| Set | Pairs | Median error before | Worst before | Median error after | Worst after |
+|---|---|---|---|---|---|
+| Fit (dense FP8, 26.04.01) | 2 | 17.6% | 19.5% | 2.1% | 3.1% |
+| **Hold-out, all** | 10 | 15.8% | 22.7% | **3.8%** | **7.1%** |
+| Hold-out, dense MXFP8 | 2 | 18.3% | 22.7% | 5.1% | 6.3% |
+| Hold-out, MoE, 26.04.01 | 4 | 16.0% | 17.9% | 3.7% | 4.2% |
+| Hold-out, MoE, 26.08.01 | 4 | 15.3% | 21.2% | 5.1% | 7.1% |
+
+The bar is 15% typical and 30% worst; both are met on every hold-out group. Full table, with the absolute errors of each system:
+
+| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | Ratio error | GB300 error | GB200 error | Set |
+|---|---|---|---|---|---|---|---|---|---|
+| gb300-vs-gb200-llama3-70b-fp8-2604 | 64 | 5,248 / 5,054 | 4,224 / 4,196 | 1.242 | 1.205 | -3.1% | -3.7% | -0.7% | fit |
+| gb300-vs-gb200-llama31-405b-fp8-2604 | 256 | 1,024 / 892 | 864 / 744 | 1.185 | 1.199 | +1.2% | -12.8% | -13.9% | fit |
+| gb300-vs-gb200-llama3-70b-mxfp8-2604 | 64 | 4,864 / 5,054 | 3,712 / 4,115 | 1.310 | 1.228 | -6.3% | +3.9% | +10.8% | hold-out |
+| gb300-vs-gb200-llama31-405b-mxfp8-2604 | 256 | 960 / 932 | 800 / 748 | 1.200 | 1.247 | +3.9% | -2.9% | -6.6% | hold-out |
+| gb300-vs-gb200-dsv3-2604 | 256 | 4,992 / 5,309 | 4,256 / 4,468 | 1.173 | 1.188 | +1.3% | +6.3% | +5.0% | hold-out |
+| gb300-vs-gb200-gpt-oss-120b-2604 | 64 | 19,200 / 22,991 | 16,640 / 19,222 | 1.154 | 1.196 | +3.7% | +19.7% | +15.5% | hold-out |
+| gb300-vs-gb200-qwen3-30b-2604 | 8 | 31,744 / 39,616 | 26,112 / 34,004 | 1.216 | 1.165 | -4.2% | +24.8% | +30.2% | hold-out |
+| gb300-vs-gb200-qwen3-235b-2604 | 256 | 6,944 / 7,734 | 5,680 / 6,569 | 1.223 | 1.177 | -3.7% | +11.4% | +15.6% | hold-out |
+| gb300-vs-gb200-dsv3 | 256 | 6,288 / 5,327 | 4,912 / 4,468 | 1.280 | 1.192 | -6.9% | -15.3% | -9.0% | hold-out |
+| gb300-vs-gb200-gpt-oss-120b | 64 | 33,024 / 40,722 | 28,544 / 34,237 | 1.157 | 1.189 | +2.8% | +23.3% | +19.9% | hold-out |
+| gb300-vs-gb200-qwen3-30b | 8 | 44,544 / 39,616 | 40,960 / 34,004 | 1.087 | 1.165 | +7.1% | -11.1% | -17.0% | hold-out |
+| gb300-vs-gb200-qwen3-235b | 256 | 8,832 / 7,734 | 7,264 / 6,569 | 1.216 | 1.177 | -3.2% | -12.4% | -9.6% | hold-out |
+
+The absolute GB300 errors are larger than the ratio errors (for example -12.8% for 405B, +23.3% for GPT-OSS 26.08.01) because they carry the
+errors the model already has on GB200 (-13.9% and +19.9% on the same rows): the plan, the dispatcher and the NeMo software release are not
+pinned. The 38-run summary, the 8 GB200 rows and every row of `RUNS` are unchanged: no GB300 row is in them.
+
+**HGX B300 against B200, same plan** (a check of the same term on a second system, not applied to the B300):
+
+Without the term the model predicts a ratio of 1.0:
+
+| Pair | Ratio reported | Ratio predicted | Ratio error |
+|---|---|---|---|
+| b300-vs-b200-dsv3 | 1.112 | 1.000 | -10.1% |
+| b300-vs-b200-gpt-oss-120b | 1.123 | 1.000 | -10.9% |
+| b300-vs-b200-qwen3-30b | 1.132 | 1.000 | -11.7% |
+
+With 1,100 W against 1,000 W and the same exponent (fitted on GB300 only):
+
+| Pair | Ratio reported | Ratio predicted | Ratio error |
+|---|---|---|---|
+| b300-vs-b200-dsv3 | 1.112 | 1.113 | +0.1% |
+| b300-vs-b200-gpt-oss-120b | 1.123 | 1.119 | -0.3% |
+| b300-vs-b200-qwen3-30b | 1.132 | 1.102 | -2.7% |
+
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
@@ -273,4 +384,4 @@ honestly are often the slow ones (scoring all of them takes < 0.1 s for 4,096 GP
   `recompute` modules (the validation runs); the calculator's own plans assume none.
 - Linear-attention FLOPs use 12 H d_lin^2 per layer (state update and read), not a kernel model.
 - Network topology above the leaf (oversubscription) is not modelled.
-- Hybrid Mamba models (Nemotron-H) are not covered by the parser.
+- Hybrid Mamba models (Nemotron-H) are not covered by the parser (so Nemotron5-H-56B is not in section 7a).

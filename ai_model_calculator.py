@@ -100,7 +100,7 @@ def build_parser():
                      help="Run Phase 9 instead of the six-phase analysis.")
     est.add_argument("--instance", default="p5en.48xlarge", metavar="NAME",
                      help="Instance type or GPU name: p5, p5e, p5en, p6-b200, p6-b300, p4d, p4de, "
-                          "H100, H200, B200, B300, A100 (default p5en.48xlarge).")
+                          "H100, H200, B200, B300, A100, GB200 (default p5en.48xlarge).")
     est.add_argument("--num-gpus", default="64", metavar="N|auto",
                      help="GPU count, or 'auto' for the smallest whole-node count that fits "
                           "(and meets --target-days). Default 64.")
