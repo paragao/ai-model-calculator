@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-2"
+MODEL_VERSION = "mfu-model-3"
 
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
@@ -44,7 +44,7 @@ MODEL_VERSION = "mfu-model-2"
 #       A100 600 GB/s, H800 400 GB/s).
 # net: scale-out bandwidth per GPU = instance (node) network bandwidth / 8 GPUs.
 #       AWS: p5/p5e/p5en/p6-b200 3200 Gbps EFA, p6-b300 6400 Gbps, p4d/p4de 400 Gbps.
-#       DGX H100 / DGX B200: 8 x 400 Gb/s ConnectX-7; DGX A100: 8 x 200 Gb/s HDR;
+#       DGX H100 / DGX B200: 8 x 400 Gb/s ConnectX-7; DGX B300: 8 x 800 Gb/s ConnectX-8; DGX A100: 8 x 200 Gb/s HDR;
 #       Meta Llama 3 cluster: 400 Gbps RoCE per GPU; DeepSeek H800: 400 Gbps IB per GPU.
 HARDWARE = {
     "p5.48xlarge":      {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
@@ -57,6 +57,7 @@ HARDWARE = {
     # Non-AWS systems, used only by the validation set (published runs).
     "dgx-h100":         {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "dgx-b200":         {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
+    "dgx-b300":         {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
     "dgx-a100-40g":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 25.0,  "gpn": 8},
     "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
@@ -75,14 +76,14 @@ BASE_EFFICIENCY = {
 # Routed-expert matmuls (grouped GEMMs, permute/unpermute, routing) run at
 #   moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
 # of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
-MOE_EXPERT_FACTOR = 0.8
-MOE_EXPERT_HALF_FFN = 512
+MOE_EXPERT_FACTOR = 0.77
+MOE_EXPERT_HALF_FFN = 1024
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
 LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80}
 # nvlink 0.76: our DeepEP intranode dispatch 340 GB/s on p5en vs 450 GB/s per direction
 #   (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes). net 0.80: assumption (NCCL ring busbw).
-OVERLAP = {"tp": 0.5, "cp": 0.9, "ep": 0.0, "dp": 0.9, "fsdp": 0.8}
+OVERLAP = {"tp": 0.5, "cp": 0.9, "ep": 0.3, "dp": 0.9, "fsdp": 0.8}
 # Share of each communication hidden behind compute (assumptions: Megatron-Core TP-comm
 # overlap, ring-attention CP, distributed-optimizer grad/param overlap). EP all-to-all is not
 # overlapped by default (Megatron-Core 1F1B); a plan may set overlap_ep (DualPipe: 0.95).
@@ -101,8 +102,12 @@ DEFAULT_TOKENS_PER_STEP = 16 * 1024 * 1024
 GATED_ACTIVATIONS = ("silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh")
 
 # Pinned result of validation_runs.py (test_mfu_model checks it is current).
-VALIDATION_SUMMARY = {"runs": 29, "hold_out_runs": 17, "median_abs_error_pct": 5.6, "max_abs_error_pct": 31.0,
-                      "hold_out_median_abs_error_pct": 7.3, "hold_out_max_abs_error_pct": 31.0,
+# Scored runs only: superseded runs are printed but not scored (validation_runs.summary).
+VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 7.0, "max_abs_error_pct": 57.7,
+                      "hold_out_median_abs_error_pct": 7.8, "hold_out_max_abs_error_pct": 57.7,
+                      "original_runs": 27, "original_median_abs_error_pct": 6.2, "original_max_abs_error_pct": 19.1,
+                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 14.0, "new_moe_max_abs_error_pct": 57.7,
+                      "superseded_runs": 2,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {

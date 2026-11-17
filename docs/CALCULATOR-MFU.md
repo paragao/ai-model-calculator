@@ -6,7 +6,7 @@ the plan search, MFU, throughput, days and cost (`python3 ai_model_calculator.py
 memory phases (`utils/phase1_memory.py`, `utils/core_calculations.py`) still give the memory per GPU.
 
 This page lists every formula and constant of the model. The same files are used, line for line, by the
-portal calculator Lambda. Model version: `mfu-model-2`.
+portal calculator Lambda. Model version: `mfu-model-3`.
 
 ## 1. What changed from the old calculator
 
@@ -20,8 +20,9 @@ portal calculator Lambda. Model version: `mfu-model-2`.
 | Expert optimizer state sharded over the full DP when EP = DP | sharded over DP / EP (Megatron expert-data-parallel group) |
 | FP8 used the BF16 peak | FP8 uses the FP8 dense peak and its own efficiency |
 
-On the same 29 published runs the old formula is off by a median of 38% (max 144%); the new model
-by a median of 5.6% (max 31%) (section 7).
+On the first 29 published runs the old formula is off by a median of 38% (max 144%). The model is off
+by a median of 6.2% (max 19.1%) on 27 of them (two are superseded, section 7), and by 14.0% (max 57.7%)
+on 11 newer MoE runs.
 
 ## 2. Conventions
 
@@ -115,46 +116,56 @@ steady state (1F1B); its fill and drain is the bubble term.
 |---|---|---|
 | Peak BF16 / FP8 dense TFLOPS | H100, H200, H800 989 / 1979; A100 312; B200, B300 2250 / 4500 | NVIDIA datasheets; HGX B300 36 PFLOPS FP8 dense / 8 |
 | NVLink per direction, GB/s | H100/H200 450, B200/B300 900, A100 300, H800 200 | half of total NVLink bandwidth per GPU |
-| Network per GPU, GB/s | p5/p5e/p5en/p6-b200 50 (3200 Gbps EFA / 8), p6-b300 100 (6400 Gbps), p4d/p4de 6.25 (400 Gbps); DGX H100/B200 50, DGX A100 25, Meta Llama 3 RoCE 50, DeepSeek H800 IB 50 | AWS instance pages; NVIDIA DGX datasheets; Llama 3 paper Sec. 3.3.1; DeepSeek-V3 paper Sec. 3.1 |
+| Network per GPU, GB/s | p5/p5e/p5en/p6-b200 50 (3200 Gbps EFA / 8), p6-b300 100 (6400 Gbps), p4d/p4de 6.25 (400 Gbps); DGX H100/B200 50, DGX B300 100 (8 x 800 Gb/s ConnectX-8), DGX A100 25, Meta Llama 3 RoCE 50, DeepSeek H800 IB 50 | AWS instance pages; NVIDIA DGX datasheets; Llama 3 paper Sec. 3.3.1; DeepSeek-V3 paper Sec. 3.1 |
 | BASE_EFFICIENCY hopper/bf16, hopper/fp8, blackwell/bf16, blackwell/fp8, ampere/bf16 | 0.573, 0.45, 0.443, 0.417, 0.471 | fitted (geometric mean per cell) on the dense fit runs |
-| MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN | 0.8, 512 | fitted (grid, least squares of log error) on the MoE fit runs |
+| MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN | 0.77, 1024 | fitted (grid, least squares of log error) on the MoE fit runs |
 | LINK_EFFICIENCY nvlink / net | 0.76 / 0.80 | nvlink: our DeepEP intranode 340 GB/s vs 450 (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes); net: assumption |
-| OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.0 / 0.9 / 0.8 | assumptions; EP 0 = Megatron-Core 1F1B default; a plan may set `overlap_ep` (DualPipe 0.95) |
+| OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.3 / 0.9 / 0.8 | assumptions, except EP: fitted with the MoE constants (grid 0 / 0.3 / 0.5 / 0.7 / 0.9); a plan may set `overlap_ep` (DualPipe 0.95) |
 | DEFAULT_TOKENS_PER_STEP | 16,777,216 (16M) | Llama 3 405B, Llama 3 paper Table 4 |
 | GOODPUT | 0.90 | Llama 3 paper Sec. 3.3.4 (> 90% effective training time) |
 
-No constant is per model. Fit runs (12): NeMo Llama3 8B/70B on H100 and B200, NeMo Mixtral 8x7B and
-DeepSeek-V3 on H100, MT-NLG 530B at 2240 GPUs, our Llama 70B BF16 p5en and p6-b200, Qwen3-8B p5en and
-p6-b300, Qwen3-30B-A3B p5en. Everything else (17 runs) is hold-out.
+No constant is per model. Fit runs (15): NeMo Llama3 8B/70B on H100 and B200, NeMo Mixtral 8x7B on
+H100, MT-NLG 530B at 2240 GPUs, our Llama 70B BF16 p5en and p6-b200, Qwen3-8B p5en and p6-b300,
+Qwen3-30B-A3B p5en; Megatron-Bridge DeepSeek-V3 on H100 (25.09) and B300, Qwen3-30B-A3B on B200 and
+Qwen3-235B-A22B on H100 (26.04.01). Everything else (23 scored runs) is hold-out.
 Refit: `python3 validation_runs.py --fit`; the test fails if the constants differ from the fit.
 
 ## 7. Validation set: predicted vs published
 
-29 runs, 11 model families (Llama 3 8B/70B/405B, Mixtral 8x7B/8x22B, DeepSeek-V3, GPT-3 175B,
-Nemotron-4 340B, MT-NLG 530B, Qwen3 8B and 30B-A3B), H100 / H200 / H800 / B200 / B300 / A100, BF16 and
-FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
+40 runs, 13 model families (Llama 3 8B/70B/405B, Mixtral 8x7B/8x22B, DeepSeek-V3, GPT-3 175B,
+Nemotron-4 340B, MT-NLG 530B, Qwen3 8B, 30B-A3B and 235B-A22B, Kimi-K2), H100 / H200 / H800 / B200 /
+B300 / A100, BF16 and FP8, 8 to 16,384 GPUs. 38 are scored; 2 are superseded (printed, not fitted or
+scored). `python3 validation_runs.py` prints this table.
+
+Every MoE run states where its layout comes from (`layout` in `validation_runs.py`): `pinned` = expert
+TP, token dispatcher and recompute read from the recipe of the release that published the number
+([NeMo r2.4.0](https://github.com/NVIDIA/NeMo/tree/r2.4.0/scripts/performance) for 25.07,
+[Megatron-Bridge v0.4.2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/v0.4.2/scripts/performance/configs),
+which carries the 26.04.01 summary); `unverified` = assumed (marked in the Set column). The NeMo 25.07
+recipes set expert TP 1 for DeepSeek-V3 and Mixtral 8x22B; until mfu-model-3 these rows used expert TP =
+TP, which spread EP over two nodes and hid most of the DeepSeek-V3 error behind network time.
 
 | Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | nemo-h100-llama3-8b | Llama-3-8B | 8 | dgx-h100 | fp8 | tokens_per_gpu | 14,744 tok/s/GPU | 14,697 tok/s/GPU | -0.3% | 43.0% | 98.1 / 98.4 | fit |
 | nemo-h100-llama3-70b | Llama-3-70B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 1,663 tok/s/GPU | 1,671 tok/s/GPU | +0.5% | 40.6% | 108.7 / 108.2 | fit |
 | nemo-h100-llama31-405b | Llama-3.1-405B | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 320 tok/s/GPU | 297 tok/s/GPU | -7.3% | 39.3% | 35.3 / 38.1 | hold-out |
-| nemo-h100-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 8,275 tok/s/GPU | 8,087 tok/s/GPU | -2.3% | 33.9% | 21.9 / 22.4 | fit |
-| nemo-h100-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,280 tok/s/GPU | 1,296 tok/s/GPU | +1.2% | 33.0% | 35.3 / 34.9 | hold-out |
-| nemo-h100-deepseek-v3 | DeepSeek-V3 | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 887 tok/s/GPU | 1,000 tok/s/GPU | +12.7% | 14.7% | 12.7 / 11.3 | fit |
+| nemo-h100-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-h100 | fp8 | tokens_per_gpu | 8,275 tok/s/GPU | 7,717 tok/s/GPU | -6.7% | 32.3% | 21.9 / 23.4 | fit |
+| nemo-h100-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,280 tok/s/GPU | 1,404 tok/s/GPU | +9.7% | 35.8% | 35.3 / 32.2 | hold-out |
+| nemo-h100-deepseek-v3 | DeepSeek-V3 | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 887 tok/s/GPU | 1,463 tok/s/GPU | +64.9% | 21.5% | 12.7 / 7.7 | superseded |
 | nemo-h100-gpt3-175b | GPT-3-175B | 512 | dgx-h100 | fp8 | tokens_per_gpu | 824 tok/s/GPU | 760 tok/s/GPU | -7.8% | 41.3% | 27.4 / 29.8 | hold-out |
 | nemo-h100-nemotron4-340b | Nemotron-4-340B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 335 tok/s/GPU | 360 tok/s/GPU | +7.4% | 38.3% | 135.0 / 125.6 | hold-out |
 | nemo-b200-llama3-8b | Llama-3-8B | 8 | dgx-b200 | fp8 | tokens_per_gpu | 30,131 tok/s/GPU | 32,369 tok/s/GPU | +7.4% | 41.7% | 48.0 / 44.7 | fit |
 | nemo-b200-llama3-70b | Llama-3-70B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 3,690 tok/s/GPU | 3,463 tok/s/GPU | -6.2% | 37.0% | 49.0 / 52.2 | fit |
 | nemo-b200-llama31-405b | Llama-3.1-405B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 674 tok/s/GPU | 657 tok/s/GPU | -2.5% | 38.3% | 134.2 / 137.7 | hold-out |
-| nemo-b200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 16,384 tok/s/GPU | 17,302 tok/s/GPU | +5.6% | 31.9% | 11.0 / 10.5 | hold-out |
-| nemo-b200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 2,548 tok/s/GPU | 2,670 tok/s/GPU | +4.8% | 29.9% | 17.7 / 16.9 | hold-out |
-| nemo-b200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-b200 | fp8 | tokens_per_gpu | 1,640 tok/s/GPU | 2,001 tok/s/GPU | +22.0% | 12.9% | 27.6 / 22.6 | hold-out |
+| nemo-b200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 16,384 tok/s/GPU | 16,534 tok/s/GPU | +0.9% | 30.5% | 11.0 / 10.9 | hold-out |
+| nemo-b200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 2,548 tok/s/GPU | 3,034 tok/s/GPU | +19.1% | 34.0% | 17.7 / 14.9 | hold-out |
+| nemo-b200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-b200 | fp8 | tokens_per_gpu | 1,640 tok/s/GPU | 3,849 tok/s/GPU | +134.7% | 24.9% | 27.6 / 11.7 | superseded |
 | nemo-b200-gpt3-175b | GPT-3-175B | 512 | dgx-b200 | fp8 | tokens_per_gpu | 1,523 tok/s/GPU | 1,586 tok/s/GPU | +4.2% | 37.9% | 14.8 / 14.3 | hold-out |
 | nemo-b200-nemotron4-340b | Nemotron-4-340B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 632 tok/s/GPU | 725 tok/s/GPU | +14.7% | 33.9% | 143.1 / 124.8 | hold-out |
 | meta-llama3-405b-8k-gpus | Llama-3.1-405B | 8192 | meta-h100-roce | bf16 | mfu | 43.0% | 50.5% | +17.4% | 50.5% | – | hold-out |
 | meta-llama3-405b-16k-gpus | Llama-3.1-405B | 16384 | meta-h100-roce | bf16 | mfu | 41.0% | 47.9% | +16.8% | 47.9% | – | hold-out |
-| deepseek-v3-paper | DeepSeek-V3 | 2048 | deepseek-h800 | fp8 | tokens_per_gpu_wallclock | 1,543 tok/s/GPU | 2,022 tok/s/GPU | +31.0% | 33.0% | 3.7 / 2.8 | hold-out |
+| deepseek-v3-paper | DeepSeek-V3 | 2048 | deepseek-h800 | fp8 | tokens_per_gpu_wallclock | 1,543 tok/s/GPU | 1,791 tok/s/GPU | +16.1% | 29.2% | 3.7 / 3.2 | hold-out |
 | mtnlg-530b-2240-gpus | MT-NLG-530B | 2240 | dgx-a100-40g | bf16 | mfu | 40.4% | 40.4% | -0.0% | 40.4% | – | fit |
 | mtnlg-530b-2800-gpus | MT-NLG-530B | 2800 | dgx-a100-40g | bf16 | mfu | 38.8% | 39.2% | +1.0% | 39.2% | – | hold-out |
 | mtnlg-530b-3360-gpus | MT-NLG-530B | 3360 | dgx-a100-40g | bf16 | mfu | 36.2% | 38.0% | +5.0% | 38.0% | – | hold-out |
@@ -164,36 +175,69 @@ FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
 | repo-llama70b-fp8-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | fp8 | tokens_per_gpu | 3,474 tok/s/GPU | 3,463 tok/s/GPU | -0.3% | 37.0% | 52.1 / 52.2 | hold-out |
 | repo-qwen3-8b-bf16-p5en | Qwen3-8B | 16 | p5en.48xlarge | bf16 | tokens_per_gpu | 10,125 tok/s/GPU | 10,728 tok/s/GPU | +6.0% | 57.1% | 71.4 / 67.4 | fit |
 | repo-qwen3-8b-bf16-b300 | Qwen3-8B | 16 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 19,875 tok/s/GPU | 18,877 tok/s/GPU | -5.0% | 44.2% | 36.4 / 38.3 | fit |
-| repo-qwen3-30b-a3b-bf16-p5en | Qwen3-30B-A3B | 64 | p5en.48xlarge | bf16 | mfu | 33.7% | 32.8% | -2.8% | 32.8% | – | fit |
+| repo-qwen3-30b-a3b-bf16-p5en | Qwen3-30B-A3B | 64 | p5en.48xlarge | bf16 | mfu | 33.7% | 28.4% | -15.8% | 28.4% | – | fit, layout unverified |
+| mb2509-h100-dsv3 | DeepSeek-V3 | 1024 | dgx-h100 | fp8 | tokens_per_gpu | 1,297 tok/s/GPU | 1,478 tok/s/GPU | +14.0% | 21.7% | 8.7 / 7.6 | fit, layout unverified |
+| mb2604-b200-dsv3 | DeepSeek-V3 | 256 | dgx-b200 | fp8 | tokens_per_gpu | 3,328 tok/s/GPU | 2,544 tok/s/GPU | -23.6% | 16.4% | 13.6 / 17.8 | hold-out |
+| mb2604-b300-dsv3 | DeepSeek-V3 | 256 | dgx-b300 | fp8 | tokens_per_gpu | 3,456 tok/s/GPU | 3,763 tok/s/GPU | +8.9% | 24.3% | 13.1 / 12.0 | fit |
+| mb2604-b200-qwen3-30b | Qwen3-30B-A3B | 8 | dgx-b200 | fp8 | tokens_per_gpu | 27,136 tok/s/GPU | 30,984 tok/s/GPU | +14.2% | 19.2% | 53.3 / 46.7 | fit |
+| mb2604-b300-qwen3-30b | Qwen3-30B-A3B | 8 | dgx-b300 | fp8 | tokens_per_gpu | 30,720 tok/s/GPU | 30,984 tok/s/GPU | +0.9% | 19.2% | 47.1 / 46.7 | hold-out |
+| mb2604-h100-qwen3-30b | Qwen3-30B-A3B | 16 | dgx-h100 | fp8 | tokens_per_gpu | 8,960 tok/s/GPU | 9,281 tok/s/GPU | +3.6% | 13.1% | 80.7 / 77.9 | hold-out |
+| mb2604-b200-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 3,776 tok/s/GPU | 5,954 tok/s/GPU | +57.7% | 22.1% | 12.0 / 7.6 | hold-out |
+| mb2604-b300-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-b300 | fp8 | tokens_per_gpu | 5,936 tok/s/GPU | 5,820 tok/s/GPU | -2.0% | 21.6% | 7.6 / 7.8 | hold-out |
+| mb2604-h100-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,712 tok/s/GPU | 1,606 tok/s/GPU | -6.2% | 13.6% | 26.4 / 28.1 | fit |
+| repo-kimi-k2-b300-32n | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,094 tok/s/GPU | 1,423 tok/s/GPU | +30.0% | 14.0% | 41.3 / 31.8 | hold-out, layout unverified |
+| repo-dsv3-b300-32n | DeepSeek-V3 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,067 tok/s/GPU | 1,407 tok/s/GPU | +31.9% | 18.2% | 42.4 / 32.1 | hold-out, layout unverified |
 
 | Set | Runs | Median abs error | Max abs error |
 |---|---|---|---|
-| All | 29 | 5.6% | 31.0% |
-| Hold-out | 17 | 7.3% | 31.0% |
-| Fit | 12 | 5.2% | 12.7% |
-| Old calculator (fixed 40% MFU), same runs | 29 | 38.0% | 143.6% |
+| All scored | 38 | 7.0% | 57.7% |
+| Hold-out | 23 | 7.8% | 57.7% |
+| Fit | 15 | 6.2% | 15.8% |
+| First set (29 runs, without the 2 superseded) | 27 | 6.2% | 19.1% |
+| First set, hold-out | 16 | 7.6% | 19.1% |
+| New MoE runs (mfu-model-3) | 11 | 14.0% | 57.7% |
+| New MoE runs, hold-out | 7 | 23.6% | 57.7% |
+| Superseded (not scored) | 2 | 99.8% | 134.7% |
+| mfu-model-1 on the first 29 runs | 29 | 5.6% | 31.0% |
+| Old calculator (fixed 40% MFU), first 29 runs | 29 | 38.0% | 143.6% |
 
 Days per 1T tokens = 1e12 / (tokens/s/GPU x GPUs) / 86400, from the reported and the predicted
 throughput, so its error equals the throughput error. MFU-only runs (Meta, MT-NLG, Qwen3-30B-A3B)
 publish no tokens/s; for those the MFU is compared directly. The only published wall time in the
 set is DeepSeek-V3's (GPU-hours), compared with the 90% goodput applied.
 
-Sources: NeMo 25.07 and 25.04 performance summaries
+Sources: [Megatron-Bridge performance archive](https://docs.nvidia.com/nemo/megatron-bridge/nightly/performance-summary-archive.html)
+(25.09 and 26.04.01; MXFP8 counted as FP8); NeMo 25.07 and 25.04 performance summaries
 ([25.07](https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html),
 [25.04](https://docs.nvidia.com/nemo-framework/user-guide/25.07/performance/archive/25.04-performance-summary.html));
 [Llama 3 paper](https://arxiv.org/abs/2407.21783) Table 4; [DeepSeek-V3 paper](https://arxiv.org/abs/2412.19437)
 (180K H800 GPU-hours per trillion tokens, 2048 GPUs); [MT-NLG paper](https://arxiv.org/abs/2201.11990) Sec. 2.4;
 our runs under `benchmarks/pretrain-*` (paths in `validation_runs.py`).
 
+Superseded runs: `nemo-h100-deepseek-v3` (887 tok/s/GPU, NeMo 25.07) and `nemo-b200-deepseek-v3` (1,640).
+The same model on the same GPUs runs at 1,297 on H100 with NeMo 25.09 (+46%), and at 2,265 (25.09) and
+3,328 (26.04.01) on B200, while dense rows barely moved in those releases (Llama 3 70B H100: 1,663,
+1,619, 1,602). The MoE software changed, not the hardware, so these rows are kept for reference only.
+
 Runs above 15%, and why:
-- `deepseek-v3-paper` +31%: the published number is GPU-hours over the whole pre-training, which include
+- `mb2604-b200-qwen3-235b` +58%: the v0.4.2 recipe uses Megatron's `alltoall` token dispatcher (no
+  DeepEP/HybridEP) for this row; the same model on B300 with HybridEP is -2%. The dispatcher is recorded
+  (`plan["dispatcher"]`) but not modelled.
+- `repo-dsv3-b300-32n` +32% and `repo-kimi-k2-b300-32n` +30%: DeepEP over EFA with the all-to-all
+  overlapped; the SMs DeepEP takes from compute are not modelled, and expert TP is not recorded.
+- `mb2604-b200-dsv3` -24%: DeepEP with all-to-all overlap (`moe_a2a_overlap`) hides more than the default
+  EP overlap of 0.3.
+- `deepseek-v3-paper` +16%: the published number is GPU-hours over the whole pre-training, which include
   the batch-size warm-up (3,072 to 15,360) and stalls beyond the 90% goodput; DualPipe is approximated
-  (VP 2, EP overlap 0.95) and DeepSeek's FP8 blockwise kernels are not modelled. The same model on the
-  NeMo DeepSeek-V3 recipes is +12.7% (H100) and +22% (B200).
+  (VP 2, EP overlap 0.95) and DeepSeek's FP8 blockwise kernels are not modelled.
+- `repo-qwen3-30b-a3b-bf16-p5en` -16%, `mb2604-b200-qwen3-30b` +14%, `mb2509-h100-dsv3` +14%: fit runs;
+  one expert-efficiency curve for 768- to 2,048-wide experts.
+- `nemo-b200-mixtral-8x22b` +19%: with the recipe's expert TP 1, EP 8 stays inside a node and the
+  model's EP time is small; the measured run is slower.
 - Llama 3 405B (Meta) +17%: VP and micro batch are not published; the run uses NeMo's VP 8. With VP 1
   the bubble is 32-48% and the model would under-predict instead.
-- `nemo-b200-deepseek-v3` +22% and Nemotron-4 340B on B200 +14.7%: the B200 FP8 efficiency is fitted on
-  Llama runs; small-expert MoE and very wide FFN layers on B200 run below it.
+- Nemotron-4 340B on B200 +14.7%: the B200 FP8 efficiency is fitted on Llama runs; very wide FFN layers
+  on B200 run below it.
 
 Families with no published plan and throughput we could find (not in the set): Grok-1, Qwen2.5/Qwen3
 from the Qwen team, OPT-175B (FSDP plan and network not published in enough detail).
