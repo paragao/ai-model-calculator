@@ -24,6 +24,7 @@ from utils import validation_runs as vr  # noqa: E402
 from utils.architecture_loader import load_variant_from_hf_config  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
+DOC_MFU = Path(__file__).parent.parent / "docs" / "CALCULATOR-MFU.md"
 
 
 def preset(name):
@@ -398,6 +399,82 @@ class RackAwareCounts(unittest.TestCase):
         wide = mm.estimate(shape, g, {**plan, "num_gpus": 256, "ep": 128, "pp": 1, "gbs": 2048}, "fp8")
         wide_slow = mm.estimate(shape, slow, {**plan, "num_gpus": 256, "ep": 128, "pp": 1, "gbs": 2048}, "fp8")
         self.assertGreater(wide_slow["time_s"]["ep_total"], wide["time_s"]["ep_total"])  # EP 128 does not fit a 64-GPU share
+
+
+class Gb200Validation(unittest.TestCase):
+    """Step 3: the DGX GB200 rows of NeMo 25.07 are a hold-out for the 72-GPU NVLink domain model. Nothing is
+    refitted: these rows are not in vr.RUNS, so the 38-run summary, the fit and every existing number are unchanged."""
+
+    # Rows above the 30% bar, and why (docs/CALCULATOR-MFU.md, section 7a). Bounds pin them so they cannot drift unseen.
+    EXPLAINED = {
+        "nemo-gb200-deepseek-v3": 85.0,   # NeMo 25.07 software; NeMo 26.08.01 runs this model on the same GPUs 2.1x faster
+        "nemo-gb200-llama4-maverick": 40.0,  # dispatcher and layout not recorded (unverified)
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = vr.evaluate(vr.RACK_RUNS)
+        cls.summary = vr.rack_summary(cls.rows)
+
+    def test_eight_rows_all_hold_out_and_not_in_the_fit_set(self):
+        self.assertEqual(len(vr.RACK_RUNS), 8)
+        self.assertTrue(all(not r["fit"] for r in vr.RACK_RUNS))
+        self.assertFalse({r["id"] for r in vr.RACK_RUNS} & {r["id"] for r in vr.RUNS})
+        self.assertFalse({r["id"] for r in vr.RACK_RUNS} & set(vr.fit()["fit_runs"]))
+        self.assertEqual({r["hardware"] for r in vr.RACK_RUNS}, {"dgx-gb200"})
+        self.assertTrue(all(r["source"] == vr.NEMO_2507 and r["precision"] == "fp8" for r in vr.RACK_RUNS))
+
+    def test_the_existing_38_run_summary_is_untouched(self):
+        s = vr.summary(vr.evaluate())
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
+        self.assertEqual((s["hold_out"]["runs"], s["hold_out"]["median_abs_error_pct"]), (23, 7.4))
+        self.assertEqual(len(vr.RUNS), 40)  # 38 scored + 2 superseded
+
+    def test_typical_error_within_15_percent(self):
+        self.assertLessEqual(self.summary["median_abs_error_pct"], 15)
+
+    def test_each_row_within_30_percent_unless_explained(self):
+        for r in self.rows:
+            self.assertLessEqual(abs(r["error_pct"]), self.EXPLAINED.get(r["id"], 30.0), r)
+
+    def test_pinned_summary_is_current(self):
+        v = mm.VALIDATION_SUMMARY
+        self.assertEqual((v["rack_scale_runs"], v["rack_scale_median_abs_error_pct"], v["rack_scale_max_abs_error_pct"]),
+                         (self.summary["runs"], self.summary["median_abs_error_pct"], self.summary["max_abs_error_pct"]))
+
+    def test_dgx_gb200_hardware(self):
+        hw = mm.HARDWARE["dgx-gb200"]
+        # 4 x ConnectX-7 NDR 400 Gb/s per 4-GPU compute tray = 50 GB/s per GPU (NVIDIA DGX SuperPOD GB200 reference architecture)
+        self.assertEqual((hw["bf16"], hw["fp8"], hw["nvlink"], hw["net"], hw["gpn"]), (2500.0, 5000.0, 900.0, 50.0, 72))
+        self.assertEqual(hw["family"], "blackwell")
+
+    def test_new_architectures_match_their_published_size(self):
+        for name in ("Llama-4-Scout", "Llama-4-Maverick", "GPT-OSS-120B"):
+            s = mm.model_shape(vr.ARCH[name])
+            total, active = vr.PUBLISHED_PARAMS[name]
+            self.assertAlmostEqual(s["total_b"] / total, 1, delta=0.02, msg=name)
+            self.assertAlmostEqual(s["active_b"] / active, 1, delta=0.03, msg=name)
+        self.assertEqual(mm.model_shape(vr.ARCH["Llama-4-Maverick"])["moe_layers"], 24)  # every second layer
+        self.assertEqual(mm.model_shape(vr.ARCH["Llama-4-Scout"])["moe_layers"], 48)
+
+    def test_every_moe_row_states_its_layout(self):
+        for r in vr.RACK_RUNS:
+            if mm.model_shape(vr.ARCH[r["model"]])["n_experts"]:
+                self.assertTrue(r["layout"].startswith(("pinned: ", "unverified: ")), r["id"])
+                self.assertIn("etp", r["plan"], r["id"])
+
+    def test_same_recipe_on_b200_and_gb200_keeps_its_ratio(self):
+        """The change under test is a bigger NVLink domain on the same GPU: predicted GB200/B200 vs published."""
+        by = {r["id"]: r for r in self.rows}
+        b200 = {r["id"]: r for r in vr.evaluate()}
+        for gb, b in (("nemo-gb200-llama3-70b", "nemo-b200-llama3-70b"), ("nemo-gb200-mixtral-8x7b", "nemo-b200-mixtral-8x7b")):
+            published = by[gb]["reported"] / b200[b]["reported"]
+            predicted = by[gb]["predicted"] / b200[b]["predicted"]
+            self.assertAlmostEqual(predicted / published, 1, delta=0.15, msg=gb)
+
+    def test_docs_table_is_current(self):
+        doc = DOC_MFU.read_text() if hasattr(DOC_MFU, "read_text") else open(DOC_MFU).read()
+        self.assertIn(vr.markdown(self.rows), doc)
 
 
 if __name__ == "__main__":

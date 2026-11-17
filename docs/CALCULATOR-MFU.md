@@ -255,6 +255,38 @@ Runs above 15%, and why:
 Families with no published plan and throughput we could find (not in the set): Grok-1, Qwen2.5/Qwen3
 from the Qwen team, OPT-175B (FSDP plan and network not published in enough detail).
 
+### 7a. Rack-scale hold-out: DGX GB200 (NVL72), NeMo 25.07
+
+Added with the GB200 hardware step. 8 rows of the NeMo 25.07 performance summary
+([source](https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html)), FP8, the first plan of each table row (the numbers in parentheses are other
+settings). They are the same models and recipes as the DGX-B200 rows above, so they test what changes with a
+72-GPU NVLink domain on the same Blackwell GPU. All are hold-out: no constant was fitted or changed for them
+(`validation_runs.RACK_RUNS`, kept apart from the 38-run set so every number above is untouched).
+`dgx-gb200` has 50 GB/s of network per GPU (4 x ConnectX-7 NDR 400 Gb/s per 4-GPU compute tray, [NVIDIA DGX
+SuperPOD GB200 reference architecture](https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html)).
+Not included: Nemotron5-H-56B, a hybrid Mamba-Transformer that the parser does not cover.
+
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-gb200-llama3-8b | Llama-3-8B | 8 | dgx-gb200 | fp8 | tokens_per_gpu | 31,737 tok/s/GPU | 35,962 tok/s/GPU | +13.3% | 41.6% | 45.6 / 40.2 | hold-out |
+| nemo-gb200-llama3-70b | Llama-3-70B | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 4,066 tok/s/GPU | 4,069 tok/s/GPU | +0.1% | 39.2% | 44.5 / 44.4 | hold-out |
+| nemo-gb200-llama31-405b | Llama-3.1-405B | 128 | dgx-gb200 | fp8 | tokens_per_gpu | 706 tok/s/GPU | 730 tok/s/GPU | +3.5% | 38.4% | 128.1 / 123.8 | hold-out |
+| nemo-gb200-llama4-scout | Llama-4-Scout | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 13,783 tok/s/GPU | 14,778 tok/s/GPU | +7.2% | 35.8% | 13.1 / 12.2 | hold-out, layout unverified |
+| nemo-gb200-llama4-maverick | Llama-4-Maverick | 128 | dgx-gb200 | fp8 | tokens_per_gpu | 11,682 tok/s/GPU | 15,803 tok/s/GPU | +35.3% | 38.3% | 7.7 / 5.7 | hold-out, layout unverified |
+| nemo-gb200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-gb200 | fp8 | tokens_per_gpu | 17,246 tok/s/GPU | 18,516 tok/s/GPU | +7.4% | 30.7% | 10.5 / 9.8 | hold-out |
+| nemo-gb200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-gb200 | fp8 | tokens_per_gpu | 2,869 tok/s/GPU | 3,432 tok/s/GPU | +19.6% | 34.6% | 15.8 / 13.2 | hold-out, layout unverified |
+| nemo-gb200-deepseek-v3 | DeepSeek-V3 | 256 | dgx-gb200 | fp8 | tokens_per_gpu | 2,327 tok/s/GPU | 4,241 tok/s/GPU | +82.3% | 24.7% | 19.4 / 10.7 | hold-out, layout unverified |
+
+Median absolute error 10.4%, worst 82.3% over 8 rows (the bar is 15% typical,
+30% worst). **Two rows miss the 30% bar and nothing was refitted:**
+- `nemo-gb200-deepseek-v3` +82%: NeMo 25.07 software. The same pattern as the two superseded DeepSeek-V3 rows
+  above (the same model on the same GPUs runs 2x faster in later releases); NeMo 26.08.01 publishes 4,912 tok/s/GPU
+  for DeepSeek-V3 on 256 GB200 (MXFP8, PP 4, VP 4, EP 64). The dispatcher is assumed (`unverified`).
+- `nemo-gb200-llama4-maverick` +35%: the token dispatcher and recompute settings are not recorded (`unverified`).
+
+The same-GPU ratio the step is about: predicted GB200 / B200 against published for the same recipe is within
+15% for Llama 3 70B and Mixtral 8x7B (`test_same_recipe_on_b200_and_gb200_keeps_its_ratio`).
+
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
@@ -273,4 +305,4 @@ honestly are often the slow ones (scoring all of them takes < 0.1 s for 4,096 GP
   `recompute` modules (the validation runs); the calculator's own plans assume none.
 - Linear-attention FLOPs use 12 H d_lin^2 per layer (state update and read), not a kernel model.
 - Network topology above the leaf (oversubscription) is not modelled.
-- Hybrid Mamba models (Nemotron-H) are not covered by the parser.
+- Hybrid Mamba models (Nemotron-H) are not covered by the parser (so Nemotron5-H-56B is not in section 7a).

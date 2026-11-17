@@ -75,6 +75,10 @@ HARDWARE = {
     #   net 100: p6e-gb200.36xlarge 3200 Gigabit EFA / 4 GPUs = 800 Gbps = 100 GB/s per GPU
     #       https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (same column as every other row here)
     #   u-p6e-gb200x72 = 18 instances = 72 GPUs, u-p6e-gb200x36 = 9 instances = 36 GPUs (AWS launch page above)
+    # DGX GB200 NVL72 (validation only): 18 compute trays x 4 GPUs, each tray 4 x ConnectX-7 NDR 400 Gb/s = 50 GB/s per GPU
+    #   https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html
+    "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
     "u-p6e-gb200x72":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
                          "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
     "u-p6e-gb200x36":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
@@ -225,6 +229,7 @@ VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6
                       "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 19.8,
                       "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
                       "superseded_runs": 2,
+                      "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {

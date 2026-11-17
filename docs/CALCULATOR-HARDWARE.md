@@ -53,3 +53,16 @@ HGX nodes (domain 8) are not touched by any of this.
 
 Not modelled: Grace CPU and NVLink-C2C. CPU offload over C2C is much faster than PCIe, so FSDP with offload on
 GB200 is pessimistic.
+
+## 4. Validation on GB200 (hold-out)
+
+Eight DGX GB200 rows of the NeMo 25.07 performance summary, FP8, are scored as a hold-out (`validation_runs.RACK_RUNS`,
+table in `docs/CALCULATOR-MFU.md` section 7a). Nothing was fitted to them. Median error 10.4%, worst +82.3%
+(DeepSeek-V3, NeMo 25.07 software; layout unverified) and +35.3% (Llama 4 Maverick, layout unverified); the other six
+rows are within +19.6%.
+
+| Hardware | Network per GPU | Source |
+|---|---|---|
+| `dgx-gb200` | 50 GB/s (4 x ConnectX-7 NDR 400 Gb/s per 4-GPU compute tray) | [NVIDIA DGX SuperPOD GB200 reference architecture](https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html) |
+
+The AWS GB200 EFA figure (100 GB/s per GPU) is not checked by these rows: they use NVIDIA's own network.

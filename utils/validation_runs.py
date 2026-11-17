@@ -81,6 +81,24 @@ ARCH = {
                 "v_head_dim": 128, "n_routed_experts": 384, "n_shared_experts": 1, "num_experts_per_tok": 8,
                 "first_k_dense_replace": 1, "vocab_size": 163840, "tie_word_embeddings": False,
                 "hidden_act": "silu", "n_group": 1, "topk_group": 1},
+    # https://huggingface.co/unsloth/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json (text_config, mirror of Meta's):
+    # intermediate_size_mlp 16384 is the dense FFN, intermediate_size 8192 the expert and shared-expert FFN, MoE in every
+    # layer, top-1 routing plus one shared expert (Llama 4 model card). Chunked attention (8192) equals the 8192 sequence.
+    "Llama-4-Scout": {"num_hidden_layers": 48, "hidden_size": 5120, "intermediate_size": 16384,
+                      "moe_intermediate_size": 8192, "num_attention_heads": 40, "num_key_value_heads": 8,
+                      "head_dim": 128, "vocab_size": 202048, "tie_word_embeddings": False, "num_local_experts": 16,
+                      "num_experts_per_tok": 1, "n_shared_experts": 1, "hidden_act": "silu"},
+    # https://huggingface.co/unsloth/Llama-4-Maverick-17B-128E-Instruct/blob/main/config.json: as Scout, 128 experts,
+    # MoE in every second layer (interleave_moe_layer_step 2), the others dense.
+    "Llama-4-Maverick": {"num_hidden_layers": 48, "hidden_size": 5120, "intermediate_size": 16384,
+                         "moe_intermediate_size": 8192, "num_attention_heads": 40, "num_key_value_heads": 8,
+                         "head_dim": 128, "vocab_size": 202048, "tie_word_embeddings": False, "num_local_experts": 128,
+                         "num_experts_per_tok": 1, "n_shared_experts": 1, "interleave_moe_layer_step": 2,
+                         "hidden_act": "silu"},
+    # https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json (sliding window 128 on alternate layers: not modelled)
+    "GPT-OSS-120B": {"num_hidden_layers": 36, "hidden_size": 2880, "intermediate_size": 2880, "num_attention_heads": 64,
+                     "num_key_value_heads": 8, "head_dim": 64, "vocab_size": 201088, "tie_word_embeddings": False,
+                     "num_local_experts": 128, "num_experts_per_tok": 4, "hidden_act": "silu"},
 }
 # Published parameter counts (billions): total, active. Checks the generic config parser.
 PUBLISHED_PARAMS = {
@@ -89,6 +107,10 @@ PUBLISHED_PARAMS = {
     "GPT-3-175B": (175.0, 175.0), "Nemotron-4-340B": (341.0, 341.0), "MT-NLG-530B": (530.0, 530.0),
     "Qwen3-8B": (8.2, 8.2), "Qwen3-30B-A3B": (30.5, 3.3), "Qwen3-235B-A22B": (235.0, 22.0),
     "Kimi-K2": (1040.0, 32.0),
+    "Llama-4-Scout": (109.0, 17.0), "Llama-4-Maverick": (400.0, 17.0),
+    # gpt-oss model card (arXiv 2508.10925): 116.83B total, 5.13B active per token. That active count leaves out the
+    # 0.58B input-embedding table, which model_shape's active count includes: 5.13 + 0.58 = 5.71.
+    "GPT-OSS-120B": (116.83, 5.71),
 }
 
 NEMO_2507 = "https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html"
@@ -263,6 +285,40 @@ RUNS = [
 ]
 
 
+# Rack-scale hold-out (hardware step 3): NeMo 25.07, DGX-GB200 (NVL72), FP8, the first plan of each table row
+# (the parenthesised numbers are other settings). Nothing here is fitted: BASE_EFFICIENCY[("blackwell", "fp8")] and the MoE
+# constants come from the RUNS above, none of them from these rows, so each is a pure check of the NVLink-domain model.
+# Kept apart from RUNS so the 38-run summary, the fit and every existing number stay as they were.
+# Not included: Nemotron5-H-56B (a hybrid Mamba-Transformer: model_shape has no state-space layers).
+NEMO_GB200_CSV = ("https://github.com/NVIDIA/NeMo/blob/r2.4.0/scripts/performance/recommended_model_configs/"
+                  "model_configs_gb200.csv")
+RACK_RUNS = [
+    _run("nemo-gb200-llama3-8b", "Llama-3-8B", "dgx-gb200", "fp8", 8, 128, 2, 8192,
+         metric="tokens_per_gpu", value=31737, source=NEMO_2507),
+    _run("nemo-gb200-llama3-70b", "Llama-3-70B", "dgx-gb200", "fp8", 64, 128, 1, 8192, fsdp=True,
+         metric="tokens_per_gpu", value=4066, source=NEMO_2507),
+    _run("nemo-gb200-llama31-405b", "Llama-3.1-405B", "dgx-gb200", "fp8", 128, 64, 1, 8192, tp=2, fsdp=True,
+         metric="tokens_per_gpu", value=706, source=NEMO_2507),
+    _run("nemo-gb200-llama4-scout", "Llama-4-Scout", "dgx-gb200", "fp8", 64, 1024, 1, 8192, ep=16, etp=1,
+         metric="tokens_per_gpu", value=13783, source=NEMO_2507,
+         layout="unverified: expert TP 1 is in " + NEMO_GB200_CSV + " (llama4 e16, etp_size 1); the token dispatcher is not recorded"),
+    _run("nemo-gb200-llama4-maverick", "Llama-4-Maverick", "dgx-gb200", "fp8", 128, 1024, 1, 8192, pp=2, vp=12, ep=64, etp=1,
+         metric="tokens_per_gpu", value=11682, source=NEMO_2507,
+         layout="unverified: expert TP 1 is in " + NEMO_GB200_CSV + " (llama4 e128, etp_size 1); the token dispatcher is not recorded"),
+    _run("nemo-gb200-mixtral-8x7b", "Mixtral-8x7B", "dgx-gb200", "fp8", 64, 256, 2, 4096, ep=8, etp=1,
+         layout="pinned: " + NEMO_GB200_CSV + " (etp_size unset at TP 1)",
+         metric="tokens_per_gpu", value=17246, source=NEMO_2507),
+    _run("nemo-gb200-mixtral-8x22b", "Mixtral-8x22B", "dgx-gb200", "fp8", 256, 64, 1, 65536, tp=2, pp=4, cp=8, vp=14, ep=8, etp=1,
+         layout="unverified: no Mixtral-8x22B row in " + NEMO_GB200_CSV + "; expert TP 1 as the DGX-B200 recipe",
+         metric="tokens_per_gpu", value=2869, source=NEMO_2507),
+    _run("nemo-gb200-deepseek-v3", "DeepSeek-V3", "dgx-gb200", "fp8", 256, 2048, 1, 4096, tp=2, pp=4, ep=64, etp=1,
+         dispatcher="alltoall",
+         layout="unverified: TP 2, PP 4, EP 64 and expert TP 1 are in " + NEMO_GB200_CSV + "; the alltoall dispatcher is "
+                "the one the DGX-B200 25.07 row uses (llm/pretrain_deepseek_v3.py), not checked for GB200",
+         metric="tokens_per_gpu", value=2327, source=NEMO_2507),
+]
+
+
 # Rows added with mfu-model-3 (reported as their own group).
 NEW_MOE_RUNS = {"mb2509-h100-dsv3", "mb2604-b200-dsv3", "mb2604-b300-dsv3", "mb2604-b200-qwen3-30b",
                 "mb2604-b300-qwen3-30b", "mb2604-h100-qwen3-30b", "mb2604-b200-qwen3-235b", "mb2604-b300-qwen3-235b",
@@ -314,6 +370,13 @@ def summary(rows):
             "new_moe": stats([x for x in scored if x.get("new_moe")]),
             "new_moe_hold_out": stats([x for x in scored if x.get("new_moe") and not x["fit"]]),
             "superseded": stats([x for x in rows if x.get("superseded")])}
+
+
+def rack_summary(rows):
+    """Median and worst absolute error of the rack-scale hold-out rows (evaluate(RACK_RUNS))."""
+    errs = [abs(x["error_pct"]) for x in rows]
+    return {"runs": len(errs), "median_abs_error_pct": round(statistics.median(errs), 1) if errs else None,
+            "max_abs_error_pct": round(max(errs), 1) if errs else None}
 
 
 def _solve(fn, target, lo=0.05, hi=1.5):
@@ -418,3 +481,7 @@ if __name__ == "__main__":
     rows = evaluate()
     print(markdown(rows))
     print(json.dumps(summary(rows), indent=1))
+    rack_rows = evaluate(RACK_RUNS)
+    print("\nRack-scale hold-out (DGX GB200, NeMo 25.07)\n")
+    print(markdown(rack_rows))
+    print(json.dumps(rack_summary(rack_rows), indent=1))
