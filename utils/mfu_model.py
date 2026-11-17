@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-3"
+MODEL_VERSION = "mfu-model-4"
 
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
@@ -76,7 +76,7 @@ BASE_EFFICIENCY = {
 # Routed-expert matmuls (grouped GEMMs, permute/unpermute, routing) run at
 #   moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
 # of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
-MOE_EXPERT_FACTOR = 0.77
+MOE_EXPERT_FACTOR = 0.78
 MOE_EXPERT_HALF_FFN = 1024
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
@@ -95,6 +95,19 @@ ACT_BYTES = 2       # BF16 activations on the wire (FP8 dispatch not modelled)
 # evaluation take the rest). Llama 3 paper, Sec. 3.3.4: "higher than 90% effective training time".
 GOODPUT = 0.90
 
+# Streaming multiprocessors per GPU (for the SMs a communication kernel takes from compute).
+# H100/H200/H800: 132 (NVIDIA H100 Tensor Core GPU Architecture whitepaper, H100 SXM5);
+# A100: 108 (NVIDIA A100 whitepaper); B200: 148 (74 per die, chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut);
+# B300: 160 (NVIDIA "Inside NVIDIA Blackwell Ultra" blog: up to 160, varies by SKU).
+SMS_PER_GPU = {"H100": 132, "H200": 132, "H800": 132, "A100": 108, "B200": 148, "B300": 160}
+# Token dispatchers whose all-to-all runs as SM kernels (DeepEP, NVIDIA HybridEP). When the plan
+# overlaps the all-to-all with compute (plan a2a_overlap), those SMs are not available to the GEMMs.
+SM_DISPATCHERS = ("deepep", "hybridep")
+COMM_SMS = 20  # DeepSeek-V3 paper Sec. 3.2.2: 20 of the H800's 132 SMs run the all-to-all (plan dispatcher_sms overrides)
+# Activation recompute (plan recompute = Megatron-Core recompute_modules): each listed module's forward
+# runs again in backward. Elementwise modules (layernorm, moe_act) add no matmul FLOPs.
+RECOMPUTE_MODULES = ("mlp", "moe", "shared_experts", "mla_up_proj", "core_attn", "layernorm", "moe_act")
+
 # Default global batch when the request gives none: 16M tokens per step, the Llama 3 405B
 # setting (Llama 3 paper, Table 4); at least one micro-batch per DP rank.
 DEFAULT_TOKENS_PER_STEP = 16 * 1024 * 1024
@@ -103,10 +116,10 @@ GATED_ACTIVATIONS = ("silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh")
 
 # Pinned result of validation_runs.py (test_mfu_model checks it is current).
 # Scored runs only: superseded runs are printed but not scored (validation_runs.summary).
-VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 7.0, "max_abs_error_pct": 57.7,
-                      "hold_out_median_abs_error_pct": 7.8, "hold_out_max_abs_error_pct": 57.7,
-                      "original_runs": 27, "original_median_abs_error_pct": 6.2, "original_max_abs_error_pct": 19.1,
-                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 14.0, "new_moe_max_abs_error_pct": 57.7,
+VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6.1, "max_abs_error_pct": 58.9,
+                      "hold_out_median_abs_error_pct": 7.4, "hold_out_max_abs_error_pct": 58.9,
+                      "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 19.8,
+                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
                       "superseded_runs": 2,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
@@ -170,9 +183,11 @@ def attention_shape(cfg, d, layers):
         q_lora = _num(cfg, "q_lora_rank")
         q = d * q_lora + q_lora * heads * qk if q_lora else d * heads * qk
         full = q + d * (kv_lora + rope) + kv_lora * heads * (qk - rope + v) + heads * v * d
+        mla_up = (q_lora * heads * qk if q_lora else 0) + kv_lora * heads * (qk - rope + v)
         kind = "MLA"
     else:
         qk = v = head_dim
+        mla_up = 0
         full = d * head_dim * (2 * heads + 2 * kv_heads)
         kind = "MQA" if kv_heads == 1 and heads > 1 else ("GQA" if kv_heads < heads else "MHA")
     linear = min(layers, _num(cfg, "linear_attn_layers"))
@@ -182,6 +197,7 @@ def attention_shape(cfg, d, layers):
     if linear:
         kind = f"{kind} in {layers - linear} layers, linear attention in {linear}"
     return {"kind": kind, "params": params, "per_layer_avg": params // layers, "heads": heads,
+            "mla_up_per_layer": mla_up,
             "kv_heads": kv_heads, "d_qk": qk, "d_v": v, "full_layers": layers - linear,
             "linear_layers": linear, "lin_heads": lin_heads, "lin_dim": lin_dim}
 
@@ -292,6 +308,28 @@ def default_global_batch(seq, dp, mbs, tokens_per_step=DEFAULT_TOKENS_PER_STEP):
     return per_rank * dp * mbs
 
 
+def recompute_flops_per_token(shape, seq, modules):
+    """Forward FLOPs per token run again by activation recompute of `modules` (2 x the matmul params of
+    each module, or the forward third of the attention-score FLOPs for core_attn)."""
+    unknown = [x for x in modules if x not in RECOMPUTE_MODULES]
+    if unknown:
+        raise ValueError(f"unknown recompute module(s) {unknown}; known: {', '.join(RECOMPUTE_MODULES)}")
+    a, sc = shape["attention"], shape.get("scale", 1.0)
+    f = 0.0
+    if "mlp" in modules:  # dense-layer MLPs
+        f += 2.0 * (shape.get("dense_layer_params", 0) - shape.get("attn_per_layer", 0)) * shape.get("dense_layers", 0) * sc
+    if "moe" in modules:  # whole MoE block: active routed experts, shared expert, router
+        f += 2.0 * shape["moe_layers"] * (shape["topk"] * shape.get("expert_each", 0) + shape.get("shared_each", 0)
+                                          + shape.get("router_each", 0)) * sc
+    elif "shared_experts" in modules:
+        f += 2.0 * shape["moe_layers"] * shape.get("shared_each", 0) * sc
+    if "mla_up_proj" in modules:
+        f += 2.0 * a.get("mla_up_per_layer", 0) * a["full_layers"] * sc
+    if "core_attn" in modules:
+        f += 2.0 * a["heads"] * seq * (a["d_qk"] + a["d_v"]) * a["full_layers"]
+    return f
+
+
 def _sharded_dp_time(shape, hw, seq, t_compute, m, tp, pp, etp, ep, g_dense, g_expert, prefetch):
     """ZeRO-3 / FSDP data-parallel time per step: (total, exposed).
 
@@ -346,7 +384,10 @@ def estimate(shape, hw, plan, precision="bf16"):
                 3 = params sharded too: gathered for forward and backward every micro-batch),
           fsdp (bool: same as zero 3),
           zero3_prefetch (0..1, default 1: share of the next unit's gather that can run ahead,
-                from the memory model's ZeRO-3 live-parameter cap).
+                from the memory model's ZeRO-3 live-parameter cap),
+          recompute (Megatron-Core recompute_modules: forward FLOPs added to hardware time),
+          dispatcher, a2a_overlap, dispatcher_sms (an overlapped DeepEP / HybridEP all-to-all takes
+                dispatcher_sms, default COMM_SMS, of the GPU's SMs from compute).
     """
     n = int(plan["num_gpus"])
     tp, pp, cp = int(plan.get("tp", 1)), int(plan.get("pp", 1)), int(plan.get("cp", 1))
@@ -375,6 +416,16 @@ def estimate(shape, hw, plan, precision="bf16"):
     moe_factor = moe_expert_factor(shape["expert_ffn"]) if f_e else 1.0
     eta = 1.0 / ((1 - f_e) / eta_base + f_e / (eta_base * moe_factor))
     t_compute = f_gpu / (peak * eta)
+    # Recompute: hardware runs more FLOPs than the model counts (MFU keeps the model-FLOPs convention).
+    recompute = list(plan.get("recompute") or [])
+    rec_share = recompute_flops_per_token(shape, seq, recompute) / fl["total"] if recompute and fl["total"] else 0.0
+    # SMs taken by an SM-based dispatcher whose all-to-all overlaps compute.
+    sm_share = 0.0
+    if (str(plan.get("dispatcher", "")).lower() in SM_DISPATCHERS and plan.get("a2a_overlap")
+            and int(plan.get("ep", 1)) > 1 and shape["moe_layers"]):
+        sms = SMS_PER_GPU.get(hw["gpu"], 132)
+        sm_share = min(0.5, float(plan.get("dispatcher_sms", COMM_SMS)) / sms)
+    t_compute = t_compute * (1 + rec_share) / (1 - sm_share)
     bubble = (pp - 1) / (vp * m + pp - 1)
     t_pipe = t_compute / (1 - bubble)
 
@@ -457,6 +508,8 @@ def estimate(shape, hw, plan, precision="bf16"):
         "base_efficiency": eta_base,
         "moe_expert_factor": round(moe_factor, 4) if f_e else None,
         "compute_efficiency": round(eta, 4),
+        "recompute_flops_share": round(rec_share, 4),
+        "comm_sm_share": round(sm_share, 4),
         "bubble_fraction": round(bubble, 4),
         "time_s": {"compute": t_compute, "bubble": t_pipe - t_compute, "tp_exposed": e_tp, "cp_exposed": e_cp,
                    "ep_exposed": e_ep, "dp_exposed": e_dp, "tp_total": t_tp, "cp_total": t_cp,

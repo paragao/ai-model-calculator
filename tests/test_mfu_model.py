@@ -25,11 +25,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 # Runs allowed above the 30% bound, each with its reason (see docs/CALCULATOR-MFU.md).
 EXPLAINED_OUTLIERS = {
-    "deepseek-v3-paper": 35.0,  # GPU-hours include batch warm-up and DeepSeek's own kernels; DualPipe approximated
     # Megatron alltoall dispatcher (no DeepEP/HybridEP) at v0.4.2; the dispatcher kind is recorded, not modelled
     "mb2604-b200-qwen3-235b": 60.0,
-    # DeepEP over EFA with all-to-all overlap: its SMs are taken from compute (not modelled); layout unverified
-    "repo-dsv3-b300-32n": 35.0,
+    # DeepEP with moe_a2a_overlap hides more all-to-all than the default EP overlap (0.3)
+    "mb2604-b200-dsv3": 35.0,
 }
 
 
@@ -175,6 +174,12 @@ class Validation(unittest.TestCase):
         for rid in ("nemo-h100-deepseek-v3", "nemo-b200-deepseek-v3"):
             self.assertEqual(by_id[rid]["plan"].get("etp"), 1, rid)
 
+    def test_deepseek_v3_paper_within_10_percent(self):
+        # 20 of 132 SMs run DualPipe's all-to-all (paper Sec. 3.2.2) and RMSNorm / MLA up-projection are
+        # recomputed (Sec. 3.2.3): with both counted the run is within 10% (+31% in mfu-model-1).
+        row = next(r for r in self.rows if r["id"] == "deepseek-v3-paper")
+        self.assertLessEqual(abs(row["error_pct"]), 10.0, row)
+
     def test_dgx_b300_hardware(self):
         hw = mm.HARDWARE["dgx-b300"]
         self.assertEqual((hw["fp8"], hw["nvlink"], hw["net"]), (4500.0, 900.0, 100.0))
@@ -284,18 +289,49 @@ class ReferenceModels(unittest.TestCase):
         r = self.run_it("param2", num_gpus=64)
         p, t = r["parallelism"], r["training_time"]
         self.assertEqual((p["tensor_parallel"], p["pipeline_parallel"], p["expert_parallel"]), (1, 1, 1))
-        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3833, 1390787, 9.2))
+        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3866, 1402960, 9.2))
 
     def test_glm_fixed_plan(self):
         r = self.run_it("glm", num_gpus=64, tensor_parallel=2, pipeline_parallel=16)
         t = r["training_time"]
-        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3918, 211530, 60.8))
-        self.assertEqual(r["cost_estimate"]["total_cost_usd"], 1634182.0)
+        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3949, 213197, 60.3))
+        self.assertEqual(r["cost_estimate"]["total_cost_usd"], 1621399.0)
 
     def test_glm_expert_parallel_plan(self):
         t = self.run_it("glm", num_gpus=256, tensor_parallel=2, pipeline_parallel=8,
                         expert_parallel=8)["training_time"]
-        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3018, 651732))
+        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3036, 655762))
+
+
+class RecomputeAndCommSMs(unittest.TestCase):
+    """Activation recompute adds hardware FLOPs (not model FLOPs); an overlapped SM-based all-to-all
+    (DeepEP / HybridEP) takes its SMs from compute."""
+
+    DSV3 = vr.ARCH["DeepSeek-V3"]
+    PLAN = {"num_gpus": 256, "gbs": 4096, "mbs": 1, "seq": 4096, "pp": 8, "vp": 2, "ep": 32, "etp": 1}
+
+    def est(self, **extra):
+        return mm.estimate(mm.model_shape(self.DSV3), mm.HARDWARE["dgx-b200"], {**self.PLAN, **extra}, "fp8")
+
+    def test_mla_up_projection_size(self):
+        # q_lora x H x (nope + rope) + kv_lora x H x (nope + v) = 1536 x 128 x 192 + 512 x 128 x 256
+        self.assertEqual(mm.model_shape(self.DSV3)["attention"]["mla_up_per_layer"], 1536 * 128 * 192 + 512 * 128 * 256)
+
+    def test_recompute_adds_its_forward_flops_to_hardware_time_only(self):
+        base, rec = self.est(), self.est(recompute=["mla_up_proj", "layernorm"])
+        extra = 2.0 * (1536 * 128 * 192 + 512 * 128 * 256) * 61 / base["flops_per_token"]
+        self.assertAlmostEqual(rec["time_s"]["compute"] / base["time_s"]["compute"], 1 + extra, places=9)
+        self.assertEqual(rec["flops_per_token"], base["flops_per_token"])  # MFU keeps model FLOPs
+        self.assertLess(rec["mfu"], base["mfu"])
+        with self.assertRaises(ValueError):
+            self.est(recompute=["not_a_module"])
+
+    def test_overlapped_deepep_takes_20_sms_from_compute(self):
+        base = self.est()["time_s"]["compute"]
+        on = self.est(dispatcher="deepep", a2a_overlap=True)["time_s"]["compute"]
+        self.assertAlmostEqual(on / base, 148 / (148 - 20), places=9)  # B200: 148 SMs
+        self.assertEqual(self.est(dispatcher="deepep", a2a_overlap=False)["time_s"]["compute"], base)
+        self.assertEqual(self.est(dispatcher="alltoall", a2a_overlap=True)["time_s"]["compute"], base)
 
 
 class ZeroThree(unittest.TestCase):
