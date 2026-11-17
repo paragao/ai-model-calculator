@@ -319,6 +319,37 @@ RACK_RUNS = [
 ]
 
 
+# GB300 hold-out (hardware step 5): NeMo 26.08.01 publishes the same recipe on DGX-GB300 and DGX-GB200 (MXFP8, counted as
+# FP8 as for the Megatron-Bridge rows above). The model is checked on the RATIO GB300 / GB200, per pair: what changes is the
+# GPU (more memory, so larger micro batches and other plans) and the network, not the NVLink domain. No constant is fitted.
+# Pairs left out: DeepSeek-V4 Flash and Nemotron 3.5 Lightning (architectures not verifiable here), and the two NVFP4 pairs
+# (no FP4 mode). https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html
+NEMO_2608 = "https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html"
+_UNVERIFIED_2608 = "unverified: the 26.08.01 recipe is not pinned (expert TP 1 and the dispatcher are assumed)"
+
+
+def _pair(name, model, n, gbs, seq, gb300, gb200, ep_kw=None):
+    """gb300, gb200: dicts of plan fields and the published tokens/s/GPU of each system."""
+    rows = []
+    for hw, d in (("dgx-gb300", gb300), ("dgx-gb200", gb200)):
+        plan = {k: v for k, v in d.items() if k != "value"}
+        rows.append(_run(f"nemo2608-{hw[4:]}-{name}", model, hw, "fp8", n, gbs, plan.pop("mbs"), seq, etp=1,
+                         metric="tokens_per_gpu", value=d["value"], source=NEMO_2608 + " (26.08.01, MXFP8)",
+                         layout=_UNVERIFIED_2608, **plan))
+    return {"id": f"gb300-vs-gb200-{name}", "model": model, "gpus": n, "gb300": rows[0], "gb200": rows[1]}
+
+
+GB300_PAIRS = [
+    _pair("dsv3", "DeepSeek-V3", 256, 4096, 4096,
+          dict(mbs=1, pp=2, vp=8, ep=32, value=6288), dict(mbs=1, pp=4, vp=4, ep=64, value=4912)),
+    _pair("gpt-oss-120b", "GPT-OSS-120B", 64, 1280, 4096,
+          dict(mbs=4, ep=16, value=33024), dict(mbs=4, ep=64, value=28544)),
+    _pair("qwen3-30b", "Qwen3-30B-A3B", 8, 512, 4096,
+          dict(mbs=8, ep=8, value=44544), dict(mbs=4, ep=8, value=40960)),
+    _pair("qwen3-235b", "Qwen3-235B-A22B", 256, 8192, 4096,
+          dict(mbs=2, pp=4, vp=12, ep=32, value=8832), dict(mbs=1, pp=8, vp=3, ep=32, value=7264)),
+]
+
 # Rows added with mfu-model-3 (reported as their own group).
 NEW_MOE_RUNS = {"mb2509-h100-dsv3", "mb2604-b200-dsv3", "mb2604-b300-dsv3", "mb2604-b200-qwen3-30b",
                 "mb2604-b300-qwen3-30b", "mb2604-h100-qwen3-30b", "mb2604-b200-qwen3-235b", "mb2604-b300-qwen3-235b",
@@ -370,6 +401,39 @@ def summary(rows):
             "new_moe": stats([x for x in scored if x.get("new_moe")]),
             "new_moe_hold_out": stats([x for x in scored if x.get("new_moe") and not x["fit"]]),
             "superseded": stats([x for x in rows if x.get("superseded")])}
+
+
+def evaluate_pairs(pairs=GB300_PAIRS):
+    """Per pair: published and predicted GB300 / GB200 throughput ratio and the error of the ratio."""
+    out = []
+    for p in pairs:
+        a, b = evaluate([p["gb300"]])[0], evaluate([p["gb200"]])[0]
+        published, predicted = a["reported"] / b["reported"], a["predicted"] / b["predicted"]
+        out.append({"id": p["id"], "model": p["model"], "gpus": p["gpus"],
+                    "published_gb300": a["reported"], "published_gb200": b["reported"],
+                    "predicted_gb300": a["predicted"], "predicted_gb200": b["predicted"],
+                    "published_ratio": round(published, 3), "predicted_ratio": round(predicted, 3),
+                    "ratio_error_pct": round((predicted / published - 1) * 100, 1),
+                    "gb300_error_pct": a["error_pct"], "gb200_error_pct": b["error_pct"]})
+    return out
+
+
+def pair_summary(rows):
+    errs = [abs(x["ratio_error_pct"]) for x in rows]
+    return {"pairs": len(errs), "median_abs_error_pct": round(statistics.median(errs), 1) if errs else None,
+            "max_abs_error_pct": round(max(errs), 1) if errs else None}
+
+
+def pairs_markdown(rows):
+    out = ["| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | "
+           "Ratio error | GB300 error | GB200 error |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for x in rows:
+        out.append(f"| {x['id']} | {x['gpus']} | {x['published_gb300']:,.0f} / {x['predicted_gb300']:,.0f} | "
+                   f"{x['published_gb200']:,.0f} / {x['predicted_gb200']:,.0f} | {x['published_ratio']:.3f} | "
+                   f"{x['predicted_ratio']:.3f} | {x['ratio_error_pct']:+.1f}% | {x['gb300_error_pct']:+.1f}% | "
+                   f"{x['gb200_error_pct']:+.1f}% |")
+    return "\n".join(out)
 
 
 def rack_summary(rows):
@@ -485,3 +549,7 @@ if __name__ == "__main__":
     print("\nRack-scale hold-out (DGX GB200, NeMo 25.07)\n")
     print(markdown(rack_rows))
     print(json.dumps(rack_summary(rack_rows), indent=1))
+    pair_rows = evaluate_pairs()
+    print("\nGB300 vs GB200, same recipe (NeMo 26.08.01, MXFP8)\n")
+    print(pairs_markdown(pair_rows))
+    print(json.dumps(pair_summary(pair_rows), indent=1))

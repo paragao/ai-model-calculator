@@ -358,6 +358,58 @@ class Gb200Reachable(unittest.TestCase):
         self.assertTrue(r["fits_in_memory"])
         self.assertEqual(r["parallelism"]["num_nodes"], -(-r["parallelism"]["total_gpus"] // 72))
 
+    # ---- GB300 (step 5) ----
+
+    def test_gb300_names_map_to_the_ultraserver_and_no_instance_name_is_invented(self):
+        for given in ("GB300", "gb300", "p6e-gb300", "NVIDIA GB300", "gb300-nvl72", "p6e-gb300-ultraserver", "GB300s"):
+            self.assertEqual(p9.normalise_hardware(given), "p6e-gb300-ultraserver", given)
+        self.assertEqual(p9.GPU_OF_INSTANCE["p6e-gb300-ultraserver"], "GB300 279GB")
+        for bad in ("p6e-gb300.36xlarge", "u-p6e-gb300x72", "gb300x72"):
+            with self.assertRaises(ValueError, msg=bad):
+                p9.normalise_hardware(bad)
+
+    def test_gb300_up_to_72_gpus_is_sized_with_unknowns_listed(self):
+        r = run("Llama-3.1-70B", hardware="GB300", num_gpus=72, total_tokens_b=2000)
+        self.assertNotIn("error", r, r)
+        self.assertTrue(r["fits_in_memory"])
+        h, c = r["hardware"], r["cost_estimate"]
+        self.assertEqual((h["gpu"], h["domain_gpus"], h["billing_gpus"], h["billed_units"]), ("GB300 279GB", 72, 72, 1))
+        self.assertEqual(r["memory_breakdown"]["gpu_capacity_gb"], 279)
+        unknown = " ".join(h["unknowns"]).lower()
+        self.assertIn("efa bandwidth", unknown)
+        self.assertIn("price", unknown)
+        self.assertIs(c["price_known"], False)
+        self.assertIsNone(c["total_cost_usd"])
+        self.assertEqual(r["mfu_breakdown"]["base_efficiency_key"], "blackwell/bf16")
+
+    def test_gb200_does_not_list_unknowns(self):
+        r = run("Llama-3.1-8B", hardware="GB200", num_gpus=8, total_tokens_b=100)
+        self.assertNotIn("unknowns", r["hardware"])
+
+    def test_gb300_beyond_one_ultraserver_is_refused_because_the_network_is_unknown(self):
+        r = run("Llama-3.1-70B", hardware="GB300", num_gpus=128, total_tokens_b=2000)
+        self.assertIn("not published by AWS", r["error"])
+        self.assertIn("128 GPUs", r["error"])
+        self.assertNotIn("error", run("Llama-3.1-70B", hardware="GB200", num_gpus=128, total_tokens_b=2000))
+
+    def test_gb300_auto_search_stops_at_one_ultraserver_and_says_so(self):
+        r = run("Llama-3.1-70B", hardware="GB300", total_tokens_b=2000, num_gpus="auto", target_days=30)
+        self.assertNotIn("error", r, r)
+        counts = [t["num_gpus"] for t in r["gpu_count_search"]["tried"]]
+        self.assertEqual(counts, [4, 8, 16, 32, 64, 72])
+        self.assertIn("not met", r["gpu_count_search"]["note"])
+        self.assertIn("not published", r["gpu_count_search"]["note"])
+        r = run("Llama-3.1-8B", hardware="GB300", total_tokens_b=100, num_gpus="auto")
+        self.assertNotIn("note", r["gpu_count_search"])
+
+    def test_cli_estimate_accepts_gb300(self):
+        import subprocess
+        out = subprocess.run([sys.executable, str(Path(__file__).parent.parent / "ai_model_calculator.py"), "--estimate",
+                              "--instance", "gb300", "--model", "Llama-3.1-8B", "--num-gpus", "8"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        self.assertIn("GB300", out.stdout)
+
 
 class RackAwareCounts(unittest.TestCase):
     """Step 2: GPU counts in steps of 4 inside a 72-GPU domain, 64 of 72, billing by UltraServer."""
@@ -475,6 +527,108 @@ class Gb200Validation(unittest.TestCase):
     def test_docs_table_is_current(self):
         doc = DOC_MFU.read_text() if hasattr(DOC_MFU, "read_text") else open(DOC_MFU).read()
         self.assertIn(vr.markdown(self.rows), doc)
+
+
+class Gb300Hardware(unittest.TestCase):
+    """Step 5: GB300 with the numbers AWS and NVIDIA publish, and the ones they do not left unknown."""
+
+    def test_specs_are_gb200_class_compute_with_the_published_uplift_only_in_memory(self):
+        g3, g2 = mm.HARDWARE["p6e-gb300-ultraserver"], mm.HARDWARE["u-p6e-gb200x72"]
+        # NVIDIA GB300 NVL72: 360 PF BF16 and 720 PF FP8 with sparsity for 72 GPUs = 2500 / 5000 dense per GPU, as GB200;
+        # AWS: the 1.5x uplift is FP4 only. NVLink 130 TB/s / 72 = 1.8 TB/s per GPU.
+        for key in ("bf16", "fp8", "nvlink", "family", "domain_gpus", "billing_gpus"):
+            self.assertEqual(g3[key], g2[key], key)
+        self.assertEqual((g3["bf16"], g3["fp8"], g3["nvlink"], g3["domain_gpus"]), (2500.0, 5000.0, 900.0, 72))
+        self.assertEqual(g3["gpu"], "GB300")
+        self.assertEqual(mm.SMS_PER_GPU["GB300"], 160)
+
+    def test_unknowns_stay_unknown(self):
+        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        self.assertIsNone(g3["net"])  # AWS publishes no EFA bandwidth for P6e-GB300
+        text = " ".join(g3["unknowns"]).lower()
+        for word in ("efa", "price", "instance type names", "memory"):
+            self.assertIn(word, text)
+        names = [k for k in mm.HARDWARE if "gb300" in k]
+        self.assertEqual(sorted(names), ["dgx-gb300", "p6e-gb300-ultraserver"])  # no invented AWS instance names
+        self.assertEqual(mm.HARDWARE["dgx-gb300"]["net"], 100.0)  # NVIDIA's own DGX: 800 Gb/s ConnectX-8 per GPU
+
+    def test_a_group_inside_one_domain_needs_no_network_number(self):
+        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
+        e = mm.estimate(shape, g3, dict(num_gpus=72, tp=2, pp=4, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=144), "bf16")
+        self.assertGreater(e["mfu"], 0.2)
+        moe = mm.model_shape(vr.ARCH["Qwen3-30B-A3B"])
+        e = mm.estimate(moe, g3, dict(num_gpus=64, tp=1, pp=1, cp=1, vp=1, ep=64, etp=1, mbs=1, seq=4096, gbs=512), "bf16")
+        self.assertGreater(e["time_s"]["ep_total"], 0)  # all-to-all over NVLink only
+
+    def test_traffic_between_domains_is_refused_not_guessed(self):
+        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
+        with self.assertRaises(ValueError) as cm:
+            mm.estimate(shape, g3, dict(num_gpus=144, tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=288), "bf16")
+        self.assertIn("not published by AWS", str(cm.exception))
+        self.assertEqual(mm.auto_gpu_counts(g3, 72, 4096), [4, 8, 16, 32, 64, 72])  # the search stops at one UltraServer
+
+    def test_hgx_and_gb200_networks_are_untouched(self):
+        for key, hw in mm.HARDWARE.items():
+            if "gb300" not in key:
+                self.assertIsNotNone(hw["net"], key)
+        self.assertEqual(mm.auto_gpu_counts(mm.HARDWARE["u-p6e-gb200x72"], 72, 600)[-1], 576)
+
+
+class Gb300Validation(unittest.TestCase):
+    """GB300 / GB200 throughput ratio of the same NeMo 26.08.01 recipe, four pairs. Nothing is fitted to them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = vr.evaluate_pairs()
+        cls.summary = vr.pair_summary(cls.rows)
+
+    def test_four_pairs_all_hold_out_and_not_in_the_fit_set(self):
+        self.assertEqual([r["id"] for r in self.rows], ["gb300-vs-gb200-dsv3", "gb300-vs-gb200-gpt-oss-120b",
+                                                        "gb300-vs-gb200-qwen3-30b", "gb300-vs-gb200-qwen3-235b"])
+        for p in vr.GB300_PAIRS:
+            for side in ("gb300", "gb200"):
+                self.assertFalse(p[side]["fit"])
+                self.assertNotIn(p[side]["id"], {r["id"] for r in vr.RUNS})
+                self.assertNotIn(p[side]["id"], vr.fit()["fit_runs"])
+            self.assertEqual((p["gb300"]["hardware"], p["gb200"]["hardware"]), ("dgx-gb300", "dgx-gb200"))
+            self.assertEqual(p["gb300"]["plan"]["gbs"], p["gb200"]["plan"]["gbs"])  # same global batch
+            self.assertTrue(p["gb300"]["layout"].startswith("unverified: "))
+
+    def test_ratio_error_within_30_percent_and_the_typical_error_is_pinned(self):
+        for r in self.rows:
+            self.assertLessEqual(abs(r["ratio_error_pct"]), 30.0, r)
+        # Typical error 15.3% against the 15% bar: reported as it is, not tuned (docs/CALCULATOR-MFU.md section 7b).
+        self.assertEqual((self.summary["pairs"], self.summary["median_abs_error_pct"], self.summary["max_abs_error_pct"]),
+                         (4, 15.3, 21.2))
+
+    def test_known_limit_gb300_compute_is_gb200_compute(self):
+        """The model has one Blackwell efficiency, so it predicts GB300 about equal to GB200 on the same plan. The published
+        GB300 runs are 9-28% faster (more memory, larger micro batches, Blackwell Ultra attention). Pinned so a change shows."""
+        for r in self.rows:
+            self.assertGreater(r["published_ratio"], 1.05, r)
+            self.assertAlmostEqual(r["predicted_ratio"], 1.0, delta=0.02, msg=r["id"])
+            self.assertLess(r["predicted_ratio"], r["published_ratio"], r)
+
+    def test_pinned_summary_is_current(self):
+        v = mm.VALIDATION_SUMMARY
+        self.assertEqual((v["gb300_pairs"], v["gb300_pair_median_abs_error_pct"], v["gb300_pair_max_abs_error_pct"]),
+                         (self.summary["pairs"], self.summary["median_abs_error_pct"], self.summary["max_abs_error_pct"]))
+
+    def test_the_existing_summaries_are_untouched(self):
+        s = vr.summary(vr.evaluate())
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
+        self.assertEqual(vr.rack_summary(vr.evaluate(vr.RACK_RUNS)),
+                         {"runs": 8, "median_abs_error_pct": 10.4, "max_abs_error_pct": 82.3})
+
+    def test_gpt_oss_120b_matches_its_model_card(self):
+        s = mm.model_shape(vr.ARCH["GPT-OSS-120B"])
+        self.assertEqual((s["layers"], s["n_experts"], s["topk"]), (36, 128, 4))
+
+    def test_docs_table_is_current(self):
+        doc = DOC_MFU.read_text() if hasattr(DOC_MFU, "read_text") else open(DOC_MFU).read()
+        self.assertIn(vr.pairs_markdown(self.rows), doc)
 
 
 if __name__ == "__main__":

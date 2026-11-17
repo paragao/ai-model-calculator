@@ -75,6 +75,28 @@ HARDWARE = {
     #   net 100: p6e-gb200.36xlarge 3200 Gigabit EFA / 4 GPUs = 800 Gbps = 100 GB/s per GPU
     #       https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (same column as every other row here)
     #   u-p6e-gb200x72 = 18 instances = 72 GPUs, u-p6e-gb200x36 = 9 instances = 36 GPUs (AWS launch page above)
+    # GB300 (P6e-GB300 UltraServer), per GPU. Dense BF16 and FP8 equal GB200's: NVIDIA lists 360 PF BF16 and 720 PF FP8,
+    # both with sparsity, for 72 GPUs (2500 / 5000 dense per GPU); the 1.5x uplift is FP4 only, as AWS says
+    # ("1.5x ... (FP4, without sparsity)").
+    #   https://www.nvidia.com/en-us/data-center/gb300-nvl72/  https://aws.amazon.com/ec2/instance-types/p6/
+    #   nvlink 900: 130 TB/s / 72 GPUs = 1.8 TB/s per GPU total, same page. Domain 72.
+    #   instance_gpus 4: the NVL72 compute tray holds 4 GPUs (NVIDIA DGX GB300 reference architecture); AWS has not
+    #       published GB300 instance types or sizes.
+    # Left unknown on purpose (never filled in by a guess), listed in "unknowns":
+    #   net: AWS has not published the EFA bandwidth per GPU of P6e-GB300 (it is not in the instance table). None makes
+    #       every estimate that sends traffic between UltraServers (more than 72 GPUs) refuse to run; one NVLink domain is fine.
+    #       NVIDIA's reference design gives 800 Gb/s per GPU, which is not what AWS sells.
+    #   price: not published; instance names: not published.
+    "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": None,
+                              "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72,
+                              "unknowns": ("usable GPU memory (279 GB is used: 1.5 x GB200's 13.4 TB / 72, AWS gives only the 1.5x)",
+                                           "EFA bandwidth per GPU", "on-demand price", "instance type names and sizes")},
+    # DGX GB300 NVL72 (validation only): 4 x ConnectX-8 800 Gb/s per 4-GPU compute tray = 100 GB/s per GPU
+    #   https://www.nvidia.com/en-us/data-center/gb300-nvl72/ (800 Gb/s per GPU),
+    #   NVIDIA DGX SuperPOD GB300 reference architecture (PDF), "The compute tray integrates four ConnectX-8 NICs ...
+    #   QUANTUM-X800 (800Gbps)": https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf
+    "dgx-gb300":        {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
     # DGX GB200 NVL72 (validation only): 18 compute trays x 4 GPUs, each tray 4 x ConnectX-7 NDR 400 Gb/s = 50 GB/s per GPU
     #   https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html
     "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
@@ -152,6 +174,8 @@ def auto_gpu_counts(hw, gpus_per_node, limit):
     """GPU counts the automatic search tries, smallest first. HGX nodes: gpus_per_node, doubling. Rack-scale:
     steps of the instance size inside one domain (4, 8, 16, 32, 64), then whole domains (72, 144, 288, ...) and
     the power-of-two share of each (128, 256, ...)."""
+    if hw.get("net") is None:  # no published network: one NVLink domain is all that can be timed
+        limit = min(limit, domain_gpus(hw))
     if not is_rack_scale(hw):
         out, n = [], gpus_per_node
         while n <= limit:
@@ -207,7 +231,7 @@ GOODPUT = 0.90
 # A100: 108 (NVIDIA A100 whitepaper); B200: 148 (74 per die, chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut);
 # B300: 160 (NVIDIA "Inside NVIDIA Blackwell Ultra" blog: up to 160, varies by SKU).
 # GB200 carries the B200 die (148 SMs, same source); the Blackwell Ultra die of GB300 is the B300 die (160).
-SMS_PER_GPU = {"H100": 132, "H200": 132, "H800": 132, "A100": 108, "B200": 148, "B300": 160, "GB200": 148}
+SMS_PER_GPU = {"H100": 132, "H200": 132, "H800": 132, "A100": 108, "B200": 148, "B300": 160, "GB200": 148, "GB300": 160}
 # Token dispatchers whose all-to-all runs as SM kernels (DeepEP, NVIDIA HybridEP). When the plan
 # overlaps the all-to-all with compute (plan a2a_overlap), those SMs are not available to the GEMMs.
 SM_DISPATCHERS = ("deepep", "hybridep")
@@ -230,6 +254,7 @@ VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6
                       "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
                       "superseded_runs": 2,
                       "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
+                      "gb300_pairs": 4, "gb300_pair_median_abs_error_pct": 15.3, "gb300_pair_max_abs_error_pct": 21.2,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {
@@ -396,7 +421,13 @@ def flops_per_token(shape, seq):
 # === Plan -> step time and MFU ==================================================================
 
 def _bw(hw, kind):
+    if hw[kind] is None:
+        raise ValueError(NET_UNKNOWN.format(gpu=hw["gpu"]))
     return hw[kind] * LINK_EFFICIENCY[kind] * 1e9  # bytes/s
+
+
+NET_UNKNOWN = ("The network bandwidth per GPU of {gpu} is not published by AWS, so traffic between NVLink domains "
+               "(more than 72 GPUs) cannot be timed. Use 72 GPUs or fewer.")
 
 
 def _span_bw(hw, inner, group):
@@ -408,6 +439,8 @@ def _span_bw(hw, inner, group):
     if inner * group <= hw["gpn"]:
         return _bw(hw, "nvlink")
     r = max(1, hw["gpn"] // inner)
+    if hw["net"] is None:
+        raise ValueError(NET_UNKNOWN.format(gpu=hw["gpu"]))
     return min(hw["nvlink"] * LINK_EFFICIENCY["nvlink"], r * hw["net"] * LINK_EFFICIENCY["net"]) * 1e9
 
 
@@ -573,7 +606,8 @@ def estimate(shape, hw, plan, precision="bf16"):
         # Only a dispatcher that de-duplicates per node (DeepEP; plan dedup_by_group) uses it.
         grouped = shape["n_group"] > 1 and plan.get("dedup_by_group")
         remote = min(shape["topk"], shape["topk_group"]) if grouped else shape["topk"]
-        t_ep = max(per_copy * remote * off / _bw(hw, "net"), per_copy * shape["topk"] * (1 - off) / _bw(hw, "nvlink"))
+        t_ep = max(per_copy * remote * off / _bw(hw, "net") if off > 0 else 0.0,
+                   per_copy * shape["topk"] * (1 - off) / _bw(hw, "nvlink"))
     # DP: reduce-scatter grads + all-gather params over the DP group, (g-1)/g of the local
     # shard each. Dense params: group DP x CP. Expert params: group DP x CP / EP, shard / EP.
     expert_p = shape["expert_total_b"] * 1e9

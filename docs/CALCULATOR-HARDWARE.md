@@ -1,6 +1,6 @@
 # Calculator hardware: GB200 and GB300
 
-Both calculators (portal Lambda `infra/lambda-live/calculator`, GitHub `paragao/ai-model-calculator`) read
+Both calculators (portal Lambda `infra/lambda-live/calculator`, GitHub `ai-model-calculator`) read
 the same hardware table, `mfu_model.HARDWARE`. This page lists every number that was added for rack-scale
 systems and where it comes from. A figure that no AWS or NVIDIA page states is marked **unknown** and is
 never replaced by a guess.
@@ -66,3 +66,26 @@ rows are within +19.6%.
 | `dgx-gb200` | 50 GB/s (4 x ConnectX-7 NDR 400 Gb/s per 4-GPU compute tray) | [NVIDIA DGX SuperPOD GB200 reference architecture](https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html) |
 
 The AWS GB200 EFA figure (100 GB/s per GPU) is not checked by these rows: they use NVIDIA's own network.
+
+## 5. GB300 (P6e-GB300 UltraServer)
+
+AWS has published little for P6e-GB300 ([GA announcement](https://aws.amazon.com/about-aws/whats-new/2025/12/amazon-ec2-p6e-gb300-ultraservers-nvidia-gb300-nvl72-generally-available):
+"contact your AWS sales representative"). What is published is used. What is not stays unknown, is listed in the result
+(`hardware.unknowns`) and is never filled in by a guess. The calculator's label is `p6e-gb300-ultraserver`, not an AWS
+instance type: AWS has published no GB300 instance names.
+
+| Field | Value | Source |
+|---|---|---|
+| Dense BF16 | 2,500 TFLOPS (derived: 360 PF with sparsity / 2 / 72). Same as GB200: the 1.5x uplift is FP4 only | [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/), [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/) ("1.5x ... FP4, without sparsity") |
+| Dense FP8 | 5,000 TFLOPS (derived: 720 PF with sparsity / 2 / 72) | [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/) |
+| NVLink domain, bandwidth | 72 GPUs; 130 TB/s = 1.8 TB/s per GPU, 900 GB/s per direction | [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/) |
+| GPU memory | **279 GB per GPU is derived**: AWS says 1.5x the GPU memory of P6e-GB200 (13.4 TB), so 20.1 TB / 72. NVIDIA lists 20 TB per rack and 288 GB raw per GPU in partner datasheets. AWS gives no usable per-GPU figure | [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/), [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/) |
+| SMs per GPU | 160 (the B300 die) | `mfu_model.SMS_PER_GPU` |
+| EFA bandwidth per GPU | **Unknown.** `p6e-gb300` is not in the [AWS instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html). NVIDIA's reference design has 800 Gb/s per GPU (ConnectX-8), which is not what AWS sells. The network entry is `None`: an estimate that needs traffic between UltraServers (more than 72 GPUs) is refused with that reason, one UltraServer is sized as usual, and the automatic GPU-count search stops at 72 and says so | none |
+| Instance types and sizes | **Unknown.** The calculator assumes 4 GPUs as the smallest unit (the NVL72 compute tray holds 4) only for the GPU-count steps | [NVIDIA DGX SuperPOD GB300 reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf) |
+| On-demand price | **Unknown.** No cost line | none |
+
+Validation: four GB300 / GB200 pairs of the NeMo 26.08.01 performance summary (`docs/CALCULATOR-MFU.md` section 7b). Ratio error
+median 15.3%, worst 21.2%. The model predicts GB300 about equal to GB200 (same dense peak, one Blackwell efficiency), while the published
+GB300 runs are 9-28% faster. A GB300 estimate is GB200-class and low by about that much. `dgx-gb300` (validation only) has 100 GB/s per GPU
+(4 x ConnectX-8 800 Gb/s per 4-GPU compute tray).

@@ -287,6 +287,29 @@ Median absolute error 10.4%, worst 82.3% over 8 rows (the bar is 15% typical,
 The same-GPU ratio the step is about: predicted GB200 / B200 against published for the same recipe is within
 15% for Llama 3 70B and Mixtral 8x7B (`test_same_recipe_on_b200_and_gb200_keeps_its_ratio`).
 
+### 7b. GB300 against GB200, same recipe (NeMo 26.08.01)
+
+Added with the GB300 hardware step. 4 pairs of the NeMo 26.08.01 performance summary
+([source](https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html)): the same model, global batch and sequence on DGX-GB300 and DGX-GB200, MXFP8 (counted as
+FP8). The check is the **ratio** GB300 / GB200: published against predicted. Each system runs its own published plan
+(GB300's larger memory allows larger micro batches). All are hold-out; nothing was fitted.
+`dgx-gb300` has 100 GB/s of network per GPU (4 x ConnectX-8 800 Gb/s per compute tray, [NVIDIA DGX SuperPOD GB300
+reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf) and [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/)).
+Left out: DeepSeek-V4 Flash and Nemotron 3.5 Lightning (architectures not verifiable), and the two NVFP4 pairs (no FP4 mode).
+
+| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | Ratio error | GB300 error | GB200 error |
+|---|---|---|---|---|---|---|---|---|
+| gb300-vs-gb200-dsv3 | 256 | 6,288 / 4,505 | 4,912 / 4,468 | 1.280 | 1.008 | -21.2% | -28.4% | -9.0% |
+| gb300-vs-gb200-gpt-oss-120b | 64 | 33,024 / 34,380 | 28,544 / 34,237 | 1.157 | 1.004 | -13.2% | +4.1% | +19.9% |
+| gb300-vs-gb200-qwen3-30b | 8 | 44,544 / 34,004 | 40,960 / 34,004 | 1.087 | 1.000 | -8.0% | -23.7% | -17.0% |
+| gb300-vs-gb200-qwen3-235b | 256 | 8,832 / 6,597 | 7,264 / 6,569 | 1.216 | 1.004 | -17.4% | -25.3% | -9.6% |
+
+Ratio error: median 15.3%, worst 21.2% (the bar is 15% typical, 30% worst: the worst is met, the
+typical error is 0.3 points above it; reported, not tuned). The model gives GB300 the same compute as GB200 (equal
+BF16 and FP8 dense peak, one Blackwell efficiency per precision), so it predicts a ratio of about 1.0. The published GB300
+runs are 9-28% faster: more memory, Blackwell Ultra attention, larger micro batches. **A GB300 estimate is therefore
+GB200-class and low by about that much.** `test_known_limit_gb300_compute_is_gb200_compute` pins this.
+
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
