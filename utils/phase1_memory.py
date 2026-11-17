@@ -203,7 +203,27 @@ def diagnose_oom(variant, hw, dp, layers_per_gpu, experts_per_gpu,
     }
 
 
-def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
+def zero3_prefetch_fraction(variant, experts_per_gpu, tp=None):
+    """Share (0..1) of the next unit's ZeRO-3 all-gather that can be fetched ahead of its compute.
+
+    The transient buffer holds the largest gathered unit plus whatever prefetch fits under
+    stage3_max_live_parameters (calculate_zero3_transient_gb). What is left after the largest unit,
+    divided by that unit, is how much of the next unit can be in flight: 1 = full one-layer
+    prefetch, 0 = every gather waits for the previous unit to finish (fully exposed). The timing
+    model (mfu_model.estimate, plan field zero3_prefetch) uses the same number, so the memory and
+    the time of a ZeRO-3 plan describe the same schedule.
+    """
+    t = calculate_zero3_transient_gb(
+        variant, experts_per_gpu, PARAM_STORAGE_BYTES, VOCAB, LAYER_NORM, FFN_WEIGHT_MATRICES,
+        ZERO3_MAX_LIVE_PARAMS, ZERO3_PREFETCH_BUCKET_PARAMS, tp=TP if tp is None else tp,
+    )
+    largest = t["largest_unit_params"]
+    if not largest:
+        return 1.0
+    return min(1.0, max(0.0, (t["live_params"] - largest) / largest))
+
+
+def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu, zero_strategy=None):
     """
     Analyze memory requirements for a single variant/hardware combination.
 
@@ -213,6 +233,8 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
         dp: Data parallelism degree
         layers_per_gpu: Number of layers per GPU (total_layers // PP)
         experts_per_gpu: Number of experts per GPU (N_EXPERTS // EP)
+        zero_strategy: report this ZeRO stage (1, 2 or 3) instead of the lowest one that fits,
+            when it fits (the plan search picks the fastest stage, not always the lowest)
 
     Returns:
         dict with:
@@ -260,7 +282,11 @@ def analyze_variant_memory(variant, hw, dp, layers_per_gpu, experts_per_gpu):
     )
 
     # Determine best ZeRO strategy and micro batch size
-    if viable_z1:
+    forced = {1: viable_z1, 2: viable_z2, 3: viable_z3}.get(zero_strategy)
+    if forced:
+        best_zero = zero_strategy
+        best_micro = max(forced)
+    elif viable_z1:
         best_zero = 1
         best_micro = max(viable_z1)
     elif viable_z2:

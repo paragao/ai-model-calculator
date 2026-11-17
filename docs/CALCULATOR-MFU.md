@@ -6,7 +6,7 @@ the plan search, MFU, throughput, days and cost (`python3 ai_model_calculator.py
 memory phases (`utils/phase1_memory.py`, `utils/core_calculations.py`) still give the memory per GPU.
 
 This page lists every formula and constant of the model. The same files are used, line for line, by the
-portal calculator Lambda. Model version: `mfu-model-1`.
+portal calculator Lambda. Model version: `mfu-model-2`.
 
 ## 1. What changed from the old calculator
 
@@ -85,7 +85,25 @@ Communication volumes per GPU per step (bytes; BF16 on the wire), time = bytes /
 | EP with node de-duplication (plan `dedup_by_group`, DeepEP) | network copies = min(top-k, `topk_group`) when `n_group` > 1 | |
 | DP (distributed optimizer) | (g-1)/g x local params x (2 + 2), dense g = DP x CP, expert g = GPUs/PP/(ETP x EP), local = params / (TP x PP) (experts / (ETP x PP x EP)) | group bandwidth |
 | ZeRO-2 | grads reduce-scattered every micro-batch: t_DP / 2 x (1 + m) | |
-| FSDP | params gathered fwd and bwd every micro-batch: 1.5 x m x t_DP, overlap 0.8 | |
+| ZeRO-3 = FSDP (plan `zero` 3 or `fsdp`) | per layer per micro-batch: params gathered before forward and again before backward, grads reduce-scattered after backward, 3 Psi per micro-batch ([ZeRO paper](https://arxiv.org/abs/1910.02054) sec. 7.2.2), so 1.5 x m x t_DP per step; exposed time per layer, see below | |
+
+ZeRO-3 / FSDP exposed time is summed per unit u (dense layer, MoE layer, embedding + LM head), each
+micro-batch, because a gather can only hide behind the neighbouring unit's compute in the same pass
+(about 1/3 of the unit's training compute c_u forward, 2/3 backward), and only as far as the prefetch
+buffer allows:
+
+```
+AG_u = (g-1)/g x params_u x 2 / bw(g);  RS_u = the same for grads
+exposed_fwd = max(AG_u x (1 - OVERLAP_fsdp), AG_u - k x c_u / 3)
+exposed_bwd = max((AG_u + RS_u) x (1 - OVERLAP_fsdp), AG_u + RS_u - k x 2 c_u / 3)
+k = (live params - largest unit) / largest unit, clipped to 0..1   (plan field zero3_prefetch)
+```
+
+`live params` is the memory model's ZeRO-3 transient: largest unit + prefetch bucket (5e8), capped at
+`stage3_max_live_parameters` (1e9) ([DeepSpeed config](https://www.deepspeed.ai/docs/config-json/)).
+So memory and time describe the same schedule: a unit larger than the cap (GLM-5.3-Flash at EP 1:
+7.4B params per MoE layer) cannot prefetch, and every gather of it is exposed. The validation runs
+(Megatron FSDP) use k = 1.
 
 Group bandwidth: inside one node NVLink; across nodes min(NVLink, r x NIC per GPU), r = GPUs of the
 group per node (= GPUs per node / stride). Each x LINK_EFFICIENCY. Pipeline send/recv is hidden in
@@ -127,7 +145,7 @@ FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
 | nemo-h100-gpt3-175b | GPT-3-175B | 512 | dgx-h100 | fp8 | tokens_per_gpu | 824 tok/s/GPU | 760 tok/s/GPU | -7.8% | 41.3% | 27.4 / 29.8 | hold-out |
 | nemo-h100-nemotron4-340b | Nemotron-4-340B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 335 tok/s/GPU | 360 tok/s/GPU | +7.4% | 38.3% | 135.0 / 125.6 | hold-out |
 | nemo-b200-llama3-8b | Llama-3-8B | 8 | dgx-b200 | fp8 | tokens_per_gpu | 30,131 tok/s/GPU | 32,369 tok/s/GPU | +7.4% | 41.7% | 48.0 / 44.7 | fit |
-| nemo-b200-llama3-70b | Llama-3-70B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 3,690 tok/s/GPU | 3,468 tok/s/GPU | -6.0% | 37.1% | 49.0 / 52.1 | fit |
+| nemo-b200-llama3-70b | Llama-3-70B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 3,690 tok/s/GPU | 3,463 tok/s/GPU | -6.2% | 37.0% | 49.0 / 52.2 | fit |
 | nemo-b200-llama31-405b | Llama-3.1-405B | 128 | dgx-b200 | fp8 | tokens_per_gpu | 674 tok/s/GPU | 657 tok/s/GPU | -2.5% | 38.3% | 134.2 / 137.7 | hold-out |
 | nemo-b200-mixtral-8x7b | Mixtral-8x7B | 64 | dgx-b200 | fp8 | tokens_per_gpu | 16,384 tok/s/GPU | 17,302 tok/s/GPU | +5.6% | 31.9% | 11.0 / 10.5 | hold-out |
 | nemo-b200-mixtral-8x22b | Mixtral-8x22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 2,548 tok/s/GPU | 2,670 tok/s/GPU | +4.8% | 29.9% | 17.7 / 16.9 | hold-out |
@@ -143,7 +161,7 @@ FP8, 8 to 16,384 GPUs. `python3 validation_runs.py` prints this table.
 | repo-llama70b-bf16-p5en | Llama-3-70B | 64 | p5en.48xlarge | bf16 | tokens_per_gpu | 1,200 tok/s/GPU | 1,133 tok/s/GPU | -5.6% | 55.2% | 150.7 / 159.6 | fit |
 | repo-llama70b-fp8-p5en | Llama-3-70B | 64 | p5en.48xlarge | fp8 | tokens_per_gpu | 1,831 tok/s/GPU | 1,679 tok/s/GPU | -8.3% | 40.8% | 98.8 / 107.7 | hold-out |
 | repo-llama70b-bf16-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | bf16 | tokens_per_gpu | 1,860 tok/s/GPU | 1,960 tok/s/GPU | +5.3% | 41.9% | 97.2 / 92.3 | fit |
-| repo-llama70b-fp8-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | fp8 | tokens_per_gpu | 3,474 tok/s/GPU | 3,468 tok/s/GPU | -0.2% | 37.1% | 52.1 / 52.1 | hold-out |
+| repo-llama70b-fp8-b200 | Llama-3-70B | 64 | p6-b200.48xlarge | fp8 | tokens_per_gpu | 3,474 tok/s/GPU | 3,463 tok/s/GPU | -0.3% | 37.0% | 52.1 / 52.2 | hold-out |
 | repo-qwen3-8b-bf16-p5en | Qwen3-8B | 16 | p5en.48xlarge | bf16 | tokens_per_gpu | 10,125 tok/s/GPU | 10,728 tok/s/GPU | +6.0% | 57.1% | 71.4 / 67.4 | fit |
 | repo-qwen3-8b-bf16-b300 | Qwen3-8B | 16 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 19,875 tok/s/GPU | 18,877 tok/s/GPU | -5.0% | 44.2% | 36.4 / 38.3 | fit |
 | repo-qwen3-30b-a3b-bf16-p5en | Qwen3-30B-A3B | 64 | p5en.48xlarge | bf16 | mfu | 33.7% | 32.8% | -2.8% | 32.8% | – | fit |
@@ -185,8 +203,12 @@ from the Qwen team, OPT-175B (FSDP plan and network not published in enough deta
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
 (<= 16), CP 1 (CP up to 8 only for S >= 32K), EP in powers of 2 that divide the experts and GPUs / PP.
 Fixed TP/PP/EP from the request restrict the list. All candidates are ranked by estimated tokens/s;
-the first ones that fit in memory (phase-1 memory with that TP/PP/EP, up to 6 fits / 60 checks) are
-scored with each viable micro batch; the fastest wins. An impossible fixed plan is an error. `max_fitting_plans` (default 6) sets how many fitting plans are scored.
+every one that fits in memory (phase-1 memory with that TP/PP/EP) is
+scored with every ZeRO stage that fits (1, 2 and 3) and each of its viable micro batches; the fastest
+wins, and the memory reported is that of the chosen stage. Before mfu-model-2 only the lowest stage
+that fits was scored, and ZeRO-3 was timed with the ZeRO-2 formula, so ZeRO-3 plans (TP 1 PP 1) won
+for large MoE models; and only the first 6 fitting plans were scored, which with ZeRO-3 timed
+honestly are often the slow ones (scoring all of them takes < 0.1 s for 4,096 GPUs). An impossible fixed plan is an error. `max_fitting_plans` (default: all) caps how many fitting plans are scored.
 
 ## 9. Limits
 

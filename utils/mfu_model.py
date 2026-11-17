@@ -27,13 +27,15 @@ Step-time model (per GPU, one optimizer step)
   t_step    = t_pipe + exposed(TP) + exposed(CP) + exposed(EP) + exposed(DP)
       exposed(x) = max(t_x x (1 - OVERLAP_x), t_x - t_compute)
       t_x = bytes_x / (link_bandwidth x LINK_EFFICIENCY)
+      ZeRO-3 / FSDP: exposed(DP) is summed per layer instead (_sharded_dp_time), because a
+      layer's gather can only hide behind its neighbour's compute, not the whole step's.
 Communication volumes are listed in each function below.
 """
 from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-1"
+MODEL_VERSION = "mfu-model-2"
 
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
@@ -285,12 +287,61 @@ def default_global_batch(seq, dp, mbs, tokens_per_step=DEFAULT_TOKENS_PER_STEP):
     return per_rank * dp * mbs
 
 
+def _sharded_dp_time(shape, hw, seq, t_compute, m, tp, pp, etp, ep, g_dense, g_expert, prefetch):
+    """ZeRO-3 / FSDP data-parallel time per step: (total, exposed).
+
+    Units: a dense layer, an MoE layer, and the embedding + LM head. For each unit u, each micro-batch:
+        AG_u = (g-1)/g x params_u x PARAM_BYTES / bw(g),  RS_u = the same with GRAD_BYTES
+        (dense params over the DP x CP group, expert params over the expert-DP group).
+    A gather can only hide behind the compute of the neighbouring unit in the same pass, about 1/3
+    (forward) and 2/3 (backward) of the unit's training compute c_u, and only as far as the prefetch
+    buffer allows (prefetch 0..1, from the memory model's ZeRO-3 live-parameter cap):
+        exposed_fwd = max(AG x (1 - OVERLAP_fsdp), AG - prefetch x c_u / 3)
+        exposed_bwd = max((AG + RS) x (1 - OVERLAP_fsdp), AG + RS - prefetch x 2 c_u / 3)
+    """
+    a = shape["attention"]
+    layers, d, sc = shape["layers"], shape["d"], shape["scale"]
+    # Attention-score FLOPs per token, spread evenly over the layers (PaLM convention, as flops_per_token).
+    attn_layer = (6.0 * a["heads"] * seq * (a["d_qk"] + a["d_v"]) * a["full_layers"]
+                  + 12.0 * a["lin_heads"] * a["lin_dim"] ** 2 * a["linear_layers"]) / layers
+    units = []  # (units on one stage, dense-group params per rank, expert-group params per rank, FLOPs/token)
+    if shape["dense_layers"]:
+        p = shape["dense_layer_params"] * sc
+        units.append((shape["dense_layers"] / pp, p / tp, 0.0, 6.0 * p + attn_layer))
+    if shape["moe_layers"]:
+        nonexp = (shape["attn_per_layer"] + shape["shared_each"] + shape["router_each"]) * sc
+        active = nonexp + shape["topk"] * shape["expert_each"] * sc
+        units.append((shape["moe_layers"] / pp, nonexp / tp,
+                      shape["n_experts"] * shape["expert_each"] * sc / (etp * max(ep, 1)), 6.0 * active + attn_layer))
+    head = shape["vocab"] * d * sc
+    units.append((1.0 / pp, head * (1 if shape["tied_embeddings"] else 2) / tp, 0.0, 6.0 * head))
+    fl_total = sum(c * f for c, _, _, f in units) or 1.0
+
+    def gather(params, g):
+        return (g - 1) / g * params / _span_bw(hw, tp, g) if g > 1 and params else 0.0
+
+    total = exposed_sum = 0.0
+    ov = OVERLAP["fsdp"]
+    for count, p_dense, p_expert, f in units:
+        base = gather(p_dense, g_dense) + gather(p_expert, g_expert)
+        ag, rs = base * PARAM_BYTES, base * GRAD_BYTES
+        c_u = t_compute / m * f / fl_total  # this unit's compute per micro-batch
+        e_fwd = max(ag * (1 - ov), ag - prefetch * c_u / 3)
+        e_bwd = max((ag + rs) * (1 - ov), ag + rs - prefetch * 2 * c_u / 3)
+        total += count * m * (2 * ag + rs)
+        exposed_sum += count * m * (e_fwd + e_bwd)
+    return total, exposed_sum
+
+
 def estimate(shape, hw, plan, precision="bf16"):
     """Expected step time, throughput and MFU of one plan, with every part.
 
     plan: num_gpus, tp, pp, cp, vp, ep, mbs, seq, gbs (sequences; None = default),
-          zero (1 = distributed optimizer, 2 = grads reduce-scattered per micro-batch),
-          fsdp (bool: params gathered per micro-batch).
+          zero (1 = distributed optimizer, 2 = grads reduce-scattered per micro-batch,
+                3 = params sharded too: gathered for forward and backward every micro-batch),
+          fsdp (bool: same as zero 3),
+          zero3_prefetch (0..1, default 1: share of the next unit's gather that can run ahead,
+                from the memory model's ZeRO-3 live-parameter cap).
     """
     n = int(plan["num_gpus"])
     tp, pp, cp = int(plan.get("tp", 1)), int(plan.get("pp", 1)), int(plan.get("cp", 1))
@@ -372,16 +423,19 @@ def estimate(shape, hw, plan, precision="bf16"):
         return (g - 1) / g * local * per_byte / _span_bw(hw, tp, g)
 
     t_dp = dp_time(local_dense, g_dense) + dp_time(local_expert, g_expert)
-    overlap_dp = OVERLAP["dp"]
-    if plan.get("fsdp"):
-        # FSDP: params gathered for fwd and bwd and grads reduce-scattered every micro-batch.
-        t_dp *= 1.5 * m
-        overlap_dp = OVERLAP["fsdp"]
-    elif int(plan.get("zero", 1)) >= 2:
-        t_dp = t_dp / 2 * (1 + m)  # grads reduce-scattered every micro-batch, params once
+    zero = 3 if plan.get("fsdp") else int(plan.get("zero", 1))
+    if zero >= 3:
+        # ZeRO-3 = FSDP full shard: per layer per micro-batch, params all-gathered before forward and
+        # again before backward, grads reduce-scattered after backward (3 Psi per micro-batch against
+        # 2 Psi per step for ZeRO-1/2; ZeRO paper sec. 7.2.2). Overlap is capped per layer.
+        k = min(1.0, max(0.0, float(plan.get("zero3_prefetch", 1.0))))
+        t_dp, e_dp = _sharded_dp_time(shape, hw, seq, t_compute, m, tp, pp, etp, ep, g_dense, g_expert, k)
+    else:
+        if zero == 2:
+            t_dp = t_dp / 2 * (1 + m)  # grads reduce-scattered every micro-batch, params once
+        e_dp = exposed(t_dp, OVERLAP["dp"])
     ov_ep = float(plan.get("overlap_ep", OVERLAP["ep"]))  # a schedule such as DualPipe hides more
     e_tp, e_cp, e_ep = exposed(t_tp, OVERLAP["tp"]), exposed(t_cp, OVERLAP["cp"]), exposed(t_ep, ov_ep)
-    e_dp = exposed(t_dp, overlap_dp)
     t_step = t_pipe + e_tp + e_cp + e_ep + e_dp
     mfu = f_gpu / (peak * t_step)
     return {
@@ -390,7 +444,8 @@ def estimate(shape, hw, plan, precision="bf16"):
         "peak_tflops_per_gpu": hw[prec],
         "plan": {"num_gpus": n, "tp": tp, "pp": pp, "cp": cp, "vp": vp, "ep": ep, "etp": etp, "dp": dp, "mbs": mbs,
                  "gbs": gbs, "gbs_source": "request" if gbs_given else "default_16M_tokens",
-                 "micro_batches": round(m, 2), "tokens_per_step": tokens_step},
+                 "micro_batches": round(m, 2), "tokens_per_step": tokens_step, "zero": zero,
+                 **({"zero3_prefetch": k} if zero >= 3 else {})},
         "flops_per_token": fl["total"],
         "attention_flops_share": round(fl["attention"] / fl["total"], 4) if fl["total"] else 0,
         "expert_flops_share": round(f_e, 4),
