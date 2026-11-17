@@ -111,6 +111,10 @@ def shape_from_preset(v, vocab):
                       "full_layers": layers, "linear_layers": 0, "lin_heads": heads, "lin_dim": head_dim},
         "matmul_active": active - embed, "expert_active_matmul": expert_active,
         "total_b": v["total_params_B"], "expert_total_b": expert_total / 1e9,
+        # Per-layer sizes for the ZeRO-3 / FSDP per-layer comm (mfu_model._sharded_dp_time).
+        "dense_layers": dense_layers, "dense_layer_params": attn + dense_mlp, "attn_per_layer": attn,
+        "expert_each": expert_each, "shared_each": v.get("shared_each", 0), "router_each": v.get("router_each", 0),
+        "vocab": embed // d if d else 0, "tied_embeddings": False, "scale": 1.0,
     }
 
 
@@ -121,7 +125,7 @@ def estimate_training(config, variant):
     total_tokens_b, tensor_parallel / pipeline_parallel / expert_parallel (fix a degree; 1 =
     search), virtual_pipeline_parallel, global_batch_size (sequences), micro_batch_size
     (reported only), gpus_per_node, mfu (explicit override; otherwise estimated),
-    max_fitting_plans (how many memory-fitting plans to score; default 6).
+    max_fitting_plans (how many memory-fitting plans to score; default: all of them, < 0.1 s at 4,096 GPUs).
     Returns the result dict, or {"error": ...}.
     """
     import configuration.project_config as pc
@@ -192,21 +196,27 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     mm_hw = mm.HARDWARE.get(hardware_type) or mm.HARDWARE["p5.48xlarge"]
     given_mfu = config.get("mfu")  # explicit override only; otherwise MFU is estimated
 
-    def memory_for(try_tp, try_pp, try_ep):
+    def memory_for(try_tp, try_pp, try_ep, zero=None):
         """Phase 1 memory with THIS TP/PP/EP (the modules read them at import, so reload).
-        dp is Megatron's N / (TP x PP); EP divides it."""
+        dp is Megatron's N / (TP x PP); EP divides it.
+        Adds zero3_prefetch: the share of the next ZeRO-3 gather the live-parameter cap lets run ahead."""
         pc.TP, pc.PP, pc.EP = try_tp, try_pp, try_ep
         pc.EXPERTS_PER_GPU = n_experts // try_ep if n_experts else 0
         importlib.reload(core)
         importlib.reload(phase1_mod)
-        return phase1_mod.analyze_variant_memory(
+        r = phase1_mod.analyze_variant_memory(
             variant, hw, num_gpus // (try_tp * try_pp), math.ceil(variant["layers"] / try_pp),
-            pc.EXPERTS_PER_GPU)
+            pc.EXPERTS_PER_GPU, zero_strategy=zero)
+        r["zero3_prefetch"] = phase1_mod.zero3_prefetch_fraction(variant, pc.EXPERTS_PER_GPU, try_tp)
+        return r
 
-    def plan_estimate(c, p1, mbs):
+    def plan_estimate(c, p1, mbs, zero=None):
+        """zero: the ZeRO stage to time (default: the lowest stage that fits, or 1 before the memory check)."""
+        zero = zero or (max(1, p1["best_zero"]) if p1 else 1)
         plan = {"num_gpus": num_gpus, "tp": c["tp"], "pp": c["pp"], "cp": 1, "vp": vp, "ep": c["ep"],
-                "mbs": mbs, "seq": sequence_length, "gbs": config.get("global_batch_size"),
-                "zero": max(1, p1["best_zero"]) if p1 else 1}
+                "mbs": mbs, "seq": sequence_length, "gbs": config.get("global_batch_size"), "zero": zero}
+        if zero >= 3 and p1:
+            plan["zero3_prefetch"] = p1["zero3_prefetch"]
         return mm.estimate(shape, mm_hw, plan, precision)
 
     # Plan search: candidates of mfu_model.candidate_plans, restricted to what the request fixed,
@@ -221,26 +231,33 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
                          f"{num_gpus} GPUs: TP x PP must divide the GPU count, TP <= GPUs per node, EP must "
                          "divide the experts and the GPUs per pipeline stage."}
     ranked = sorted(cands, key=lambda c: -plan_estimate(c, None, 1)["tokens_per_second"])
-    max_fitting = int(config.get("max_fitting_plans") or 6)  # plans that fit memory to score (speed cap)
+    # Plans that fit memory to score. Until mfu-model-2 the default was 6 of a ZeRO-1, MBS-1 pre-ranking;
+    # with ZeRO-3 timed honestly those are often the slow ones, so the default now scores all of them.
+    max_fitting = int(config.get("max_fitting_plans") or 0) or len(cands)
     best, tried_plans, fitting = None, 0, 0
     for c in ranked:
-        if fitting >= max_fitting or tried_plans >= 60:
+        if fitting >= max_fitting:
             break
         tried_plans += 1
         p1 = memory_for(c["tp"], c["pp"], c["ep"])
         if p1["best_zero"] == -1:
             continue
         fitting += 1
-        micros = p1.get(f"viable_micros_z{p1['best_zero']}") or [p1["best_micro"] or 1]
-        for mbs in sorted(set(int(x) for x in micros if x))[:6]:
-            est = plan_estimate(c, p1, mbs)
-            if best is None or est["tokens_per_second"] > best[2]["tokens_per_second"]:
-                best = (c, p1, est, mbs)
+        # Every ZeRO stage that fits is timed, not only the lowest: a higher stage costs more
+        # communication (ZeRO-3: params gathered every micro-batch) but may fit a larger micro batch.
+        for zero in (1, 2, 3):
+            micros = p1.get(f"viable_micros_z{zero}") or []
+            for mbs in sorted(set(int(x) for x in micros if x))[:6]:
+                est = plan_estimate(c, p1, mbs, zero)
+                if best is None or est["tokens_per_second"] > best[2]["tokens_per_second"]:
+                    best = (c, p1, est, mbs, zero)
     if best is None:  # nothing fits: report the top-ranked plan as OOM
         c = ranked[0]
         p1 = memory_for(c["tp"], c["pp"], c["ep"])
-        best = (c, p1, plan_estimate(c, p1, 1), 1)
-    choice, p1, est, chosen_mbs = best
+        best = (c, p1, plan_estimate(c, p1, 1), 1, None)
+    choice, p1, est, chosen_mbs, chosen_zero = best
+    if chosen_zero and chosen_zero != p1["best_zero"]:  # memory of the stage that was chosen
+        p1 = memory_for(choice["tp"], choice["pp"], choice["ep"], zero=chosen_zero)
     tp, pp, ep = choice["tp"], choice["pp"], choice["ep"]
     dp = num_gpus // (tp * pp)
     layers_per_gpu = math.ceil(variant["layers"] / pp)
@@ -304,6 +321,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "micro_batch_size": chosen_mbs,
             "viable_micros_z1": p1["viable_micros_z1"],
             "viable_micros_z2": p1["viable_micros_z2"],
+            "viable_micros_z3": p1.get("viable_micros_z3"),
             "total_gpus": num_gpus,
             "num_nodes": num_nodes,
             "layers_per_gpu": layers_per_gpu,

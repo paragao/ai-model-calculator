@@ -25,7 +25,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 # Runs allowed above the 30% bound, each with its reason (see docs/CALCULATOR-MFU.md).
 EXPLAINED_OUTLIERS = {
-    "deepseek-v3-paper": 35.0,  # GPU-hours include batch warm-up and DeepSeek's own kernels; DualPipe approximated
+    # Megatron alltoall dispatcher (no DeepEP/HybridEP) at v0.4.2; the dispatcher kind is recorded, not modelled
+    "mb2604-b200-qwen3-235b": 60.0,
+    # DeepEP with moe_a2a_overlap hides more all-to-all than the default EP overlap (0.3)
+    "mb2604-b200-dsv3": 35.0,
 }
 
 
@@ -110,6 +113,8 @@ class Validation(unittest.TestCase):
 
     def test_no_run_off_by_more_than_30_percent_unless_explained(self):
         for r in self.rows:
+            if r["superseded"]:
+                continue  # printed, not scored
             bound = EXPLAINED_OUTLIERS.get(r["id"], 30.0)
             self.assertLessEqual(abs(r["error_pct"]), bound, r)
 
@@ -120,6 +125,7 @@ class Validation(unittest.TestCase):
             self.assertEqual(mm.BASE_EFFICIENCY[(fam, prec)], value, key)
         self.assertEqual(mm.MOE_EXPERT_FACTOR, fit["moe_expert_factor"])
         self.assertEqual(mm.MOE_EXPERT_HALF_FFN, fit["moe_expert_half_ffn"])
+        self.assertEqual(mm.OVERLAP["ep"], fit["overlap_ep"])
 
     def test_pinned_summary_is_current(self):
         s = self.summary
@@ -128,6 +134,55 @@ class Validation(unittest.TestCase):
         self.assertEqual(mm.VALIDATION_SUMMARY["median_abs_error_pct"], s["all"]["median_abs_error_pct"])
         self.assertEqual(mm.VALIDATION_SUMMARY["max_abs_error_pct"], s["all"]["max_abs_error_pct"])
         self.assertEqual(mm.VALIDATION_SUMMARY["hold_out_median_abs_error_pct"], s["hold_out"]["median_abs_error_pct"])
+        for group in ("original", "new_moe"):
+            self.assertEqual(mm.VALIDATION_SUMMARY[f"{group}_runs"], s[group]["runs"], group)
+            self.assertEqual(mm.VALIDATION_SUMMARY[f"{group}_median_abs_error_pct"], s[group]["median_abs_error_pct"], group)
+            self.assertEqual(mm.VALIDATION_SUMMARY[f"{group}_max_abs_error_pct"], s[group]["max_abs_error_pct"], group)
+        self.assertEqual(mm.VALIDATION_SUMMARY["superseded_runs"], s["superseded"]["runs"])
+
+    def test_original_set_within_15_percent_typical_and_30_worst(self):
+        self.assertLessEqual(self.summary["original"]["median_abs_error_pct"], 15)
+        self.assertLessEqual(self.summary["original"]["max_abs_error_pct"], 30)
+
+    def test_new_moe_rows_are_scored_as_their_own_group(self):
+        self.assertEqual(self.summary["new_moe"]["runs"], 11)
+        self.assertGreater(self.summary["new_moe_hold_out"]["runs"], 0)
+        models = {r["model"] for r in vr.RUNS if r["id"] in vr.NEW_MOE_RUNS}
+        self.assertTrue({"DeepSeek-V3", "Qwen3-30B-A3B", "Qwen3-235B-A22B", "Kimi-K2"} <= models, models)
+
+    def test_superseded_rows_are_not_fitted_or_scored(self):
+        sup = [r for r in vr.RUNS if r.get("superseded")]
+        self.assertEqual({r["id"] for r in sup}, {"nemo-h100-deepseek-v3", "nemo-b200-deepseek-v3"})
+        self.assertFalse(any(r["fit"] for r in sup))
+        self.assertNotIn("nemo-h100-deepseek-v3", vr.fit()["fit_runs"])
+        scored = sum(1 for r in self.rows if not r["superseded"])
+        self.assertEqual(self.summary["all"]["runs"], scored)
+        self.assertEqual(scored, len(vr.RUNS) - len(sup))
+
+    def test_every_moe_row_states_its_layout(self):
+        for r in vr.RUNS:
+            if not mm.model_shape(vr.ARCH[r["model"]])["n_experts"]:
+                continue
+            self.assertTrue(r["layout"].startswith(("pinned: ", "unverified: ")), r["id"])
+            if r["layout"].startswith("pinned: ") and r["source"] != vr.DSV3:
+                self.assertIn("etp", r["plan"], r["id"])  # expert TP comes from the recipe, not the default
+
+    def test_nemo_deepseek_rows_use_the_recipe_expert_tp(self):
+        # NeMo r2.4.0 recommended configs: etp_size 1 for DeepSeek-V3 on H100 and B200. With the default
+        # (expert TP = TP = 2) the B200 run spread EP 8 over two nodes and hid +135% behind network time.
+        by_id = {r["id"]: r for r in vr.RUNS}
+        for rid in ("nemo-h100-deepseek-v3", "nemo-b200-deepseek-v3"):
+            self.assertEqual(by_id[rid]["plan"].get("etp"), 1, rid)
+
+    def test_deepseek_v3_paper_within_10_percent(self):
+        # 20 of 132 SMs run DualPipe's all-to-all (paper Sec. 3.2.2) and RMSNorm / MLA up-projection are
+        # recomputed (Sec. 3.2.3): with both counted the run is within 10% (+31% in mfu-model-1).
+        row = next(r for r in self.rows if r["id"] == "deepseek-v3-paper")
+        self.assertLessEqual(abs(row["error_pct"]), 10.0, row)
+
+    def test_dgx_b300_hardware(self):
+        hw = mm.HARDWARE["dgx-b300"]
+        self.assertEqual((hw["fp8"], hw["nvlink"], hw["net"]), (4500.0, 900.0, 100.0))
 
     def test_docs_table_is_current(self):
         doc = (Path(__file__).parent.parent / "docs" / "CALCULATOR-MFU.md").read_text()
@@ -234,18 +289,124 @@ class ReferenceModels(unittest.TestCase):
         r = self.run_it("param2", num_gpus=64)
         p, t = r["parallelism"], r["training_time"]
         self.assertEqual((p["tensor_parallel"], p["pipeline_parallel"], p["expert_parallel"]), (1, 1, 1))
-        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.4425, 1605888, 8.0))
+        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3866, 1402960, 9.2))
 
     def test_glm_fixed_plan(self):
         r = self.run_it("glm", num_gpus=64, tensor_parallel=2, pipeline_parallel=16)
         t = r["training_time"]
-        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.4456, 240580, 53.5))
-        self.assertEqual(r["cost_estimate"]["total_cost_usd"], 1436855.0)
+        self.assertEqual((t["mfu"], t["tokens_per_second"], t["training_days"]), (0.3949, 213197, 60.3))
+        self.assertEqual(r["cost_estimate"]["total_cost_usd"], 1621399.0)
 
     def test_glm_expert_parallel_plan(self):
         t = self.run_it("glm", num_gpus=256, tensor_parallel=2, pipeline_parallel=8,
                         expert_parallel=8)["training_time"]
-        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3027, 653618))
+        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3036, 655762))
+
+
+class RecomputeAndCommSMs(unittest.TestCase):
+    """Activation recompute adds hardware FLOPs (not model FLOPs); an overlapped SM-based all-to-all
+    (DeepEP / HybridEP) takes its SMs from compute."""
+
+    DSV3 = vr.ARCH["DeepSeek-V3"]
+    PLAN = {"num_gpus": 256, "gbs": 4096, "mbs": 1, "seq": 4096, "pp": 8, "vp": 2, "ep": 32, "etp": 1}
+
+    def est(self, **extra):
+        return mm.estimate(mm.model_shape(self.DSV3), mm.HARDWARE["dgx-b200"], {**self.PLAN, **extra}, "fp8")
+
+    def test_mla_up_projection_size(self):
+        # q_lora x H x (nope + rope) + kv_lora x H x (nope + v) = 1536 x 128 x 192 + 512 x 128 x 256
+        self.assertEqual(mm.model_shape(self.DSV3)["attention"]["mla_up_per_layer"], 1536 * 128 * 192 + 512 * 128 * 256)
+
+    def test_recompute_adds_its_forward_flops_to_hardware_time_only(self):
+        base, rec = self.est(), self.est(recompute=["mla_up_proj", "layernorm"])
+        extra = 2.0 * (1536 * 128 * 192 + 512 * 128 * 256) * 61 / base["flops_per_token"]
+        self.assertAlmostEqual(rec["time_s"]["compute"] / base["time_s"]["compute"], 1 + extra, places=9)
+        self.assertEqual(rec["flops_per_token"], base["flops_per_token"])  # MFU keeps model FLOPs
+        self.assertLess(rec["mfu"], base["mfu"])
+        with self.assertRaises(ValueError):
+            self.est(recompute=["not_a_module"])
+
+    def test_overlapped_deepep_takes_20_sms_from_compute(self):
+        base = self.est()["time_s"]["compute"]
+        on = self.est(dispatcher="deepep", a2a_overlap=True)["time_s"]["compute"]
+        self.assertAlmostEqual(on / base, 148 / (148 - 20), places=9)  # B200: 148 SMs
+        self.assertEqual(self.est(dispatcher="deepep", a2a_overlap=False)["time_s"]["compute"], base)
+        self.assertEqual(self.est(dispatcher="alltoall", a2a_overlap=True)["time_s"]["compute"], base)
+
+
+class ZeroThree(unittest.TestCase):
+    """ZeRO-3 / FSDP: params gathered for forward and backward every micro-batch (ZeRO paper sec. 7.2.2),
+    overlap capped per layer, prefetch from the memory model's live-parameter cap. Same tests as the
+    portal's test_mfu_model.ZeroThree."""
+
+    LLAMA70B = vr.ARCH["Llama-3-70B"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.glm = ReferenceModels.variant(None, "glm")
+
+    def est(self, shape, hw, **plan):
+        return mm.estimate(shape, mm.HARDWARE[hw], {"seq": 8192, **plan}, "bf16")
+
+    def test_zero3_moves_one_and_a_half_times_the_bytes_every_micro_batch(self):
+        s = mm.model_shape(self.LLAMA70B)
+        plan = dict(num_gpus=64, mbs=1, gbs=128)  # 2 micro-batches per DP rank
+        z2 = self.est(s, "p5en.48xlarge", zero=2, **plan)["time_s"]["dp_total"]
+        z3 = self.est(s, "p5en.48xlarge", zero=3, **plan)["time_s"]["dp_total"]
+        m = 2
+        # ZeRO-2: grads every micro-batch + params once = t/2 (1 + m); ZeRO-3: 1.5 m t.
+        self.assertAlmostEqual(z3 / z2, 1.5 * m / ((1 + m) / 2), delta=0.02)
+
+    def test_zero3_and_fsdp_are_the_same_schedule(self):
+        s = mm.model_shape(self.LLAMA70B)
+        plan = dict(num_gpus=64, mbs=1, gbs=128)
+        a = self.est(s, "p5en.48xlarge", zero=3, **plan)
+        b = self.est(s, "p5en.48xlarge", fsdp=True, **plan)
+        self.assertEqual(a["time_s"], b["time_s"])
+
+    def test_overlap_is_capped_by_each_layers_compute(self):
+        # One MoE layer in four, 64 experts at EP 1: an MoE layer gathers all 64 experts but computes
+        # with 2, so its gather cannot hide behind the spare compute of the dense layers.
+        cfg = {"num_hidden_layers": 32, "hidden_size": 4096, "intermediate_size": 14336, "num_attention_heads": 32,
+               "num_key_value_heads": 8, "vocab_size": 128256, "num_experts": 64, "num_experts_per_tok": 2,
+               "moe_intermediate_size": 14336, "decoder_sparse_step": 4, "tie_word_embeddings": False}
+        t = self.est(mm.model_shape(cfg), "p5en.48xlarge", num_gpus=64, mbs=2, gbs=512, seq=4096, zero=3)["time_s"]
+        step_level = max(t["dp_total"] * (1 - mm.OVERLAP["fsdp"]), t["dp_total"] - t["compute"])
+        self.assertGreater(t["dp_exposed"], 1.3 * step_level)
+
+    def test_no_prefetch_exposes_every_gather(self):
+        t = self.est(mm.model_shape(self.LLAMA70B), "p5en.48xlarge", num_gpus=64, mbs=1, gbs=128, zero=3,
+                     zero3_prefetch=0)["time_s"]
+        self.assertAlmostEqual(t["dp_exposed"], t["dp_total"], delta=1e-9 * t["dp_total"])
+
+    def test_prefetch_comes_from_the_memory_live_parameter_cap(self):
+        import utils.phase1_memory as p1m
+        # One MoE layer at EP 1 (~7.4B params) is larger than stage3_max_live_parameters (1e9): no prefetch.
+        self.assertEqual(p1m.zero3_prefetch_fraction(self.glm, self.glm["num_experts"], 1), 0.0)
+        # At EP 64 the largest unit is the 154,880 x 4,096 embedding (634M); the 1e9 live cap leaves
+        # room for 58% of the next unit's gather.
+        emb = 154880 * 4096
+        self.assertAlmostEqual(p1m.zero3_prefetch_fraction(self.glm, self.glm["num_experts"] // 64, 1),
+                               (1e9 - emb) / emb, places=6)
+
+    def b300(self, n):
+        with redirect_stdout(io.StringIO()):
+            return p9.run_estimate({"hardware": "p6-b300.48xlarge", "num_gpus": n, "total_tokens_b": 20000,
+                                    "sequence_length": 4096}, self.glm)
+
+    def test_plan_search_does_not_pick_zero3_for_glm_on_b300(self):
+        for n in (128, 512, 2048):
+            self.assertNotEqual(self.b300(n)["parallelism"]["zero_stage"], 3, msg=n)
+
+    def test_search_reports_the_memory_of_the_stage_it_chose(self):
+        p = self.b300(128)["parallelism"]
+        self.assertIn(p["micro_batch_size"], p[f"viable_micros_z{p['zero_stage']}"])
+
+    def test_zero3_is_available_from_the_memory_modules(self):
+        # The memory modules still offer ZeRO-3 for this request; timed as ZeRO-3 it no longer wins.
+        p = ReferenceModels.run_it(ReferenceModels(), "glm", num_gpus=256)["parallelism"]
+        self.assertTrue(p["viable_micros_z3"])
+        self.assertNotEqual(p["zero_stage"], 3)
 
 
 class ExpertOptimizerSharding(unittest.TestCase):
