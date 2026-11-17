@@ -96,6 +96,76 @@ def billing_gpus(hw):
     """GPUs bought as one unit: the node, or the whole UltraServer."""
     return int(hw.get("billing_gpus") or hw["gpn"])
 
+
+# --- Rack-aware GPU counts (hardware whose NVLink domain is larger than 8 GPUs) -----------------
+# 72 is not a power of two. A job that wants EP 64 (or any power-of-two layout) on an UltraServer uses 64 of
+# its 72 GPUs, as NeMo's GB200 recipes do (64, 128 or 256 GPUs; NeMo 25.07 performance summary), and is still
+# billed for the whole UltraServer. HGX nodes (domain 8) are never touched by these helpers.
+
+def is_rack_scale(hw):
+    return domain_gpus(hw) > 8
+
+
+def _largest_pow2_below(n, multiple_of):
+    p = 1
+    while p * 2 < n:
+        p *= 2
+    while p >= multiple_of and p % multiple_of:
+        p //= 2
+    return p if p >= multiple_of else 0
+
+
+def rack_share(hw):
+    """GPUs of each domain a power-of-two layout uses: 64 of 72 (0 for HGX nodes)."""
+    return _largest_pow2_below(domain_gpus(hw) + 1, instance_gpus(hw)) if is_rack_scale(hw) else 0
+
+
+def rack_hw(hw, n):
+    """`hw` as seen by a job of n GPUs. On rack-scale hardware, n GPUs that do not fill whole domains (128 on
+    72-GPU UltraServers) run as the largest power-of-two share of each domain that divides n (64 per UltraServer),
+    so a group of that size still sits on NVLink. Any other case, and every HGX node, returns `hw` itself."""
+    if not is_rack_scale(hw):
+        return hw
+    domain = domain_gpus(hw)
+    if n <= domain or n % domain == 0:
+        return hw
+    share = rack_share(hw)
+    if share and n % share == 0:
+        return {**hw, "gpn": share}
+    return hw
+
+
+def rack_alternatives(hw, n):
+    """GPU counts below n worth trying instead of n on rack-scale hardware: the largest power of two (a multiple of
+    the instance size) when n is not one, e.g. 64 for 72 and 128 for 144. Empty for HGX nodes."""
+    if not is_rack_scale(hw) or n <= instance_gpus(hw):
+        return []
+    p = _largest_pow2_below(n, instance_gpus(hw))
+    return [p] if p and p != n and (n & (n - 1)) else []
+
+
+def auto_gpu_counts(hw, gpus_per_node, limit):
+    """GPU counts the automatic search tries, smallest first. HGX nodes: gpus_per_node, doubling. Rack-scale:
+    steps of the instance size inside one domain (4, 8, 16, 32, 64), then whole domains (72, 144, 288, ...) and
+    the power-of-two share of each (128, 256, ...)."""
+    if not is_rack_scale(hw):
+        out, n = [], gpus_per_node
+        while n <= limit:
+            out.append(n)
+            n *= 2
+        return out
+    domain, step = domain_gpus(hw), instance_gpus(hw)
+    share = rack_share(hw)
+    counts = set()
+    for base in (step, share, domain):
+        n = base
+        while n <= limit:
+            if base == step and n > domain:
+                break
+            counts.add(n)
+            n *= 2
+    return sorted(counts)
+
 # --- Calibration (fitted by validation_runs.fit() on the FIT subset; see docs) ---------------
 # eta_base: fraction of dense peak reached by the per-GPU compute of the step, before bubble
 # and exposed communication. One value per GPU family and precision, never per model.
@@ -424,6 +494,7 @@ def estimate(shape, hw, plan, precision="bf16"):
                 dispatcher_sms, default COMM_SMS, of the GPU's SMs from compute).
     """
     n = int(plan["num_gpus"])
+    hw = rack_hw(hw, n)
     tp, pp, cp = int(plan.get("tp", 1)), int(plan.get("pp", 1)), int(plan.get("cp", 1))
     vp, ep, mbs = int(plan.get("vp", 1)), int(plan.get("ep", 1)), int(plan.get("mbs", 1))
     seq = int(plan["seq"])

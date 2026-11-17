@@ -153,7 +153,43 @@ def shape_from_preset(v, vocab):
 
 
 def estimate_training(config, variant):
-    """Plan search + MFU + days + cost for one GPU count.
+    """One GPU count. On rack-scale hardware (72-GPU NVLink domain) a count that is not a power of two is also tried
+    as the largest power of two below it (64 of 72): EP 64 and other power-of-two layouts need it, and the whole
+    UltraServer is billed either way. The faster plan that fits wins; the result says which GPUs it used."""
+    hw = mm.HARDWARE.get(config["hardware"])
+    n = int(config["num_gpus"])
+    alts = mm.rack_alternatives(hw, n) if hw else []
+    best = estimate_plan(config, variant)
+    if not alts:
+        return best
+    considered = [{"gpus": n, "tokens_per_second": best.get("training_time", {}).get("tokens_per_second"),
+                   "fits": best.get("fits_in_memory"), "error": best.get("error")}]
+    for m in alts:
+        alt = estimate_plan({**config, "num_gpus": m, "_billed_gpus": n}, variant)
+        considered.append({"gpus": m, "tokens_per_second": alt.get("training_time", {}).get("tokens_per_second"),
+                           "fits": alt.get("fits_in_memory"), "error": alt.get("error")})
+        if "error" in alt:
+            continue
+        if "error" in best or (alt["fits_in_memory"] and not best["fits_in_memory"]) or (
+                alt["fits_in_memory"] == best["fits_in_memory"]
+                and alt["training_time"]["tokens_per_second"] > best["training_time"]["tokens_per_second"]):
+            best = alt
+    if "error" in best:
+        return best
+    used = best["parallelism"]["total_gpus"]
+    best["rack_layout"] = {
+        "requested_gpus": n, "used_gpus": used, "idle_gpus": n - used,
+        "billed_units": best["parallelism"]["num_nodes"],
+        "considered": [{k: v for k, v in c.items() if v is not None} for c in considered],
+        "note": (f"{used} of the {n} GPUs are used: a power-of-two layout (EP {best['parallelism']['expert_parallel']}, "
+                 f"TP x PP x DP = {used}) is faster than {n}. The {n - used} idle GPUs are still billed." if used != n else
+                 f"All {n} GPUs are used; using the largest power of two below it was slower."),
+    }
+    return best
+
+
+def estimate_plan(config, variant):
+    """Plan search + MFU + days + cost for exactly config["num_gpus"] GPUs.
 
     config keys: hardware (instance type), num_gpus, precision ("bf16" | "fp8"), sequence_length,
     total_tokens_b, tensor_parallel / pipeline_parallel / expert_parallel (fix a degree; 1 =
@@ -198,7 +234,8 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         variant.setdefault("topk", pc.TOPK)
     n_experts = variant.get("num_experts", 0)
     topk = variant.get("topk", 0)
-    num_nodes = max(1, math.ceil(num_gpus / gpus_per_node))  # a partial node is still paid for
+    # a partial node is still paid for (and a partial UltraServer is a whole UltraServer)
+    num_nodes = max(1, math.ceil(int(config.get("_billed_gpus") or num_gpus) / gpus_per_node))
 
     saved_vocab = pc.VOCAB
     pc.VOCAB = variant.get("vocab") or saved_vocab
@@ -475,18 +512,21 @@ def run_estimate(config, variant):
     num_gpus = config.get("num_gpus")
     if num_gpus in (None, "", 0, "auto"):
         target_days = config.get("target_days")
-        tried, n, result = [], gpus_per_node, None
-        while n <= MAX_AUTO_GPUS:
-            result = estimate_training({**config, "num_gpus": n}, variant)
+        mm_hw = mm.HARDWARE.get(config["hardware"]) or mm.HARDWARE["p5.48xlarge"]
+        tried, result = [], None
+        for n in mm.auto_gpu_counts(mm_hw, gpus_per_node, MAX_AUTO_GPUS):
+            result = estimate_plan({**config, "num_gpus": n}, variant)
             if "error" in result:
                 return result
             days = result["training_time"]["training_days"]
             tried.append({"num_gpus": n, "fits": result["fits_in_memory"], "training_days": days})
             if result["fits_in_memory"] and (not target_days or days <= float(target_days)):
                 break
-            n *= 2
+        counts = ("whole {0}-GPU nodes, doubling".format(gpus_per_node) if not mm.is_rack_scale(mm_hw) else
+                  "steps of {0} GPUs inside one {1}-GPU NVLink domain, then {2} or {1} GPUs per domain".format(
+                      mm.instance_gpus(mm_hw), mm.domain_gpus(mm_hw), mm.rack_share(mm_hw)))
         result["gpu_count_search"] = {
-            "basis": f"smallest GPU count (whole {gpus_per_node}-GPU nodes, doubling) that fits"
+            "basis": f"smallest GPU count ({counts}) that fits"
                      + (f" and trains in <= {target_days} days" if target_days else " in memory"),
             "tried": tried,
         }
@@ -507,6 +547,7 @@ def format_estimate(r):
         f"{p['micro_batches_per_step']} micro-batches/step, {p['global_batch_tokens'] / 1e6:.1f}M tokens/step "
         f"({p['global_batch_source']})",
         f"- **Fits in memory**: {'yes' if r['fits_in_memory'] else 'NO (out of memory)'}",
+        *([f"- **GPUs**: {r['rack_layout']['note']}"] if r.get("rack_layout") and r["rack_layout"]["idle_gpus"] else []),
         f"- **MFU**: {t['mfu'] * 100:.1f}% ({r['inputs']['mfu_source']}), {t['model_tflops_per_gpu']} TFLOPS/GPU",
         f"- **Throughput**: {t['tokens_per_second']:,} tokens/s ({t['tokens_per_second_wall_clock']:,} wall clock "
         f"at {t['goodput'] * 100:.0f}% goodput)",

@@ -310,6 +310,95 @@ class Gb200Reachable(unittest.TestCase):
         gb = [h for h in HARDWARE if "p6e-gb200" in h["name"]]
         self.assertTrue(all(h["mem_gb"] == 185 and h["inter_node_bw_gb"] == 7200 for h in gb))
 
+    def test_72_gpu_request_with_ep_64_uses_64_of_72_and_bills_one_ultraserver(self):
+        r = run("DeepSeek-V3", hardware="gb200", total_tokens_b=2000, num_gpus=72, expert_parallel=64)
+        self.assertNotIn("error", r, r)
+        p, rack = r["parallelism"], r["rack_layout"]
+        self.assertEqual((p["total_gpus"], p["expert_parallel"], p["num_nodes"]), (64, 64, 1))
+        self.assertEqual((rack["requested_gpus"], rack["used_gpus"], rack["idle_gpus"], rack["billed_units"]), (72, 64, 8, 1))
+        self.assertEqual([c["gpus"] for c in rack["considered"]], [72, 64])
+        self.assertIn("error", rack["considered"][0])  # EP 64 cannot divide 72 GPUs
+        self.assertEqual(r["hardware"]["billed_units"], 1)
+        self.assertIn("64 of the 72 GPUs", p9.format_estimate(r))
+
+    def test_a_faster_72_gpu_plan_is_kept(self):
+        r = run("Llama-3.1-70B", hardware="GB200", num_gpus=72, total_tokens_b=2000)
+        self.assertEqual(r["parallelism"]["total_gpus"], 72)
+        self.assertEqual(r["rack_layout"]["idle_gpus"], 0)
+        self.assertEqual([c["gpus"] for c in r["rack_layout"]["considered"]], [72, 64])
+
+    def test_power_of_two_counts_have_no_alternative(self):
+        r = run("Llama-3.1-8B", hardware="GB200", num_gpus=64, total_tokens_b=100)
+        self.assertNotIn("rack_layout", r)
+        self.assertEqual(r["parallelism"]["num_nodes"], 1)
+        r = run("Llama-3.1-8B", hardware="GB200", num_gpus=128, total_tokens_b=100)
+        self.assertEqual(r["parallelism"]["num_nodes"], 2)  # 128 GPUs: two UltraServers
+
+    def test_hgx_requests_have_no_rack_layout(self):
+        r = run("Llama-3.1-8B", hardware="B300", num_gpus=72, total_tokens_b=100)
+        self.assertNotIn("rack_layout", r)
+        self.assertEqual(r["parallelism"]["total_gpus"], 72)
+
+    def test_ep_64_on_256_gpus_is_allowed_and_all_to_all_stays_on_nvlink(self):
+        gb = run("DeepSeek-V3", hardware="gb200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
+        self.assertEqual((gb["parallelism"]["total_gpus"], gb["parallelism"]["expert_parallel"]), (256, 64))
+        self.assertEqual(gb["alltoall_communication"]["comm_type"], "intra-node (NVLink)")
+        hgx = run("DeepSeek-V3", hardware="b200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
+        self.assertEqual(hgx["alltoall_communication"]["comm_type"], "inter-node (EFA)")
+
+    def test_auto_search_steps_inside_the_domain_then_by_ultraserver(self):
+        r = run("Llama-3.1-70B", hardware="GB200", total_tokens_b=2000, num_gpus="auto", target_days=60)
+        search = r["gpu_count_search"]
+        counts = [t["num_gpus"] for t in search["tried"]]
+        self.assertEqual(counts, [4, 8, 16, 32, 64, 72, 128, 144, 256][:len(counts)])
+        self.assertEqual(counts[0], 4)
+        self.assertIn("72-GPU NVLink domain", search["basis"])
+        self.assertLessEqual(r["training_time"]["training_days"], 60)
+        self.assertTrue(r["fits_in_memory"])
+        self.assertEqual(r["parallelism"]["num_nodes"], -(-r["parallelism"]["total_gpus"] // 72))
+
+
+class RackAwareCounts(unittest.TestCase):
+    """Step 2: GPU counts in steps of 4 inside a 72-GPU domain, 64 of 72, billing by UltraServer."""
+
+    def test_auto_counts_for_hgx_are_unchanged_doubling(self):
+        hw = mm.HARDWARE["p6-b300.48xlarge"]
+        self.assertEqual(mm.auto_gpu_counts(hw, 8, 100), [8, 16, 32, 64])
+        self.assertEqual(mm.auto_gpu_counts(hw, 4, 40), [4, 8, 16, 32])
+
+    def test_auto_counts_for_gb200(self):
+        x72, x36 = mm.HARDWARE["u-p6e-gb200x72"], mm.HARDWARE["u-p6e-gb200x36"]
+        self.assertEqual(mm.auto_gpu_counts(x72, 72, 600), [4, 8, 16, 32, 64, 72, 128, 144, 256, 288, 512, 576])
+        self.assertEqual(mm.auto_gpu_counts(x36, 36, 300), [4, 8, 16, 32, 36, 64, 72, 128, 144, 256, 288])
+
+    def test_power_of_two_share_of_the_domain(self):
+        self.assertEqual(mm.rack_share(mm.HARDWARE["u-p6e-gb200x72"]), 64)
+        self.assertEqual(mm.rack_share(mm.HARDWARE["u-p6e-gb200x36"]), 32)
+        self.assertEqual(mm.rack_share(mm.HARDWARE["p6-b300.48xlarge"]), 0)
+
+    def test_alternatives_are_the_largest_power_of_two_below(self):
+        g = mm.HARDWARE["u-p6e-gb200x72"]
+        got = {n: mm.rack_alternatives(g, n) for n in (4, 8, 64, 72, 100, 128, 144, 288, 576)}
+        self.assertEqual(got, {4: [], 8: [], 64: [], 72: [64], 100: [64], 128: [], 144: [128], 288: [256], 576: [512]})
+        self.assertEqual(mm.rack_alternatives(mm.HARDWARE["p6-b300.48xlarge"], 72), [])  # an HGX node never changes
+
+    def test_128_gpus_run_as_64_per_ultraserver(self):
+        g = mm.HARDWARE["u-p6e-gb200x72"]
+        self.assertEqual({n: mm.rack_hw(g, n)["gpn"] for n in (8, 64, 72, 100, 128, 144, 256, 288)},
+                         {8: 72, 64: 72, 72: 72, 100: 72, 128: 64, 144: 72, 256: 64, 288: 72})
+        self.assertIs(mm.rack_hw(mm.HARDWARE["p6-b200.48xlarge"], 128), mm.HARDWARE["p6-b200.48xlarge"])
+
+    def test_ep_64_stays_on_nvlink_inside_a_64_gpu_share(self):
+        g = mm.HARDWARE["u-p6e-gb200x72"]
+        slow = {**g, "net": 0.001}  # a network 100,000 times slower must not matter to an all-NVLink all-to-all
+        shape = mm.model_shape(vr.ARCH["DeepSeek-V3"])
+        plan = dict(num_gpus=128, tp=1, pp=2, cp=1, vp=1, ep=64, etp=1, mbs=1, seq=4096, gbs=2048, dispatcher="deepep")
+        a, b = mm.estimate(shape, g, plan, "fp8"), mm.estimate(shape, slow, plan, "fp8")
+        self.assertEqual(a["time_s"]["ep_total"], b["time_s"]["ep_total"])
+        wide = mm.estimate(shape, g, {**plan, "num_gpus": 256, "ep": 128, "pp": 1, "gbs": 2048}, "fp8")
+        wide_slow = mm.estimate(shape, slow, {**plan, "num_gpus": 256, "ep": 128, "pp": 1, "gbs": 2048}, "fp8")
+        self.assertGreater(wide_slow["time_s"]["ep_total"], wide["time_s"]["ep_total"])  # EP 128 does not fit a 64-GPU share
+
 
 if __name__ == "__main__":
     unittest.main()
