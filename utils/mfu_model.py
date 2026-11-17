@@ -20,7 +20,9 @@ Step-time model (per GPU, one optimizer step)
 ---------------------------------------------
   t_compute = F x tokens_per_step / N / (peak x eta)
       eta = 1 / ((1 - f_e) / eta_base + f_e / (eta_base x moe_factor))
-      moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+      moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + half),  half = MOE_EXPERT_HALF_FFN_FAMILY[family]
+                   or MOE_EXPERT_HALF_FFN
+      eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ^ TGP_EXPONENT (board power, GB300 and B300)
       f_e = share of F spent in routed-expert matmuls
   t_pipe    = t_compute / (1 - bubble),  bubble = (PP - 1) / (VP x m + PP - 1)
       m = micro-batches per DP rank per step = GBS / (DP x MBS)
@@ -35,7 +37,7 @@ from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-4"
+MODEL_VERSION = "mfu-model-5"
 
 GIB = 1.073741824  # 1 GiB/s in GB/s (the Neuron pages give NeuronLink in GiB/s on Trn2)
 CALIBRATION_TRN1 = ("calibrated on the 2 published Neuron Trn1 rows (Llama-3.1 8B and 70B, BF16, Neuron 2.24.0); there is no hold-out, "
@@ -66,13 +68,15 @@ HARDWARE = {
     "p5e.48xlarge":     {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "p5en.48xlarge":    {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "p6-b200.48xlarge": {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
-    "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
+    "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8,
+                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0},
     "p4d.24xlarge":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
     "p4de.24xlarge":    {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
     # Non-AWS systems, used only by the validation set (published runs).
     "dgx-h100":         {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "dgx-b200":         {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
-    "dgx-b300":         {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
+    "dgx-b300":         {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8,
+                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0},
     "dgx-a100-40g":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 25.0,  "gpn": 8},
     "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
@@ -108,9 +112,13 @@ HARDWARE = {
     # Large-GEMM transformer training draws the whole envelope (ViT-Large: 92-97% of TDP on B200 and B300, B300 +16% training,
     # +21% inference): arXiv 2610.41919. At equal listed peak, sustained tensor throughput follows the power headroom, see
     # TGP_EXPONENT. "tgp_ref_w" is the board power of the Blackwell part whose efficiency constant the system uses.
-    # Applied to GB300 only. HGX B300 (1,100 W against 1,000 W) shows the same direction (+10% to +13% at the same plan in NeMo
-    # 26.02 to 26.04.01), but the B300 rows of validation_runs.py are part of the fit of the Blackwell constants (BF16 and the MoE
-    # factor), so the same term would push them 9 to 10 points up without a joint refit; see docs/CALCULATOR-HARDWARE.md section 6.
+    # GB300: 1,400 W against GB200's 1,200 W (NVIDIA table above).
+    # HGX B300 (p6-b300, dgx-b300): 1,100 W against HGX B200's 1,000 W (mfu-model-5, joint refit, docs/CALCULATOR-HARDWARE.md 6a).
+    #   B200 1,000 W: NVIDIA HGX B200 datasheet, "Max Thermal Design Power, per individual GPU: configurable up to 1000 W"
+    #       https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf
+    #   B300 1,100 W: the B300 envelope measured in arXiv 2610.41919 (https://arxiv.org/abs/2610.41919) and the HGX B300 GPU bin
+    #       of OEM systems (Supermicro, "eight 1,100W TDP Blackwell GPUs", https://learn-more.supermicro.com/b300). No NVIDIA or
+    #       AWS page found gives the HGX B300 per-GPU TDP; AWS does not publish the p6-b300 power setting (assumed 1,100 W).
     "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
                               "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
                               "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",),
@@ -313,7 +321,7 @@ def auto_gpu_counts(hw, gpus_per_node, limit):
 BASE_EFFICIENCY = {
     ("hopper", "bf16"): 0.573,
     ("hopper", "fp8"): 0.45,
-    ("blackwell", "bf16"): 0.443,
+    ("blackwell", "bf16"): 0.417,  # mfu-model-5: 0.443 before the B300 power term (its B300 fit row now carries x1.127)
     ("blackwell", "fp8"): 0.417,
     ("ampere", "bf16"): 0.471,
     ("trainium1", "bf16"): 0.33,  # fitted on the two Neuron Trn1 rows (validation_runs.fit_trainium1)
@@ -325,11 +333,18 @@ BASE_EFFICIENCY = {
 # of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
 MOE_EXPERT_FACTOR = 0.78
 MOE_EXPERT_HALF_FFN = 1024
+# Per GPU family, the expert width at which a routed-expert matmul reaches half of MOE_EXPERT_FACTOR (default MOE_EXPERT_HALF_FFN).
+# Blackwell: fitted on the two Blackwell MoE fit rows (validation_runs.fit_blackwell_moe_half), with the shared MoE constants held.
+# With the B300 power term the Blackwell MoE rows ran 8 to 18 points high at the shared 1024; narrow expert GEMMs lose more of
+# Blackwell's peak than of Hopper's. Hopper, Ampere and Trainium keep MOE_EXPERT_HALF_FFN.
+MOE_EXPERT_HALF_FFN_FAMILY = {"blackwell": 1664}
 # Sustained tensor throughput at equal listed peak scales with board power: for a system with "tgp_w" and "tgp_ref_w",
 #   eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT
 # One constant, fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01 (validation_runs.fit_tgp_exponent), checked on the
 # other GB300 pairs. An exponent above 1 means the power ratio explains most of the gap and a small part (about 3 to 4 points
 # for GB300, 1,400 W against 1,200 W) comes from elsewhere, see docs/CALCULATOR-HARDWARE.md section 6.
+# mfu-model-5 applies the same term to HGX B300 (1,100 W against 1,000 W). The refit after that change gives 1.25 again (the GB300
+# fit pairs are ratios, which the Blackwell constants do not move); the three B300 / B200 pairs stay a hold-out check of it.
 TGP_EXPONENT = 1.25
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
@@ -372,14 +387,15 @@ GATED_ACTIVATIONS = ("silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh")
 
 # Pinned result of validation_runs.py (test_mfu_model checks it is current).
 # Scored runs only: superseded runs are printed but not scored (validation_runs.summary).
-VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6.1, "max_abs_error_pct": 58.9,
-                      "hold_out_median_abs_error_pct": 7.4, "hold_out_max_abs_error_pct": 58.9,
-                      "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 19.8,
-                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
+VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6.0, "max_abs_error_pct": 38.2,
+                      "hold_out_median_abs_error_pct": 7.4, "hold_out_max_abs_error_pct": 38.2,
+                      "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 17.8,
+                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 7.7, "new_moe_max_abs_error_pct": 38.2,
                       "superseded_runs": 2,
                       "trainium1_rows": 2, "trainium1_median_abs_error_pct": 13.1, "trainium1_max_abs_error_pct": 13.5,
-                      "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
-                      "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.1,
+                      "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 8.9, "rack_scale_max_abs_error_pct": 64.7,
+                      "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.8,
+                      "b300_pairs": 3, "b300_pair_median_abs_error_pct": 0.2, "b300_pair_max_abs_error_pct": 2.3,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {
@@ -529,8 +545,9 @@ def model_shape(cfg, params_total_b=None):
     }
 
 
-def moe_expert_factor(expert_ffn):
-    return MOE_EXPERT_FACTOR * expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+def moe_expert_factor(expert_ffn, family=None):
+    half = MOE_EXPERT_HALF_FFN_FAMILY.get(family, MOE_EXPERT_HALF_FFN)
+    return MOE_EXPERT_FACTOR * expert_ffn / (expert_ffn + half)
 
 
 def flops_per_token(shape, seq):
@@ -694,7 +711,7 @@ def estimate(shape, hw, plan, precision="bf16"):
     tgp_gain = (hw["tgp_w"] / hw["tgp_ref_w"]) ** TGP_EXPONENT if hw.get("tgp_ref_w") else 1.0
     eta_base = eta_base * tgp_gain
     f_e = fl["experts"] / fl["total"] if fl["total"] else 0.0
-    moe_factor = moe_expert_factor(shape["expert_ffn"]) if f_e else 1.0
+    moe_factor = moe_expert_factor(shape["expert_ffn"], hw["family"]) if f_e else 1.0
     eta = 1.0 / ((1 - f_e) / eta_base + f_e / (eta_base * moe_factor))
     t_compute = f_gpu / (peak * eta)
     # Recompute: hardware runs more FLOPs than the model counts (MFU keeps the model-FLOPs convention).

@@ -136,32 +136,137 @@ Candidate causes, with the numbers that rule them in or out (NVIDIA's [Blackwell
 | Software release | | | Noise of about +-10% in any ratio: between NeMo 26.04.01 and 26.08.01 GB300 gained 26% on DeepSeek-V3 and 40% on Qwen3-30B-A3B, GB200 15% and 57%. The dense pairs of 26.04.01 and the MoE pairs of both releases give the same ratio band |
 
 The term is `eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT` (`mfu_model.estimate`), a general term for any system
-that has a board power and the board power of the Blackwell part whose constant it uses: GB300 has 1,400 W and 1,200 W. The one constant, `TGP_EXPONENT = 1.25`, is
+that has a board power and the board power of the Blackwell part whose constant it uses: GB300 has 1,400 W and 1,200 W, and since mfu-model-5 the
+HGX B300 has 1,100 W and 1,000 W (section 6a). The one constant, `TGP_EXPONENT = 1.25`, is
 fitted on two pairs and checked on ten. An exponent above 1 says the power ratio (1.167) accounts for about 1.17 of the 1.21 gain, and about 3 to 4 points of the gap come
 from somewhere this data cannot separate (performance per watt, kernels tuned for sm_103). They are not hidden: they sit in the exponent.
 
 Before and after on the hold-out (ratio error GB300 / GB200): median 15.8% to 3.8%, worst 22.7% to 7.1% (`docs/CALCULATOR-MFU.md` section 7b).
 
-### 6a. HGX B300: the same term is right for the ratio, and is not applied
+### 6a. HGX B300: the term is applied, with a joint refit (mfu-model-5)
 
-HGX B300 (1,100 W) against HGX B200 (1,000 W) at the same plan shows the same gain: published 1.11, 1.12, 1.13 (NeMo 26.04 and 26.04.01: DeepSeek-V3, GPT-OSS, Qwen3-30B-A3B).
-With the term (exponent fitted on GB300 only) the predicted ratios are 1.113, 1.119 and 1.102: errors +0.1%, -0.3% and -2.7%. Without it the model predicts 1.0 (about -11%).
+HGX B300 against HGX B200 at the same plan is 1.11, 1.12 and 1.13 times faster (Megatron-Bridge 26.04 and 26.04.01: DeepSeek-V3, GPT-OSS, Qwen3-30B-A3B), at the same
+listed dense peak (2,250 / 4,500 TFLOPS). The board power differs: B200 is configurable up to 1,000 W per GPU
+([NVIDIA HGX B200 datasheet](https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf)) and the B300 runs a 1,100 W envelope
+([arXiv 2610.41919](https://arxiv.org/abs/2610.41919); [Supermicro HGX B300](https://learn-more.supermicro.com/b300): "eight 1,100W TDP Blackwell GPUs").
+No NVIDIA or AWS page found gives the HGX B300 per-GPU TDP, and AWS does not publish the p6-b300 power setting: 1,100 W is assumed for `p6-b300.48xlarge`.
+`p6-b300.48xlarge` and `dgx-b300` now carry `tgp_w` 1100 and `tgp_ref_w` 1000: a gain of 1.1 ^ 1.25 = 1.127 on the base efficiency.
 
-It is not applied to `p6-b300.48xlarge` and `dgx-b300`, because the absolute B300 rows already in the validation set would move the wrong way. They are part of the fit of the Blackwell
-BF16 constant and of the MoE constants, so the term would need a joint refit, which also moves the p5en, B200 and H100 results. Without the refit (exponent 1.25):
+**The joint refit.** Adding the term alone would push the B300 rows that the Blackwell constants were fitted on 9 to 12 points up. What was refitted, in
+the order of `validation_runs.fit`:
 
-| Row | Set | Error now | Error with the term |
+| Constant | mfu-model-4 | mfu-model-5 | Fitted on |
 |---|---|---|---|
-| repo-qwen3-8b-bf16-b300 (our run, p6-b300) | fit | -5.0% | +7.0% |
-| mb2604-b300-dsv3 | fit | +7.4% | +19.6% |
-| mb2604-b300-qwen3-30b | hold-out | +1.6% | +11.9% |
-| mb2604-b300-qwen3-235b | hold-out | -1.2% | +9.5% |
-| repo-kimi-k2-b300-32n (our run, p6-b300) | hold-out | +19.0% | +29.5% |
-| repo-dsv3-b300-32n (our run, p6-b300) | hold-out | +18.7% | +31.2% |
+| BASE_EFFICIENCY blackwell / bf16 | 0.443 | **0.417** | the 2 dense Blackwell BF16 fit rows (our Llama 70B on p6-b200, our Qwen3-8B on p6-b300); the B300 row now carries x1.127 |
+| BASE_EFFICIENCY blackwell / fp8, hopper, ampere | 0.417; 0.573, 0.45; 0.471 | unchanged | the refit gives the same values (their fit rows have no B300) |
+| TGP_EXPONENT | 1.25 | 1.25 | the 2 GB300 fit pairs (ratios; the refit gives 1.25 again) |
+| MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN, OVERLAP ep | 0.78, 1024, 0.3 | unchanged (kept) | the mfu-model-4 grid on the 6 MoE fit rows (`fit_moe_shared` on `mfu_model_4()` reproduces it) |
+| MOE_EXPERT_HALF_FFN_FAMILY blackwell | (1024, shared) | **1664** | the 2 Blackwell MoE fit rows (mb2604-b300-dsv3, mb2604-b200-qwen3-30b), shared constants held |
 
-Our own p6-b300 runs are already over-predicted by 19%, so adding 12% would make estimates for the AWS instance worse, while the ratio check against NVIDIA's DGX runs improves.
-Both statements hold: a B300 is about 12% faster than a B200 on the same plan, and the model is already optimistic for the p6-b300 MoE runs we measured. Applying the term to B300 (set
-`tgp_w` 1100 and `tgp_ref_w` 1000 on the two B300 entries) needs the joint refit and a decision on the p5en and B200 numbers; it is left for review.
+Why a Blackwell MoE half width: with the B300 term the Blackwell MoE rows ran high on both GPUs (mb2604-b300-dsv3 +18%, mb2604-b200-qwen3-30b +13%, mb2604-b300-qwen3-30b
++10%; the B200 row was already +15% before). The shared MoE curve had been pulled up by the B300 rows getting no power gain. One more constant, the expert width at
+which a routed-expert GEMM reaches half of MOE_EXPERT_FACTOR on Blackwell, fits both Blackwell fit rows. It is checked on rows it never saw: the 16 absolute
+GB300 and GB200 MoE rows of the 8 MoE pairs (median 15.4% to 9.2%) and the GB200 rack rows (median 10.4% to 8.9%).
+
+**The alternative that was not taken:** refit the shared MoE constants together with the Blackwell width (`fit_moe_joint`: 0.79, 768, 0.3, Blackwell 1728). It lowers
+the fit-row median (5.7% to 4.4%) but raises the hold-out median (7.4% to 7.8%) and the 38-run median (6.0% to 6.4%), and it moves every Hopper MoE answer
+(expert matmuls about 10% faster at 2,048-wide experts; `repo-qwen3-30b-a3b-bf16-p5en` -15.2% to -6.9%, `mb2604-h100-qwen3-30b` +4.0% to +9.8%). Nothing in the
+B300 change needs it, so Hopper and p5en are untouched (`test_hopper_and_ampere_rows_do_not_move`, the p5en pins, parity 11 of 11).
+
+**Fit and hold-out sets.** No row moved between the sets. The 15 fit rows and 23 hold-out rows of the 38-run set are the same as in mfu-model-4; the 3 B300 / B200
+pairs stay a hold-out (the exponent is fitted on GB300 only), the GB300 pairs keep their 2 fit and 10 hold-out, the GB200 rack rows stay hold-out.
+
+**Results against the targets:**
+
+| Target | Bar | mfu-model-4 | mfu-model-5 |
+|---|---|---|---|
+| 38-run median | within about 1 point of 6.1% | 6.1% | **6.0%** (hold-out 7.4% and 7.4%) |
+| 38-run worst | no new row past 30% unless explained | 58.9% | 38.2%; no row newly past 30% (the two past 30% were past it before) |
+| GB300 / GB200 pairs, hold-out | under 15% typical | 3.8% (worst 7.1%) | **3.8%** (worst 7.8%) |
+| B300 / B200 published ratios | within 5% | -10.1%, -10.9%, -11.7% | **+0.2%, -0.2%, -2.3%** |
+| Our p6-b300 rows | within 15% or explained | -5.0%, +19.0%, +18.7% | **+0.7%** (Qwen3-8B dense); +26.3% and +29.9% for the two MoE dispatcher runs, explained in 6b |
+
+**Every row that moves more than 2 points** (error against published, mfu-model-4 to mfu-model-5):
+
+| Row | Set | Before | After | Why it moves |
+|---|---|---|---|---|
+| repo-llama70b-bf16-b200 (ours, p6-b200) | fit | +5.3% | -0.7% | Blackwell BF16 base 0.443 to 0.417 |
+| repo-qwen3-8b-bf16-b300 (ours, p6-b300) | fit | -5.0% | +0.7% | power term x1.127 and the new base |
+| nemo-b200-mixtral-8x7b | hold-out | +2.0% | -1.4% | Blackwell MoE half width |
+| mb2604-b200-dsv3 | hold-out | -30.8% | -35.6% | Blackwell MoE half width; already past 30% (dispatcher overlap not modelled, `EXPLAINED_OUTLIERS`) |
+| mb2604-b200-qwen3-30b | fit | +15.0% | -3.6% | Blackwell MoE half width |
+| mb2604-b300-qwen3-30b | hold-out | +1.6% | -5.9% | power term, then the half width |
+| mb2604-b200-qwen3-235b | hold-out | +58.9% | +38.2% | Blackwell MoE half width; already past 30% (alltoall dispatcher) |
+| mb2604-b300-qwen3-235b | hold-out | -1.2% | -4.6% | power term, then the half width |
+| repo-kimi-k2-b300-32n (ours, p6-b300) | hold-out | +19.0% | +26.3% | VP corrected 1 to 2 (+14 points), power term, half width; section 6b |
+| repo-dsv3-b300-32n (ours, p6-b300) | hold-out | +18.7% | +29.9% | VP corrected 1 to 2 (+17 points), power term, half width; section 6b |
+| nemo-b200-deepseek-v3 | superseded | +136.3% | +113.0% | not scored |
+| nemo-gb200-llama4-scout (rack) | hold-out | +7.2% | +4.5% | Blackwell MoE half width |
+| nemo-gb200-mixtral-8x7b (rack) | hold-out | +7.4% | +3.8% | Blackwell MoE half width |
+| nemo-gb200-deepseek-v3 (rack) | hold-out | +82.3% | +64.7% | Blackwell MoE half width; NeMo 25.07 software |
+
+`mb2604-b300-dsv3` (fit) moves +7.4% to +7.7%. No GB300 / GB200 ratio moves by more than 1 point (both sides are Blackwell). Every Hopper and Ampere row is unchanged.
+
+**Live answers** (Lambda, 20T tokens, sequence 4096, BF16; auto, a fixed GPU count, and a 30-day target), mfu-model-4 to mfu-model-5:
+
+| Case | GPUs | TP/PP/DP/EP | MFU before | MFU after | tok/s before | tok/s after | days before | days after | cost USD before | cost USD after | change |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| glm-p5en-auto | 16 | 4/4/1/4 | 0.3661 | 0.3661 | 49,419 | 49,419 | 5204.4 | 5204.4 | 34,973,707 | 34,973,707 | same |
+| glm-p5en-64 | 64 | 2/16/2/1 | 0.3949 | 0.3949 | 213,197 | 213,197 | 1206.4 | 1206.4 | 32,427,986 | 32,427,986 | same |
+| glm-p5en-30d | 4096 | 8/16/32/1 | 0.3254 | 0.3254 | 11,245,265 | 11,245,265 | 22.9 | 22.9 | 39,347,149 | 39,347,149 | same |
+| glm-b200-auto | 8 | 8/1/1/8 | 0.2715 | 0.2315 | 41,680 | 35,538 | 6170.7 | 7237.3 | 26,657,544 | 31,265,098 | -14.7% tok/s |
+| glm-b200-64 | 64 | 1/16/4/1 | 0.3075 | 0.2565 | 377,660 | 315,077 | 681.0 | 816.3 | 23,536,710 | 28,211,758 | -16.6% tok/s |
+| glm-b200-30d | 2048 | 1/1/2048/8 | 0.2775 | 0.2358 | 10,906,048 | 9,268,642 | 23.6 | 27.7 | 26,081,347 | 30,688,901 | -15.0% tok/s |
+| glm-b300-auto | 8 | 4/2/1/4 | 0.2864 | 0.2705 | 43,969 | 41,528 | 5849.5 | 6193.4 | 35,097,121 | 37,160,441 | -5.6% tok/s |
+| glm-b300-64 | 64 | 1/16/4/1 | 0.3075 | 0.289 | 377,660 | 354,935 | 681.0 | 724.6 | 32,689,875 | 34,782,907 | -6.0% tok/s |
+| glm-b300-30d | 2048 | 1/1/2048/8 | 0.2887 | 0.2725 | 11,346,820 | 10,712,152 | 22.7 | 24.0 | 34,816,955 | 36,879,770 | -5.6% tok/s |
+| glm-gb300-auto | 8 | 4/2/1/4 | 0.3376 | 0.2868 | 57,597 | 48,922 | 4465.5 | 5257.4 | unknown | unknown | -15.1% tok/s |
+| glm-gb300-72 | 72 | 1/9/8/1 | 0.3723 | 0.3106 | 571,601 | 476,913 | 450.0 | 539.3 | unknown | unknown | -16.6% tok/s |
+| glm-gb300-30d | 2048 | 1/1/2048/16 | 0.346 | 0.2928 | 15,112,199 | 12,788,502 | 17.0 | 20.1 | unknown | unknown | -15.4% tok/s |
+| param2-p5en-auto | 8 | 1/2/4/1 | 0.3869 | 0.3869 | 175,504 | 175,504 | 1465.5 | 1465.5 | 4,924,073 | 4,924,073 | same |
+| param2-p5en-64 | 64 | 1/1/64/1 | 0.3866 | 0.3866 | 1,403,038 | 1,403,038 | 183.3 | 183.3 | 4,927,578 | 4,927,578 | same |
+| param2-p5en-30d | 512 | 1/1/512/1 | 0.3818 | 0.3818 | 11,085,193 | 11,085,193 | 23.2 | 23.2 | 4,989,416 | 4,989,416 | same |
+| param2-b200-auto | 8 | 1/1/8/1 | 0.2994 | 0.2471 | 308,966 | 254,978 | 832.5 | 1008.7 | 3,596,216 | 4,357,673 | -17.5% tok/s |
+| param2-b200-64 | 64 | 1/1/64/1 | 0.2985 | 0.2465 | 2,464,470 | 2,034,875 | 104.4 | 126.4 | 3,606,815 | 4,368,272 | -17.4% tok/s |
+| param2-b200-30d | 256 -> 512 | 1/1/256/1 -> 1/1/512/1 | 0.2957 | 0.2421 | 9,765,624 | 15,988,006 | 26.3 | 16.1 | 3,640,889 | 4,447,778 | +63.7% tok/s |
+| param2-b300-auto | 8 | 1/1/8/1 | 0.2994 | 0.2783 | 308,966 | 287,234 | 832.5 | 895.4 | 4,994,744 | 5,372,651 | -7.0% tok/s |
+| param2-b300-64 | 64 | 1/1/64/1 | 0.299 | 0.278 | 2,468,295 | 2,294,903 | 104.2 | 112.1 | 5,001,701 | 5,379,608 | -7.0% tok/s |
+| param2-b300-30d | 256 | 1/1/256/1 | 0.2976 | 0.2768 | 9,826,694 | 9,139,412 | 26.2 | 28.1 | 5,025,364 | 5,403,270 | -7.0% tok/s |
+| param2-gb300-auto | 4 | 1/1/4/1 | 0.363 | 0.2996 | 208,138 | 171,766 | 1235.7 | 1497.4 | unknown | unknown | -17.5% tok/s |
+| param2-gb300-72 | 72 | 1/1/72/1 | 0.3623 | 0.2991 | 3,738,601 | 3,086,419 | 68.8 | 83.3 | unknown | unknown | -17.4% tok/s |
+| param2-gb300-30d | 256 | 1/1/256/1 | 0.3602 | 0.2977 | 13,217,257 | 10,922,396 | 19.5 | 23.5 | unknown | unknown | -17.4% tok/s |
+
+p5en: identical (no Hopper constant changed). B200: 15% to 18% fewer tokens/s for both MoE models: the Blackwell BF16 base (-5.9%) and the Blackwell MoE half width
+(-17% on the expert matmuls of 2,048-wide experts). B300: 6% to 7% fewer: the same two, less the power gain (+12.7%). GB300: 15% to 18% fewer: the half width and the base
+(GB300 already had its power term). Param2 on B200 with a 30-day target now needs 512 GPUs instead of 256. These are the moves the B300 and B200 MoE rows asked for;
+dense answers on B300 rise (Llama 3 70B BF16 at 128 GPUs: +6%).
+
+### 6b. Our p6-b300 MoE rows: why the model is high
+
+The two rows are DeepEP dispatcher A/B runs, not tuned training runs: TP 8, PP 8, EP 32, DP 4 on 32 p6-b300, BF16, micro batch 4, global batch 256, mock data with
+forced load balancing ([DeepSeek-V3 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/dsv3/benchmarks/RESULTS.md),
+[Kimi-K2 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/kimi-k2/benchmarks/RESULTS.md); the repo pages say
+"Data sourced from awsome-distributed-ai"). What was checked against the published B300 / B200 pairs:
+
+| Item | Our rows | Published B300 / B200 pairs | Finding |
+|---|---|---|---|
+| Precision | BF16 | MXFP8 (DeepSeek-V3, Qwen3-30B), BF16 (GPT-OSS) | modelled per precision; not the cause |
+| Plan | TP 8, PP 8, **VP 2**, EP 32 over 4 nodes, ETP 1 | TP 1, EP 8 inside one node (all-to-all on NVLink only) | ours sends 75% of the all-to-all over EFA |
+| VP | config.yaml says 1 | | **mislabelled**: with overlap on and PP > 1 the bench sets VP 2 (the recipe's (8, 2) layout) and turns recompute off (`bench_kimi_k2_pretrain.py`, `bench_dsv3_pretrain.py`; RESULTS.md: "overlap=on required VPP=2 + recompute OFF"). Corrected in `validation_runs.py`; it lowers the modelled bubble from 30% to 18% |
+| Recompute | none recorded | per recipe | none (granularity None in the overlap-on bench): matches the row |
+| Software | config.yaml: CUDA 12.8, NCCL 2.25+ | NeMo 26.04 / 26.04.01 | the images are `megatron-bridge-uccl:nemo-26.04.01-...` (Bridge 0.4.2, Core 0.17.1), the same release as the pairs; the NVSHMEM image is a `-cu13` build. The CUDA line of config.yaml is a template value |
+| GPU, network | config.yaml: "B300 192 GB", "EFA v2 (3200 Gbps)" | | **mislabelled** template values: p6-b300 has 288 GB per GPU and 6,400 Gbps (the RESULTS pages log 16 EFA NICs per node, `efa-direct`). The model uses 100 GB/s per GPU |
+| Nodes | 32 | 1 to 32 | right |
+| Power cap, clocks | not logged | not published | unknown |
+| Layout imbalance | the (8, 2) layout puts 8 decoder layers on 7 of the 8 stages (61 / 8 = 7.6 average) | | about 5% the model does not count (it counts the average stage) |
+
+The cause is the all-to-all over EFA. The same bench with overlap off, changing only the dispatcher (NCCL alltoall to DeepEP), moves the step by 3.5 s (DeepSeek-V3:
+9.77 to 6.26 s) and 3.3 s (Kimi-K2: 9.30 to 6.04 s), so the EP all-to-all costs seconds a step on this layout. The model's whole EP time is 0.5 s (DeepSeek-V3) and 1.0 s
+(Kimi-K2), and its overlap-off step is 2.4 s and 2.1 s shorter than the measured DeepEP step (`test_our_b300_moe_rows_are_high_because_of_the_efa_all_to_all`). The
+published B300 / B200 pairs keep EP inside one NVLink node, so the power term and the Blackwell constants are tested where the EFA does not matter, and the EP-over-EFA
+gap shows only on our rows. Fixing it means a measured EFA all-to-all efficiency for DeepEP, which also moves p5en MoE answers (EP across nodes): not part of this change.
+The portal repo's `benchmarks/pretrain-*-moe-bf16/p6-b300-32nodes/config.yaml` files are left as they are; the mislabels above are listed for a separate fix.
+S3 `repos/benchmarks/` is the CI copy of that folder (portal `docs/CI.md`) and was not read: this host has no access to the portal account.
 
 ## 7. AWS Trainium: Trn1 (calibrated), Trn2 and Trn3 (uncalibrated)
 

@@ -61,11 +61,12 @@ class LinkModelLeavesGpusUnchanged(unittest.TestCase):
 
     def test_the_38_run_summary_and_the_gpu_rows_are_unchanged(self):
         s = vr.summary(vr.evaluate())
-        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
-        self.assertEqual((s["hold_out"]["median_abs_error_pct"], s["fit"]["median_abs_error_pct"]), (7.4, 5.8))
-        self.assertEqual(vr.rack_summary(vr.evaluate(vr.RACK_RUNS)), {"runs": 8, "median_abs_error_pct": 10.4, "max_abs_error_pct": 82.3})
+        # mfu-model-5 numbers (the B300 refit moved them after step 6; step 6 itself moved none)
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.0, 38.2))
+        self.assertEqual((s["hold_out"]["median_abs_error_pct"], s["fit"]["median_abs_error_pct"]), (7.4, 5.7))
+        self.assertEqual(vr.rack_summary(vr.evaluate(vr.RACK_RUNS)), {"runs": 8, "median_abs_error_pct": 8.9, "max_abs_error_pct": 64.7})
         hold = vr.pair_summary([r for r in vr.evaluate_pairs(vr.ALL_GB300_PAIRS) if not r["fit"]])
-        self.assertEqual((hold["median_abs_error_pct"], hold["max_abs_error_pct"]), (3.8, 7.1))
+        self.assertEqual((hold["median_abs_error_pct"], hold["max_abs_error_pct"]), (3.8, 7.8))
 
     def test_the_fit_of_the_38_runs_does_not_include_a_trainium_row(self):
         self.assertFalse({r["id"] for r in vr.TRN1_RUNS} & {r["id"] for r in vr.RUNS})

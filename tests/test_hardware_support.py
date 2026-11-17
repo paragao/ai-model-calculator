@@ -4,10 +4,13 @@
 
 Part 1 pins today's results for every hardware entry that existed before GB200 was added, so no
 default (GPUs per node, price, bandwidth, search) can leak into p5, p5en, B200, B300 or A100.
-The numbers below were produced by main 0ac7828, before any of these changes.
+The numbers below were produced by main 0ac7828, before any of these changes. Exception: the Blackwell (B200, B300) entries
+were re-pinned for mfu-model-5 (B300 board-power term and joint refit, docs/CALCULATOR-HARDWARE.md section 6a); the Hopper and A100
+entries are still the 0ac7828 numbers.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -65,14 +68,14 @@ PIN_MM = {  # key: hardware|model|precision -> [mfu, tokens/s/GPU]
     "p5en.48xlarge|Llama-3-70B|fp8": [0.4213, 1731.9],
     "p5en.48xlarge|DeepSeek-V3|bf16": [0.2775, 943.7],
     "p5en.48xlarge|DeepSeek-V3|fp8": [0.1997, 1358.9],
-    "p6-b200.48xlarge|Llama-3-70B|bf16": [0.4196, 1960.9],
+    "p6-b200.48xlarge|Llama-3-70B|bf16": [0.3954, 1847.7],
     "p6-b200.48xlarge|Llama-3-70B|fp8": [0.389, 3636.1],
-    "p6-b200.48xlarge|DeepSeek-V3|bf16": [0.1941, 1501.7],
-    "p6-b200.48xlarge|DeepSeek-V3|fp8": [0.1492, 2309.1],
-    "p6-b300.48xlarge|Llama-3-70B|bf16": [0.4201, 1963.2],
-    "p6-b300.48xlarge|Llama-3-70B|fp8": [0.3898, 3643.9],
-    "p6-b300.48xlarge|DeepSeek-V3|bf16": [0.2246, 1737.5],
-    "p6-b300.48xlarge|DeepSeek-V3|fp8": [0.1871, 2895.3],
+    "p6-b200.48xlarge|DeepSeek-V3|bf16": [0.1697, 1312.6],
+    "p6-b200.48xlarge|DeepSeek-V3|fp8": [0.1388, 2148.1],
+    "p6-b300.48xlarge|Llama-3-70B|bf16": [0.445, 2079.8],
+    "p6-b300.48xlarge|Llama-3-70B|fp8": [0.4375, 4089.3],
+    "p6-b300.48xlarge|DeepSeek-V3|bf16": [0.2138, 1654.1],
+    "p6-b300.48xlarge|DeepSeek-V3|fp8": [0.1876, 2902.0],
     "p4d.24xlarge|Llama-3-70B|bf16": [0.4497, 291.4],
     "p4d.24xlarge|Llama-3-70B|fp8": [0.4497, 291.4],
     "p4d.24xlarge|DeepSeek-V3|bf16": [0.1891, 202.9],
@@ -85,14 +88,14 @@ PIN_MM = {  # key: hardware|model|precision -> [mfu, tokens/s/GPU]
     "dgx-h100|Llama-3-70B|fp8": [0.4213, 1731.9],
     "dgx-h100|DeepSeek-V3|bf16": [0.2775, 943.7],
     "dgx-h100|DeepSeek-V3|fp8": [0.1997, 1358.9],
-    "dgx-b200|Llama-3-70B|bf16": [0.4196, 1960.9],
+    "dgx-b200|Llama-3-70B|bf16": [0.3954, 1847.7],
     "dgx-b200|Llama-3-70B|fp8": [0.389, 3636.1],
-    "dgx-b200|DeepSeek-V3|bf16": [0.1941, 1501.7],
-    "dgx-b200|DeepSeek-V3|fp8": [0.1492, 2309.1],
-    "dgx-b300|Llama-3-70B|bf16": [0.4201, 1963.2],
-    "dgx-b300|Llama-3-70B|fp8": [0.3898, 3643.9],
-    "dgx-b300|DeepSeek-V3|bf16": [0.2246, 1737.5],
-    "dgx-b300|DeepSeek-V3|fp8": [0.1871, 2895.3],
+    "dgx-b200|DeepSeek-V3|bf16": [0.1697, 1312.6],
+    "dgx-b200|DeepSeek-V3|fp8": [0.1388, 2148.1],
+    "dgx-b300|Llama-3-70B|bf16": [0.445, 2079.8],
+    "dgx-b300|Llama-3-70B|fp8": [0.4375, 4089.3],
+    "dgx-b300|DeepSeek-V3|bf16": [0.2138, 1654.1],
+    "dgx-b300|DeepSeek-V3|fp8": [0.1876, 2902.0],
     "dgx-a100-40g|Llama-3-70B|bf16": [0.4506, 292.0],
     "dgx-a100-40g|Llama-3-70B|fp8": [0.4506, 292.0],
     "dgx-a100-40g|DeepSeek-V3|bf16": [0.2381, 255.5],
@@ -141,18 +144,18 @@ PIN_CASES = {  # id: (model, run_estimate config)
 
 PIN_RESULTS = {  # id: [gpus, tp, pp, ep, zero, mbs, nodes, mfu, tokens/s, days, cost_usd, fits]
     "llama8b-p5en-8": [8, 1, 1, 1, 1, 1, 1, 0.573, 88077, 292.0, 981180.0, True],
-    "llama70b-b200-64": [64, 1, 4, 1, 1, 1, 8, 0.4378, 140247, 183.4, 6338023.0, True],
-    "llama70b-b300-128": [128, 1, 4, 1, 1, 1, 16, 0.4328, 277281, 92.8, 8904805.0, True],
+    "llama70b-b200-64": [64, 1, 4, 1, 1, 1, 8, 0.4121, 132017, 194.8, 6733131.0, True],
+    "llama70b-b300-128": [128, 1, 4, 1, 1, 1, 16, 0.4589, 294028, 87.5, 8397614.0, True],
     "qwen30b-p5en-64": [64, 1, 2, 1, 1, 1, 8, 0.3201, 726242, 35.4, 951966.0, True],
-    "dsv3-b200-256": [256, 2, 16, 1, 1, 1, 32, 0.2902, 707848, 36.3, 5023045.0, True],
+    "dsv3-b200-256": [256, 2, 16, 1, 1, 1, 32, 0.241, 587843, 43.8, 6048469.0, True],
     "param2-p5en-64": [64, 1, 1, 1, 1, 1, 8, 0.3866, 1402960, 18.3, 492785.0, True],
-    "glm-b200-64": [64, 1, 16, 1, 1, 1, 8, 0.3075, 377660, 68.1, 2353671.0, True],
-    "glm-b300-auto30": [256, 2, 8, 1, 1, 1, 32, 0.2993, 1470710, 17.5, 3357745.0, True],
-    "qwen8b-b300-auto": [64, 1, 1, 1, 1, 1, 8, 0.4428, 1232157, 20.9, 1001956.0, True],
-    "llama8b-b300-12": [12, 1, 1, 1, 1, 8, 2, 0.443, 232371, 110.7, 1328228.0, True],
+    "glm-b200-64": [64, 1, 16, 1, 1, 1, 8, 0.2565, 315077, 81.6, 2821176.0, True],
+    "glm-b300-auto30": [256, 2, 8, 1, 1, 1, 32, 0.2816, 1383398, 18.6, 3569668.0, True],
+    "qwen8b-b300-auto": [64, 1, 1, 1, 1, 1, 8, 0.4696, 1306561, 19.7, 944898.0, True],
+    "llama8b-b300-12": [12, 1, 1, 1, 1, 8, 2, 0.4697, 246407, 104.4, 1252568.0, True],
 }
 
-PIN_TRIED = {"glm-b300-auto30": [[8, True, 585.0], [16, True, 281.4], [32, True, 135.2], [64, True, 68.1], [128, True, 34.5], [256, True, 17.5]], "qwen8b-b300-auto": [[8, True, 166.9], [16, True, 83.5], [32, True, 41.7], [64, True, 20.9]]}
+PIN_TRIED = {"glm-b300-auto30": [[8, True, 619.3], [16, True, 298.6], [32, True, 143.9], [64, True, 72.5], [128, True, 36.7], [256, True, 18.6]], "qwen8b-b300-auto": [[8, True, 157.4], [16, True, 78.7], [32, True, 39.4], [64, True, 19.7]]}
 
 LLAMA70B_PLAN = dict(num_gpus=64, tp=2, pp=4, cp=1, vp=5, ep=1, mbs=1, seq=8192, gbs=128)
 DSV3_PLAN = dict(num_gpus=256, tp=1, pp=8, cp=1, vp=2, ep=32, etp=1, mbs=1, seq=4096, gbs=2048,
@@ -160,7 +163,8 @@ DSV3_PLAN = dict(num_gpus=256, tp=1, pp=8, cp=1, vp=2, ep=32, etp=1, mbs=1, seq=
 
 
 class PinnedExistingHardware(unittest.TestCase):
-    """p5, p5e, p5en, B200, B300, A100 and the validation systems give the numbers they gave on main."""
+    """p5, p5e, p5en, A100 and the Hopper validation systems give the numbers they gave on main; B200 and B300 give the mfu-model-5
+    numbers (re-pinned once, for the B300 refit)."""
 
     def test_mfu_model_estimates_are_unchanged(self):
         shapes = {m: mm.model_shape(vr.ARCH[m]) for m in ("Llama-3-70B", "DeepSeek-V3")}
@@ -470,7 +474,8 @@ class Gb200Validation(unittest.TestCase):
 
     # Rows above the 30% bar, and why (docs/CALCULATOR-MFU.md, section 7a). Bounds pin them so they cannot drift unseen.
     EXPLAINED = {
-        "nemo-gb200-deepseek-v3": 85.0,   # NeMo 25.07 software; NeMo 26.08.01 runs this model on the same GPUs 2.1x faster
+        "nemo-gb200-deepseek-v3": 70.0,   # NeMo 25.07 software; NeMo 26.08.01 runs this model on the same GPUs 2.1x faster
+                                          # (82.3% in mfu-model-4, 64.7% since the Blackwell MoE half width of mfu-model-5)
         "nemo-gb200-llama4-maverick": 40.0,  # dispatcher and layout not recorded (unverified)
     }
 
@@ -487,9 +492,9 @@ class Gb200Validation(unittest.TestCase):
         self.assertEqual({r["hardware"] for r in vr.RACK_RUNS}, {"dgx-gb200"})
         self.assertTrue(all(r["source"] == vr.NEMO_2507 and r["precision"] == "fp8" for r in vr.RACK_RUNS))
 
-    def test_the_existing_38_run_summary_is_untouched(self):
+    def test_the_38_run_summary_is_the_mfu_model_5_one(self):
         s = vr.summary(vr.evaluate())
-        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.0, 38.2))
         self.assertEqual((s["hold_out"]["runs"], s["hold_out"]["median_abs_error_pct"]), (23, 7.4))
         self.assertEqual(len(vr.RUNS), 40)  # 38 scored + 2 superseded
 
@@ -707,8 +712,8 @@ class Gb300Validation(unittest.TestCase):
 
     def test_ratio_error_after_the_power_term_meets_the_bar(self):
         g = self.groups
-        # bar: 15% typical, 30% worst. Pinned numbers: hold-out median 3.8%, worst 7.1%.
-        self.assertEqual((g["hold_out"]["pairs"], g["hold_out"]["median_abs_error_pct"], g["hold_out"]["max_abs_error_pct"]), (10, 3.8, 7.1))
+        # bar: 15% typical, 30% worst. Pinned numbers: hold-out median 3.8%, worst 7.8% (7.1% before the Blackwell MoE half width).
+        self.assertEqual((g["hold_out"]["pairs"], g["hold_out"]["median_abs_error_pct"], g["hold_out"]["max_abs_error_pct"]), (10, 3.8, 7.8))
         self.assertEqual((g["fit"]["median_abs_error_pct"], g["fit"]["max_abs_error_pct"]), (2.1, 3.1))
         for r in self.rows:
             self.assertLessEqual(abs(r["ratio_error_pct"]), 30.0, r)
@@ -732,9 +737,10 @@ class Gb300Validation(unittest.TestCase):
         self.assertEqual(mm.TGP_EXPONENT, 1.25)
         self.assertEqual(vr.fit()["tgp_exponent"], mm.TGP_EXPONENT)
 
-    def test_the_term_is_board_power_and_only_on_gb300(self):
-        gb300 = [k for k, hw in mm.HARDWARE.items() if hw.get("tgp_ref_w")]
-        self.assertEqual(sorted(gb300), ["dgx-gb300", "p6e-gb300-ultraserver"])
+    def test_the_term_is_board_power_on_gb300_and_b300(self):
+        powered = [k for k, hw in mm.HARDWARE.items() if hw.get("tgp_ref_w")]
+        self.assertEqual(sorted(powered), ["dgx-b300", "dgx-gb300", "p6-b300.48xlarge", "p6e-gb300-ultraserver"])
+        gb300 = [k for k in powered if "gb300" in k]
         for k in gb300:  # NVIDIA Blackwell Ultra table: up to 1,400 W against up to 1,200 W at the same 5 PF dense FP8
             self.assertEqual((mm.HARDWARE[k]["tgp_w"], mm.HARDWARE[k]["tgp_ref_w"]), (1400.0, 1200.0))
             self.assertEqual(mm.HARDWARE[k]["fp8"], mm.HARDWARE["u-p6e-gb200x72"]["fp8"])
@@ -763,28 +769,19 @@ class Gb300Validation(unittest.TestCase):
         keys = ("tp", "pp", "cp", "vp", "ep", "mbs", "gbs", "seq")
         self.assertEqual({k: p["gb300"]["plan"][k] for k in keys}, {k: p["gb200"]["plan"][k] for k in keys})
 
-    def test_b300_hgx_check_the_term_would_be_right_but_it_is_not_applied(self):
-        off, on = vr.evaluate_b300_pairs(False), vr.evaluate_b300_pairs(True)
+    def test_b300_hgx_check_the_term_is_applied_and_right(self):
+        off, on = vr.evaluate_b300_pairs(False), vr.evaluate_b300_pairs()
         self.assertEqual(len(off), 3)
         self.assertGreater(vr.pair_summary(off)["median_abs_error_pct"], 10)   # ratio predicted 1.0, published 1.11-1.13
         self.assertLessEqual(vr.pair_summary(on)["max_abs_error_pct"], 3.0)    # with 1,100 W / 1,000 W: within 3%
-        self.assertNotIn("tgp_ref_w", mm.HARDWARE["dgx-b300"])                  # shipped: not applied
-        self.assertNotIn("tgp_ref_w", mm.HARDWARE["p6-b300.48xlarge"])
-        self.assertNotIn("tgp_ref_w", mm.HARDWARE["dgx-b300"])                  # evaluate_b300_pairs restored it
+        self.assertEqual(mm.HARDWARE["dgx-b300"]["tgp_ref_w"], 1000.0)          # evaluate_b300_pairs(False) restored it
 
-    def test_existing_b300_rows_do_not_move(self):
-        by = {r["id"]: r["error_pct"] for r in vr.evaluate()}
-        self.assertEqual({k: by[k] for k in ("repo-qwen3-8b-bf16-b300", "mb2604-b300-dsv3", "mb2604-b300-qwen3-30b",
-                                             "mb2604-b300-qwen3-235b", "repo-kimi-k2-b300-32n", "repo-dsv3-b300-32n")},
-                         {"repo-qwen3-8b-bf16-b300": -5.0, "mb2604-b300-dsv3": 7.4, "mb2604-b300-qwen3-30b": 1.6,
-                          "mb2604-b300-qwen3-235b": -1.2, "repo-kimi-k2-b300-32n": 19.0, "repo-dsv3-b300-32n": 18.7})
-
-    def test_the_existing_summaries_are_untouched(self):
+    def test_the_summaries_are_the_mfu_model_5_ones(self):
         s = vr.summary(vr.evaluate())
-        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
-        self.assertEqual((s["hold_out"]["median_abs_error_pct"], s["fit"]["median_abs_error_pct"]), (7.4, 5.8))
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.0, 38.2))
+        self.assertEqual((s["hold_out"]["median_abs_error_pct"], s["fit"]["median_abs_error_pct"]), (7.4, 5.7))
         self.assertEqual(vr.rack_summary(vr.evaluate(vr.RACK_RUNS)),
-                         {"runs": 8, "median_abs_error_pct": 10.4, "max_abs_error_pct": 82.3})
+                         {"runs": 8, "median_abs_error_pct": 8.9, "max_abs_error_pct": 64.7})
 
     def test_pinned_summary_is_current(self):
         v = mm.VALIDATION_SUMMARY
@@ -814,10 +811,144 @@ class Gb300PowerTermInTheResult(unittest.TestCase):
         self.assertGreater(ratio, 1.15)
         self.assertLess(ratio, 1.25)
 
+    def test_b300_has_it_against_the_b200(self):
+        r = run("Llama-3.1-8B", hardware="B300", num_gpus=8, total_tokens_b=100)
+        self.assertEqual(r["mfu_breakdown"]["power_gain"], round((1100 / 1000) ** 1.25, 4))
+
     def test_no_other_hardware_has_it(self):
-        for hw in ("B200", "B300", "H200", "H100", "A100", "GB200"):
+        for hw in ("B200", "H200", "H100", "A100", "GB200"):
             r = run("Llama-3.1-8B", hardware=hw, num_gpus=8, total_tokens_b=100)
             self.assertNotIn("power_gain", r["mfu_breakdown"], hw)
+
+
+class B300PowerRefit(unittest.TestCase):
+    """mfu-model-5: the board-power term on HGX B300 (1,100 W against 1,000 W) with a joint refit of the Blackwell constants.
+    Every test here fails on main d6051e2 (no term on the B300, VP 1 on our B300 MoE rows, no Blackwell MoE half width)."""
+
+    # Rows that move more than 2 points: mfu-model-4 error -> mfu-model-5 error (percent). docs/CALCULATOR-HARDWARE.md 6a.
+    MOVED = {
+        "repo-llama70b-bf16-b200": (5.3, -0.7), "repo-qwen3-8b-bf16-b300": (-5.0, 0.7), "nemo-b200-mixtral-8x7b": (2.0, -1.4),
+        "mb2604-b200-dsv3": (-30.8, -35.6), "mb2604-b200-qwen3-30b": (15.0, -3.6), "mb2604-b300-qwen3-30b": (1.6, -5.9),
+        "mb2604-b200-qwen3-235b": (58.9, 38.2), "mb2604-b300-qwen3-235b": (-1.2, -4.6),
+        "repo-kimi-k2-b300-32n": (19.0, 26.3), "repo-dsv3-b300-32n": (18.7, 29.9), "nemo-b200-deepseek-v3": (136.3, 113.0),
+    }
+    RACK_MOVED = {"nemo-gb200-llama4-scout": (7.2, 4.5), "nemo-gb200-mixtral-8x7b": (7.4, 3.8), "nemo-gb200-deepseek-v3": (82.3, 64.7)}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.after = {r["id"]: r for r in vr.evaluate()}
+        cls.rack_after = {r["id"]: r for r in vr.evaluate(vr.RACK_RUNS)}
+        with getattr(vr, "mfu_model_4", contextlib.nullcontext)():  # (nullcontext on main, so each test fails on its own)
+            cls.before = {r["id"]: r for r in vr.evaluate()}
+            cls.rack_before = {r["id"]: r for r in vr.evaluate(vr.RACK_RUNS)}
+            cls.pairs_before = vr.evaluate_pairs(vr.ALL_GB300_PAIRS)
+
+    def test_b300_systems_carry_the_board_power_against_the_b200(self):
+        for key in ("p6-b300.48xlarge", "dgx-b300"):  # NVIDIA HGX B200 datasheet 1,000 W; B300 1,100 W (mfu_model.HARDWARE comment)
+            hw = mm.HARDWARE[key]
+            self.assertEqual((hw["tgp_w"], hw["tgp_ref_w"], hw["fp8"], hw["bf16"]), (1100.0, 1000.0, 4500.0, 2250.0), key)
+        for key in ("p6-b200.48xlarge", "dgx-b200"):
+            self.assertNotIn("tgp_ref_w", mm.HARDWARE[key], key)
+        shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
+        a = mm.estimate(shape, mm.HARDWARE["p6-b200.48xlarge"], LLAMA70B_PLAN, "bf16")
+        b = mm.estimate(shape, mm.HARDWARE["p6-b300.48xlarge"], LLAMA70B_PLAN, "bf16")
+        self.assertEqual(b["tgp_gain"], round(1.1 ** 1.25, 4))
+        self.assertAlmostEqual(b["tokens_per_second"] / a["tokens_per_second"], 1.1 ** 1.25, delta=0.015)  # B300's 2x EFA adds a little
+        self.assertEqual(mm.MODEL_VERSION, "mfu-model-5")
+
+    def test_b300_vs_b200_published_ratios_within_5_percent(self):
+        rows = vr.evaluate_b300_pairs()
+        for r in rows:
+            self.assertLessEqual(abs(r["ratio_error_pct"]), 5.0, r)
+            self.assertGreater(r["predicted_ratio"], 1.09, r)
+        s = vr.pair_summary(rows)
+        self.assertEqual((s["pairs"], s["median_abs_error_pct"], s["max_abs_error_pct"]), (3, 0.2, 2.3))
+        v = mm.VALIDATION_SUMMARY
+        self.assertEqual((v["b300_pairs"], v["b300_pair_median_abs_error_pct"], v["b300_pair_max_abs_error_pct"]), (3, 0.2, 2.3))
+        self.assertFalse(any(p["fit"] for p in vr.B300_PAIRS))  # a hold-out: TGP_EXPONENT comes from the GB300 fit pairs
+
+    def test_constants_are_the_joint_refit(self):
+        f = vr.fit()
+        self.assertEqual(f["base_efficiency"]["blackwell/bf16"], 0.417)  # 0.443 before: its B300 fit row now carries the term
+        self.assertEqual(mm.BASE_EFFICIENCY[("blackwell", "bf16")], 0.417)
+        for key in ("hopper/bf16", "hopper/fp8", "blackwell/fp8", "ampere/bf16"):
+            self.assertEqual(f["base_efficiency"][key], {"hopper/bf16": 0.573, "hopper/fp8": 0.45, "blackwell/fp8": 0.417,
+                                                         "ampere/bf16": 0.471}[key], key)  # unchanged
+        self.assertEqual(f["moe_expert_half_ffn_family"], {"blackwell": 1664})
+        self.assertEqual(mm.MOE_EXPERT_HALF_FFN_FAMILY, f["moe_expert_half_ffn_family"])
+        self.assertEqual((f["moe_expert_factor"], f["moe_expert_half_ffn"], f["overlap_ep"], f["tgp_exponent"]), (0.78, 1024, 0.3, 1.25))
+        self.assertEqual(mm.moe_expert_factor(2048, "hopper"), mm.moe_expert_factor(2048))
+        self.assertLess(mm.moe_expert_factor(2048, "blackwell"), mm.moe_expert_factor(2048, "hopper"))
+
+    def test_shared_moe_constants_are_the_mfu_model_4_fit(self):
+        with vr.mfu_model_4():
+            self.assertEqual(vr.fit_moe_shared(), {"moe_expert_factor": 0.78, "moe_expert_half_ffn": 1024, "overlap_ep": 0.3})
+        # rerun on the new model (Blackwell half width 1664 in place) the same grid would move the shared half width to 768,
+        # which is the joint alternative: not taken (next test)
+        self.assertEqual(vr.fit_moe_shared(), {"moe_expert_factor": 0.78, "moe_expert_half_ffn": 768, "overlap_ep": 0.3})
+
+    def test_the_joint_alternative_is_worse_on_the_hold_out_and_moves_hopper(self):
+        joint = vr.fit_moe_joint()
+        self.assertEqual(joint, {"moe_expert_factor": 0.79, "moe_expert_half_ffn": 768, "overlap_ep": 0.3, "blackwell_moe_half_ffn": 1728})
+        shipped = vr.summary(list(self.after.values()))
+        with vr.moe_constants(**joint):
+            alt_rows = vr.evaluate()
+        alt = vr.summary(alt_rows)
+        self.assertLess(alt["fit"]["median_abs_error_pct"], shipped["fit"]["median_abs_error_pct"])           # better in-sample
+        self.assertGreater(alt["hold_out"]["median_abs_error_pct"], shipped["hold_out"]["median_abs_error_pct"])  # worse on hold-out
+        moved = [r["id"] for r in alt_rows if "p5en" in r["id"] and r["error_pct"] != self.after[r["id"]]["error_pct"]]
+        self.assertEqual(moved, ["repo-qwen3-30b-a3b-bf16-p5en"])  # a Hopper (p5en) MoE answer would move
+
+    def test_hopper_and_ampere_rows_do_not_move(self):
+        for rid, r in self.after.items():
+            if mm.HARDWARE[r["hardware"]]["family"] in ("hopper", "ampere"):
+                self.assertEqual(r["error_pct"], self.before[rid]["error_pct"], rid)
+
+    def test_rows_that_move_more_than_2_points(self):
+        moved = {k: (self.before[k]["error_pct"], self.after[k]["error_pct"]) for k in self.after
+                 if abs(self.after[k]["error_pct"] - self.before[k]["error_pct"]) > 2}
+        self.assertEqual(moved, self.MOVED)
+        rack = {k: (self.rack_before[k]["error_pct"], self.rack_after[k]["error_pct"]) for k in self.rack_after
+                if abs(self.rack_after[k]["error_pct"] - self.rack_before[k]["error_pct"]) > 2}
+        self.assertEqual(rack, self.RACK_MOVED)
+        pairs = {r["id"]: r["ratio_error_pct"] for r in vr.evaluate_pairs(vr.ALL_GB300_PAIRS)}
+        for r in self.pairs_before:  # GB300 / GB200 ratios: both sides Blackwell, no pair moves more than 1 point
+            self.assertLessEqual(abs(pairs[r["id"]] - r["ratio_error_pct"]), 1.0, r["id"])
+
+    def test_targets(self):
+        s = vr.summary(list(self.after.values()))
+        self.assertLessEqual(abs(s["all"]["median_abs_error_pct"] - 6.1), 1.0)   # within about 1 point of mfu-model-4
+        new_over_30 = [k for k, r in self.after.items() if not r["superseded"] and abs(r["error_pct"]) > 30
+                       and abs(self.before[k]["error_pct"]) <= 30]
+        self.assertEqual(new_over_30, [])
+        g = vr.pair_groups(vr.evaluate_pairs(vr.ALL_GB300_PAIRS))
+        self.assertLess(g["hold_out"]["median_abs_error_pct"], 15)
+        for rid in ("repo-qwen3-8b-bf16-b300",):            # our dense p6-b300 row: within 15% (0.7%)
+            self.assertLessEqual(abs(self.after[rid]["error_pct"]), 15, rid)
+
+    def test_our_b300_moe_rows_record_the_bench_plan(self):
+        """VP 2 and no recompute: the overlap-on bench sets them (awsome-distributed-ai megatron-bridge bench scripts)."""
+        by = {r["id"]: r for r in vr.RUNS}
+        for rid in vr.VP2_CORRECTED:
+            plan = by[rid]["plan"]
+            self.assertEqual((plan["tp"], plan["pp"], plan["vp"], plan["ep"], plan["mbs"], plan["gbs"]), (8, 8, 2, 32, 4, 256), rid)
+            self.assertNotIn("recompute", plan, rid)
+            self.assertIn("VPP", by[rid]["note"], rid)
+            self.assertFalse(by[rid]["fit"], rid)
+
+    def test_our_b300_moe_rows_are_high_because_of_the_efa_all_to_all(self):
+        """The same bench with overlap off: swapping only the dispatcher (NCCL alltoall -> DeepEP) moves the step by 3.3 to 3.5 s, so
+        the EP all-to-all over EFA costs seconds a step; the model's whole EP time is 0.5 s (DeepSeek-V3) and 1.0 s (Kimi-K2), and
+        its overlap-off step is 1.6 to 2.4 s shorter than the measured DeepEP step."""
+        measured = {"repo-dsv3-b300-32n": (6.263, 9.774), "repo-kimi-k2-b300-32n": (6.041, 9.303)}  # deepep, alltoall (s/step)
+        by = {r["id"]: r for r in vr.RUNS}
+        for rid, (deepep, alltoall) in measured.items():
+            r = json.loads(json.dumps(by[rid]))
+            r["plan"].update(vp=1, a2a_overlap=False, overlap_ep=0.0,
+                             recompute=["core_attn", "mla_up_proj", "mlp", "moe", "layernorm"])  # overlap off: full recompute, VPP 1
+            t = vr.predict(r)[1]["time_s"]
+            self.assertLess(t["ep_total"], (alltoall - deepep) / 3, rid)
+            self.assertLess(t["step"], deepep - 1.5, rid)
 
 
 if __name__ == "__main__":
