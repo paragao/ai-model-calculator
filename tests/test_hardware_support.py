@@ -368,7 +368,7 @@ class Gb200Reachable(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 p9.normalise_hardware(bad)
 
-    def test_gb300_up_to_72_gpus_is_sized_with_unknowns_listed(self):
+    def test_gb300_72_gpus_is_sized_with_unknowns_and_user_figures_listed(self):
         r = run("Llama-3.1-70B", hardware="GB300", num_gpus=72, total_tokens_b=2000)
         self.assertNotIn("error", r, r)
         self.assertTrue(r["fits_in_memory"])
@@ -376,8 +376,10 @@ class Gb200Reachable(unittest.TestCase):
         self.assertEqual((h["gpu"], h["domain_gpus"], h["billing_gpus"], h["billed_units"]), ("GB300 279GB", 72, 72, 1))
         self.assertEqual(r["memory_breakdown"]["gpu_capacity_gb"], 279)
         unknown = " ".join(h["unknowns"]).lower()
-        self.assertIn("efa bandwidth", unknown)
         self.assertIn("price", unknown)
+        self.assertNotIn("efa", unknown)
+        self.assertIn("paragao, 2026-11-17", " ".join(h["user_provided"]))
+        self.assertEqual(h["network_gb_s_per_gpu"], 100.0)
         self.assertIs(c["price_known"], False)
         self.assertIsNone(c["total_cost_usd"])
         self.assertEqual(r["mfu_breakdown"]["base_efficiency_key"], "blackwell/bf16")
@@ -386,22 +388,31 @@ class Gb200Reachable(unittest.TestCase):
         r = run("Llama-3.1-8B", hardware="GB200", num_gpus=8, total_tokens_b=100)
         self.assertNotIn("unknowns", r["hardware"])
 
-    def test_gb300_beyond_one_ultraserver_is_refused_because_the_network_is_unknown(self):
-        r = run("Llama-3.1-70B", hardware="GB300", num_gpus=128, total_tokens_b=2000)
-        self.assertIn("not published by AWS", r["error"])
-        self.assertIn("128 GPUs", r["error"])
-        self.assertNotIn("error", run("Llama-3.1-70B", hardware="GB200", num_gpus=128, total_tokens_b=2000))
+    def test_gb300_scales_out_by_whole_ultraservers(self):
+        for n, units in ((72, 1), (144, 2), (288, 4)):
+            r = run("Llama-3.1-70B", hardware="GB300", num_gpus=n, total_tokens_b=2000)
+            self.assertNotIn("error", r, (n, r))
+            self.assertEqual((r["parallelism"]["total_gpus"], r["parallelism"]["num_nodes"]), (n, units))
+            self.assertEqual(r["hardware"]["billed_units"], units)
+            self.assertTrue(r["fits_in_memory"])
 
-    def test_gb300_auto_search_stops_at_one_ultraserver_and_says_so(self):
+    def test_gb300_144_gpus_is_a_bit_slower_per_gpu_than_72(self):
+        """Same model and global batch rule at 72 and 144 GPUs: 144 uses the EFA between the two UltraServers."""
+        a = run("Llama-3.1-70B", hardware="GB300", num_gpus=72, total_tokens_b=2000)
+        b = run("Llama-3.1-70B", hardware="GB300", num_gpus=144, total_tokens_b=2000)
+        per_gpu = lambda r: r["training_time"]["tokens_per_second"] / r["parallelism"]["total_gpus"]  # noqa: E731
+        self.assertGreater(b["training_time"]["tokens_per_second"], 1.8 * a["training_time"]["tokens_per_second"])
+        self.assertLessEqual(per_gpu(b), per_gpu(a))
+        self.assertLess(b["training_time"]["training_days"], a["training_time"]["training_days"])
+
+    def test_gb300_auto_search_goes_past_one_ultraserver(self):
         r = run("Llama-3.1-70B", hardware="GB300", total_tokens_b=2000, num_gpus="auto", target_days=30)
         self.assertNotIn("error", r, r)
         counts = [t["num_gpus"] for t in r["gpu_count_search"]["tried"]]
-        self.assertEqual(counts, [4, 8, 16, 32, 64, 72])
-        self.assertIn("not met", r["gpu_count_search"]["note"])
-        self.assertIn("not published", r["gpu_count_search"]["note"])
-        r = run("Llama-3.1-8B", hardware="GB300", total_tokens_b=100, num_gpus="auto")
+        self.assertEqual(counts[:7], [4, 8, 16, 32, 64, 72, 128])
+        self.assertGreater(counts[-1], 72)
+        self.assertLessEqual(r["training_time"]["training_days"], 30)
         self.assertNotIn("note", r["gpu_count_search"])
-
     def test_cli_estimate_accepts_gb300(self):
         import subprocess
         out = subprocess.run([sys.executable, str(Path(__file__).parent.parent / "ai_model_calculator.py"), "--estimate",
@@ -544,13 +555,17 @@ class Gb300Hardware(unittest.TestCase):
 
     def test_unknowns_stay_unknown(self):
         g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
-        self.assertIsNone(g3["net"])  # AWS publishes no EFA bandwidth for P6e-GB300
+        self.assertEqual(g3["net"], 100.0)  # given by paragao, 2026-11-17: 18 servers x 8 x 400 Gbps / 72 GPUs
         text = " ".join(g3["unknowns"]).lower()
-        for word in ("efa", "price", "instance type names", "memory"):
+        for word in ("price", "instance type names", "memory"):
             self.assertIn(word, text)
+        self.assertNotIn("efa", text)  # no longer unknown
+        self.assertIn("paragao, 2026-11-17", " ".join(g3["user_provided"]))
         names = [k for k in mm.HARDWARE if "gb300" in k]
         self.assertEqual(sorted(names), ["dgx-gb300", "p6e-gb300-ultraserver"])  # no invented AWS instance names
         self.assertEqual(mm.HARDWARE["dgx-gb300"]["net"], 100.0)  # NVIDIA's own DGX: 800 Gb/s ConnectX-8 per GPU
+        for key, hw in mm.HARDWARE.items():
+            self.assertIsNotNone(hw["net"], key)
 
     def test_a_group_inside_one_domain_needs_no_network_number(self):
         g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
@@ -561,19 +576,107 @@ class Gb300Hardware(unittest.TestCase):
         e = mm.estimate(moe, g3, dict(num_gpus=64, tp=1, pp=1, cp=1, vp=1, ep=64, etp=1, mbs=1, seq=4096, gbs=512), "bf16")
         self.assertGreater(e["time_s"]["ep_total"], 0)  # all-to-all over NVLink only
 
-    def test_traffic_between_domains_is_refused_not_guessed(self):
+    def test_scales_out_by_whole_ultraservers(self):
         g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
         shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
-        with self.assertRaises(ValueError) as cm:
-            mm.estimate(shape, g3, dict(num_gpus=144, tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=288), "bf16")
-        self.assertIn("not published by AWS", str(cm.exception))
-        self.assertEqual(mm.auto_gpu_counts(g3, 72, 4096), [4, 8, 16, 32, 64, 72])  # the search stops at one UltraServer
+        e = mm.estimate(shape, g3, dict(num_gpus=144, tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=288), "bf16")
+        self.assertGreater(e["mfu"], 0.2)
+        self.assertEqual(mm.auto_gpu_counts(g3, 72, 600)[-3:], [288, 512, 576])  # the search is no longer capped at 72
 
     def test_hgx_and_gb200_networks_are_untouched(self):
         for key, hw in mm.HARDWARE.items():
             if "gb300" not in key:
                 self.assertIsNotNone(hw["net"], key)
         self.assertEqual(mm.auto_gpu_counts(mm.HARDWARE["u-p6e-gb200x72"], 72, 600)[-1], 576)
+
+
+class NvlinkInsideDomainEfaBetween(unittest.TestCase):
+    """GB200 x72 and GB300: inside one 72-GPU NVLink domain no EFA is used; EFA carries only traffic between UltraServers.
+    "EFA time" is measured by making the EFA 10^8 times slower and seeing which times move."""
+
+    HARDWARE = ("u-p6e-gb200x72", "p6e-gb300-ultraserver")
+    MOE288 = {**vr.ARCH["DeepSeek-V3"], "n_routed_experts": 288, "n_group": 1, "topk_group": 1}  # 288 experts, as GLM-5.3-Flash
+    DENSE = dict(tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, zero=3)  # TP on NVLink, ZeRO-3 gathers across the whole DP group
+
+    @staticmethod
+    def slow(hw):
+        return {**hw, "net": 1e-6}
+
+    def times(self, hw, shape, n, **plan):
+        return mm.estimate(shape, hw, dict(num_gpus=n, gbs=2 * n, **plan), "fp8")["time_s"]
+
+    def moe_plan(self, n):
+        return dict(tp=1, pp=1, cp=1, vp=1, ep=n, etp=1, mbs=1, seq=4096)
+
+    def test_the_two_systems_share_the_network_numbers(self):
+        for key in self.HARDWARE:
+            hw = mm.HARDWARE[key]
+            self.assertEqual((hw["net"], hw["nvlink"], hw["domain_gpus"], hw["instance_gpus"]), (100.0, 900.0, 72, 4), key)
+
+    def test_72_gpus_all_comm_on_nvlink_zero_efa_time(self):
+        dense, moe = mm.model_shape(vr.ARCH["Llama-3-70B"]), mm.model_shape(self.MOE288)
+        for key in self.HARDWARE:
+            hw = mm.HARDWARE[key]
+            cases = [(dense, 72, dict(self.DENSE)),                                    # TP 2 x DP 36, ZeRO-3
+                     (dense, 72, dict(tp=2, pp=4, cp=1, vp=1, ep=1, mbs=1, seq=4096)),  # TP 2 x PP 4 x DP 9
+                     (moe, 72, self.moe_plan(72))]                                      # EP 72: all-to-all inside the domain
+            for shape, n, plan in cases:
+                real, slow = self.times(hw, shape, n, **plan), self.times(self.slow(hw), shape, n, **plan)
+                self.assertEqual(real, slow, (key, plan))  # nothing depends on the EFA
+            t = self.times(hw, dense, 72, **self.DENSE)
+            self.assertGreater(t["tp_total"], 0)
+            self.assertGreater(t["dp_total"], 0)   # ZeRO-3 gathers, over NVLink
+            t = self.times(hw, moe, 72, **self.moe_plan(72))
+            self.assertGreater(t["ep_total"], 0)   # all-to-all, over NVLink
+
+    def test_72_gpus_group_bandwidth_is_nvlink(self):
+        nvlink = 900.0 * mm.LINK_EFFICIENCY["nvlink"] * 1e9
+        for key in self.HARDWARE:
+            hw = mm.HARDWARE[key]
+            for inner, group in ((1, 72), (2, 36), (8, 9), (1, 4)):
+                self.assertEqual(mm._span_bw(hw, inner, group), nvlink, (key, inner, group))
+
+    def test_144_gpus_efa_only_for_the_groups_that_span_both_ultraservers(self):
+        dense, moe = mm.model_shape(vr.ARCH["Llama-3-70B"]), mm.model_shape(self.MOE288)
+        for key in self.HARDWARE:
+            hw = mm.HARDWARE[key]
+            # (a) TP 2 stays inside a server: its time does not move with the EFA
+            real = self.times(hw, dense, 144, **self.DENSE)
+            slow = self.times(self.slow(hw), dense, 144, **self.DENSE)
+            self.assertEqual(real["tp_total"], slow["tp_total"], key)
+            # (b) the ZeRO-3 / DP group of 72 x 2 ranks spans both UltraServers: it uses the EFA
+            self.assertGreater(slow["dp_total"], 100 * real["dp_total"], key)
+            # (c) EP 144 spans both: the off-domain half of the all-to-all goes over EFA, and the EFA is what limits it
+            real = self.times(hw, moe, 144, **self.moe_plan(144))
+            slow = self.times(self.slow(hw), moe, 144, **self.moe_plan(144))
+            fast = self.times({**hw, "net": 1e6}, moe, 144, **self.moe_plan(144))
+            self.assertGreater(real["ep_total"], 0, key)
+            self.assertGreater(slow["ep_total"], 100 * real["ep_total"], key)
+            self.assertGreater(real["ep_total"], fast["ep_total"], key)
+            # (d) EP 72 on the same 144 GPUs (one group per UltraServer) stays on NVLink
+            ep72 = dict(self.moe_plan(72))
+            real = self.times(hw, moe, 144, **ep72)
+            slow = self.times(self.slow(hw), moe, 144, **ep72)
+            self.assertEqual(real["ep_total"], slow["ep_total"], key)
+
+    def test_144_gpus_group_bandwidth(self):
+        nvlink = 900.0 * mm.LINK_EFFICIENCY["nvlink"] * 1e9
+        for key in self.HARDWARE:
+            hw = mm.HARDWARE[key]
+            # one rank per UltraServer: its single 100 GB/s adapter set, x 0.8 link efficiency
+            self.assertEqual(mm._span_bw(hw, 72, 2), 100.0 * mm.LINK_EFFICIENCY["net"] * 1e9)
+            # 72 ranks per UltraServer share 72 x 100 GB/s of EFA: more than NVLink, so NVLink is the limit
+            self.assertEqual(mm._span_bw(hw, 1, 144), nvlink)
+            # 4 ranks per UltraServer: 4 x 80 GB/s of EFA is the limit
+            self.assertEqual(mm._span_bw(hw, 18, 8), 4 * 100.0 * mm.LINK_EFFICIENCY["net"] * 1e9)
+
+    def test_gb200_and_gb300_give_the_same_comm_times(self):
+        dense, moe = mm.model_shape(vr.ARCH["Llama-3-70B"]), mm.model_shape(self.MOE288)
+        for n in (72, 144):
+            for shape, plan in ((dense, self.DENSE), (moe, self.moe_plan(n))):
+                a = self.times(mm.HARDWARE["u-p6e-gb200x72"], shape, n, **plan)
+                b = self.times(mm.HARDWARE["p6e-gb300-ultraserver"], shape, n, **plan)
+                self.assertEqual(a, b, (n, plan))  # same compute peak, same links
 
 
 class Gb300Validation(unittest.TestCase):

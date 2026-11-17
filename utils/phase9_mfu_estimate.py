@@ -66,8 +66,8 @@ INSTANCE_SPECS = {
     "u-p6e-gb200x72": {"mem_gb": 185, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
-    # per-GPU figure. EFA bandwidth: not published, None (see mfu_model.HARDWARE).
-    "p6e-gb300-ultraserver": {"mem_gb": 279, "inter_node_bw_gb": None, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    # per-GPU figure. EFA 100 GB/s per GPU x 72 = 7,200 GB/s per UltraServer (paragao, 2026-11-17; see mfu_model.HARDWARE).
+    "p6e-gb300-ultraserver": {"mem_gb": 279, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
 }
 # On-demand USD per instance-hour (an estimate, not a quote).
 INSTANCE_COST_PER_HOUR = {
@@ -96,7 +96,8 @@ def unit_fields(mm_hw, num_nodes):
     return {"domain_gpus": mm.domain_gpus(mm_hw), "instance_gpus": mm.instance_gpus(mm_hw),
             "billing_gpus": mm.billing_gpus(mm_hw), "billed_units": num_nodes,
             "billing_unit": f"UltraServer ({mm.billing_gpus(mm_hw)} GPUs)",
-            **({"unknowns": list(mm_hw["unknowns"])} if mm_hw.get("unknowns") else {})}
+            **({"unknowns": list(mm_hw["unknowns"])} if mm_hw.get("unknowns") else {}),
+            **({"user_provided": list(mm_hw["user_provided"])} if mm_hw.get("user_provided") else {})}
 
 
 def normalise_hardware(value):
@@ -273,10 +274,6 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     }
     shape = variant.get("_shape") or shape_from_preset(variant, saved_vocab)
     mm_hw = mm.HARDWARE.get(hardware_type) or mm.HARDWARE["p5.48xlarge"]
-    if mm_hw.get("net") is None and num_gpus > mm.domain_gpus(mm_hw):
-        pc.VOCAB = saved_vocab
-        return {"error": mm.NET_UNKNOWN.format(gpu=mm_hw["gpu"]) + f" Asked for {num_gpus} GPUs; one UltraServer has "
-                         f"{mm.domain_gpus(mm_hw)}."}
     given_mfu = config.get("mfu")  # explicit override only; otherwise MFU is estimated
 
     def memory_for(try_tp, try_pp, try_ep, zero=None):
@@ -542,10 +539,6 @@ def run_estimate(config, variant):
                      + (f" and trains in <= {target_days} days" if target_days else " in memory"),
             "tried": tried,
         }
-        if mm_hw.get("net") is None and target_days and result["training_time"]["training_days"] > float(target_days):
-            result["gpu_count_search"]["note"] = (
-                f"Searched up to one {mm.domain_gpus(mm_hw)}-GPU UltraServer only: AWS has not published the network "
-                f"bandwidth per GPU of {mm_hw['gpu']}, so more GPUs cannot be timed. {target_days} days is not met there.")
         return result
     return estimate_training({**config, "num_gpus": int(num_gpus)}, variant)
 
