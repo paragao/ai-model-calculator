@@ -40,6 +40,9 @@ HARDWARE_ALIASES = {
     "p6e-gb200.36xlarge": "u-p6e-gb200x72", "gb200-nvl72": "u-p6e-gb200x72", "gb200x72": "u-p6e-gb200x72",
     "p6e-gb200-ultraserver": "u-p6e-gb200x72", "gb200-ultraserver": "u-p6e-gb200x72",
     "u-p6e-gb200x36": "u-p6e-gb200x36", "gb200x36": "u-p6e-gb200x36", "gb200-nvl36": "u-p6e-gb200x36",
+    # Trainium 1 (Trn1, Trn1n): AWS instance table https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html
+    "trn1.32xlarge": "trn1.32xlarge", "trn1": "trn1.32xlarge", "trainium1": "trn1.32xlarge",
+    "trn1n.32xlarge": "trn1n.32xlarge", "trn1n": "trn1n.32xlarge",
     # GB300: AWS has published no instance type names. The calculator's own label is the UltraServer (72 GPUs).
     "p6e-gb300-ultraserver": "p6e-gb300-ultraserver", "gb300": "p6e-gb300-ultraserver", "p6e-gb300": "p6e-gb300-ultraserver",
     "gb300-nvl72": "p6e-gb300-ultraserver", "gb300-ultraserver": "p6e-gb300-ultraserver",
@@ -50,7 +53,36 @@ GPU_OF_INSTANCE = {
     "p4d.24xlarge": "A100 40GB", "p4de.24xlarge": "A100 80GB",
     "u-p6e-gb200x72": "GB200 185GB", "u-p6e-gb200x36": "GB200 185GB",
     "p6e-gb300-ultraserver": "GB300 279GB",
+    "trn1.32xlarge": "Trainium1 32GiB (16 chips)", "trn1n.32xlarge": "Trainium1 32GiB (16 chips)",
 }
+
+# Names that are a family, not one system: refused with the choices (never guessed).
+AMBIGUOUS_HARDWARE = {
+    "trainium": "Trainium is a family: trn1 (Trainium1), trn2 (Trainium2) or trn3 (Trainium3). Name one of them.",
+}
+
+# Trainium memory modes (Neuron SDK 2.24 recipes): the two published Trn1 rows use BF16 autocast with an FP32 optimizer, the mixed-precision
+# accounting of the reference memory model. "bf16_sr" is BF16 with stochastic rounding and no FP32 master copy (AWS blog on Llama 2 7B on
+# 128 trn1 nodes, https://aws.amazon.com/blogs/machine-learning/end-to-end-llm-training-on-instance-clusters-with-over-100-nodes-using-aws-trainium/):
+# weights 2 B, gradients 2 B, two BF16 Adam moments 4 B. The 2 + 4 bytes are an assumption (no Neuron page states the optimizer state size).
+NEURON_MEMORY_MODES = {
+    "bf16_fp32_optimizer": (None, None, "BF16 autocast with an FP32 optimizer (the mode of the published Neuron Trn1 rows)"),
+    "bf16_sr": (2, 4, "BF16 with stochastic rounding, no FP32 master copy (gradients 2 B, optimizer states 4 B: assumption)"),
+}
+FP8_TRAINIUM_ERROR = ("FP8 / MXFP8 training on Trainium is not sized: the Neuron SDK has only experimental MXFP8 kernels (2.30, 2.32) and no "
+                      "end-to-end FP8 pre-training recipe. Ask for BF16.")
+
+
+def trainium_gate(config):
+    """Error text when a Trainium request asks for what is not sized (FP8, unknown memory mode), else ''."""
+    if not mm.is_trainium(mm.HARDWARE.get(config.get("hardware"))):
+        return ""
+    if str(config.get("precision", "bf16")).lower() not in ("bf16", "bfloat16"):
+        return FP8_TRAINIUM_ERROR
+    mode = config.get("neuron_precision") or "bf16_fp32_optimizer"
+    if mode not in NEURON_MEMORY_MODES:
+        return f"Unknown neuron_precision '{mode}'. Supported: {', '.join(NEURON_MEMORY_MODES)}."
+    return ""
 # Memory and bandwidth per instance, in the units of configuration/hardware_config.py
 # (tests/test_mfu_model.py checks the shared entries against that file).
 INSTANCE_SPECS = {
@@ -63,6 +95,10 @@ INSTANCE_SPECS = {
     "p4de.24xlarge": {"mem_gb": 80, "inter_node_bw_gb": 100, "intra_node_bw_gbps": 600, "peak_tflops_bf16": 312},
     # GB200 UltraServer: memory per GPU from the instance table (4 x 185 GiB); EFA 100 GB/s per GPU
     # (3200 Gigabit / 4 GPUs), so 7,200 GB/s for 72 GPUs and 3,600 for 36. Sources: configuration/hardware_config.py.
+    # Trainium1: 16 GiB per NeuronCore (32 GiB chip / 2); EFA per instance 100 GB/s (trn1) and 200 GB/s (trn1n); NeuronLink 384 GB/s
+    # per chip; 95 BF16 TFLOPS per NeuronCore (190 per chip). Sources: mfu_model.HARDWARE.
+    "trn1.32xlarge": {"mem_gb": 16, "inter_node_bw_gb": 100, "intra_node_bw_gbps": 384, "peak_tflops_bf16": 95},
+    "trn1n.32xlarge": {"mem_gb": 16, "inter_node_bw_gb": 200, "intra_node_bw_gbps": 384, "peak_tflops_bf16": 95},
     "u-p6e-gb200x72": {"mem_gb": 185, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
@@ -74,6 +110,8 @@ INSTANCE_COST_PER_HOUR = {
     "p5.48xlarge": 98.32, "p5e.48xlarge": 98.32, "p5en.48xlarge": 140.00,
     "p6-b200.48xlarge": 180.00, "p6-b300.48xlarge": 250.00,
     "p4d.24xlarge": 32.77, "p4de.24xlarge": 40.97,
+    # AWS Trn1 page https://aws.amazon.com/ec2/instance-types/trn1/ (region not stated on the page)
+    "trn1.32xlarge": 21.50, "trn1n.32xlarge": 24.78,
 }
 # No public on-demand price: GB200 UltraServers are sold through EC2 Capacity Blocks for ML and the price is set at
 # purchase (https://aws.amazon.com/ec2/capacityblocks/pricing/). The estimate shows no cost; it never invents one.
@@ -89,10 +127,21 @@ def default_gpus_per_node(instance):
     return mm.billing_gpus(hw) if hw else 8
 
 
+def trainium_fields(mm_hw, chips, ranks, mode):
+    """Result fields of a Trainium system: chips in the request, NeuronCores (ranks) in the plan, calibration and unknowns."""
+    return {"chips": chips, "ranks": ranks, "ranks_per_chip": mm.ranks_per_chip(mm_hw), "rank_unit": "logical NeuronCore",
+            "plan_counts": "TP, PP and DP degrees count NeuronCores (ranks)",
+            "calibration": mm_hw.get("calibration"), "memory_mode": mode, "memory_mode_note": NEURON_MEMORY_MODES[mode][2],
+            **({"unknowns": list(mm_hw["unknowns"])} if mm_hw.get("unknowns") else {})}
+
+
 def unit_fields(mm_hw, num_nodes):
     """Result fields for hardware whose domain, instance and billing sizes differ (empty for HGX nodes)."""
     if mm.billing_gpus(mm_hw) == mm.instance_gpus(mm_hw) == mm.domain_gpus(mm_hw):
         return {}
+    if mm.is_trainium(mm_hw):
+        return {"domain_gpus": mm.domain_gpus(mm_hw), "instance_gpus": mm.instance_gpus(mm_hw), "billing_gpus": mm.billing_gpus(mm_hw),
+                "billed_units": num_nodes, "billing_unit": f"UltraServer ({mm.billing_gpus(mm_hw)} chips)"}
     return {"domain_gpus": mm.domain_gpus(mm_hw), "instance_gpus": mm.instance_gpus(mm_hw),
             "billing_gpus": mm.billing_gpus(mm_hw), "billed_units": num_nodes,
             "billing_unit": f"UltraServer ({mm.billing_gpus(mm_hw)} GPUs)",
@@ -103,6 +152,8 @@ def unit_fields(mm_hw, num_nodes):
 def normalise_hardware(value):
     """Instance type for a GPU or instance name ("B300", "p6-b300", "nvidia h100"). Unknown -> ValueError."""
     key = str(value or "").strip().lower().replace("_", "-")
+    if key in AMBIGUOUS_HARDWARE:
+        raise ValueError(AMBIGUOUS_HARDWARE[key])
     for prefix in ("nvidia ", "nvidia-", "aws "):
         if key.startswith(prefix):
             key = key[len(prefix):]
@@ -214,7 +265,7 @@ def estimate_plan(config, variant):
 
     saved = {k: getattr(pc, k) for k in
              ("VOCAB", "TP", "PP", "EP", "CP", "VP", "SEQ_LEN", "PRECISION", "TOTAL_TOKENS", "MFU",
-              "N_EXPERTS", "TOPK", "EXPERTS_PER_GPU")}
+              "N_EXPERTS", "TOPK", "EXPERTS_PER_GPU", "GRAD_BYTES_PER_PARAM_OVERRIDE", "OPTIM_BYTES_PER_PARAM_OVERRIDE")}
     try:
         return _estimate_training(config, variant, pc, ac, utils.core_calculations, utils.phase1_memory)
     finally:
@@ -245,6 +296,14 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     topk = variant.get("topk", 0)
     # a partial node is still paid for (and a partial UltraServer is a whole UltraServer)
     num_nodes = max(1, math.ceil(int(config.get("_billed_gpus") or num_gpus) / gpus_per_node))
+    # Trainium: the request and the result count chips; the plan counts ranks = logical NeuronCores (2 per Trn1 chip).
+    trn = mm.is_trainium(mm.HARDWARE.get(hardware_type))
+    chips = num_gpus
+    if trn:
+        num_gpus = chips * mm.ranks_per_chip(mm.HARDWARE[hardware_type])
+    neuron_mode = config.get("neuron_precision") or "bf16_fp32_optimizer"
+    pc.GRAD_BYTES_PER_PARAM_OVERRIDE, pc.OPTIM_BYTES_PER_PARAM_OVERRIDE = (
+        NEURON_MEMORY_MODES[neuron_mode][:2] if trn else (None, None))
 
     saved_vocab = pc.VOCAB
     pc.VOCAB = variant.get("vocab") or saved_vocab
@@ -304,7 +363,10 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     # viable micro batch and the fastest wins, so bubble and exposed communication count.
     fixed = {k: v for k, v in (("tp", tp), ("pp", pp), ("ep", ep)) if v and v != 1}
     auto_selected = not fixed
-    cands = [c for c in mm.candidate_plans(num_gpus, variant["layers"], n_experts, gpus_per_node, sequence_length)
+    # Trainium plans DP, TP (NeuronCores, up to 32), PP and ZeRO-1 only: EP and CP are experimental in the Neuron SDK (2.31 MoE collectives).
+    cands = [c for c in mm.candidate_plans(num_gpus, variant["layers"], 0 if trn else n_experts,
+                                           mm_hw["gpn"] if trn else gpus_per_node, sequence_length,
+                                           tp_options=(1, 2, 4, 8, 16, 32) if trn else (1, 2, 4, 8))
              if all(c[k] == v for k, v in fixed.items())]
     if not cands:
         return {"error": f"No valid plan with {', '.join(f'{k.upper()}={v}' for k, v in fixed.items())} on "
@@ -325,7 +387,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         fitting += 1
         # Every ZeRO stage that fits is timed, not only the lowest: a higher stage costs more
         # communication (ZeRO-3: params gathered every micro-batch) but may fit a larger micro batch.
-        for zero in (1, 2, 3):
+        for zero in ((1,) if trn else (1, 2, 3)):
             micros = p1.get(f"viable_micros_z{zero}") or []
             for mbs in sorted(set(int(x) for x in micros if x))[:6]:
                 est = plan_estimate(c, p1, mbs, zero)
@@ -364,7 +426,8 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     result = {
         "calculation_type": "Calculated/Projected",
         "disclaimer": "Reference ai-model-calculator memory model; MFU, step time and throughput from "
-                      f"mfu_model ({mm.MODEL_VERSION}), see docs/CALCULATOR-MFU.md.",
+                      f"mfu_model ({mm.MODEL_VERSION}), see docs/CALCULATOR-MFU.md."
+                      + (f" Calibration: {mm_hw['calibration']}." if mm_hw.get("calibration") else ""),
         "model": {
             "name": variant["name"],
             "total_params_B": variant["total_params_B"],
@@ -378,6 +441,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "gpu": GPU_OF_INSTANCE.get(hardware_type, ""),
             "gpus_per_node": gpus_per_node,
             **unit_fields(mm_hw, num_nodes),
+            **(trainium_fields(mm_hw, chips, num_gpus, neuron_mode) if trn else {}),
             "peak_tflops_bf16_per_gpu": mm_hw["bf16"],
             "peak_tflops_fp8_per_gpu": mm_hw["fp8"],
             "nvlink_gb_s_per_gpu": mm_hw["nvlink"],
@@ -404,7 +468,8 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "viable_micros_z1": p1["viable_micros_z1"],
             "viable_micros_z2": p1["viable_micros_z2"],
             "viable_micros_z3": p1.get("viable_micros_z3"),
-            "total_gpus": num_gpus,
+            "total_gpus": chips if trn else num_gpus,
+            **({"total_ranks": num_gpus, "rank_unit": "NeuronCore"} if trn else {}),
             "num_nodes": num_nodes,
             "layers_per_gpu": layers_per_gpu,
             "global_batch_sequences": est["plan"]["gbs"],
@@ -518,6 +583,9 @@ def run_estimate(config, variant):
     fits in memory and meets config["target_days"] when num_gpus is None / "auto"."""
     config = dict(config or {})
     config["hardware"] = normalise_hardware(config.get("hardware") or "p5.48xlarge")
+    gate = trainium_gate(config)
+    if gate:
+        return {"error": gate}
     gpus_per_node = int(config.get("gpus_per_node") or default_gpus_per_node(config["hardware"]))
     num_gpus = config.get("num_gpus")
     if num_gpus in (None, "", 0, "auto"):
@@ -532,7 +600,9 @@ def run_estimate(config, variant):
             tried.append({"num_gpus": n, "fits": result["fits_in_memory"], "training_days": days})
             if result["fits_in_memory"] and (not target_days or days <= float(target_days)):
                 break
-        counts = ("whole {0}-GPU nodes, doubling".format(gpus_per_node) if not mm.is_rack_scale(mm_hw) else
+        counts = ("whole {0}-chip instances, doubling inside one {1}-chip NeuronLink domain, then whole domains".format(
+                      mm.instance_gpus(mm_hw), mm.domain_gpus(mm_hw)) if mm.is_trainium(mm_hw) else
+                  "whole {0}-GPU nodes, doubling".format(gpus_per_node) if not mm.is_rack_scale(mm_hw) else
                   "steps of {0} GPUs inside one {1}-GPU NVLink domain, then {2} or {1} GPUs per domain".format(
                       mm.instance_gpus(mm_hw), mm.domain_gpus(mm_hw), mm.rack_share(mm_hw)))
         result["gpu_count_search"] = {

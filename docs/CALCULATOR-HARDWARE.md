@@ -162,3 +162,47 @@ BF16 constant and of the MoE constants, so the term would need a joint refit, wh
 Our own p6-b300 runs are already over-predicted by 19%, so adding 12% would make estimates for the AWS instance worse, while the ratio check against NVIDIA's DGX runs improves.
 Both statements hold: a B300 is about 12% faster than a B200 on the same plan, and the model is already optimistic for the p6-b300 MoE runs we measured. Applying the term to B300 (set
 `tgp_w` 1100 and `tgp_ref_w` 1000 on the two B300 entries) needs the joint refit and a decision on the p5en and B200 numbers; it is left for review.
+
+## 7. AWS Trainium: Trn1 (calibrated), Trn2 and Trn3 (uncalibrated)
+
+Sources are the Neuron pages [Trainium](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trainium.html),
+[Trn1](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trn1-arch.html),
+[Trainium2](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html),
+[Trn2](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn2-arch.html),
+[Trainium3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium3.html),
+[Trn3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn3-arch.html) and the AWS
+[instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html). Each number is linked in the code comments of `mfu_model.HARDWARE`.
+
+### 7.1 Chips and NeuronCores
+
+The request and the result count **chips** (the `num_gpus` field). The plan counts **ranks = logical NeuronCores**, as the Neuron recipes do (Llama 3.1 TP 32 = 32 cores = 16 chips of one
+trn1.32xlarge). TP, PP and DP degrees in the result are in NeuronCores; `hardware.chips`, `hardware.ranks` and `hardware.ranks_per_chip` say how they relate.
+Memory per GPU in the result is memory per NeuronCore.
+
+| System | Chips per instance | NeuronCores per chip | BF16 per NeuronCore | Memory per NeuronCore | Price per instance hour |
+|---|---|---|---|---|---|
+| trn1.32xlarge | 16 | 2 (NeuronCore-v2) | 95 TFLOPS (190 per chip) | 16 GiB (32 GiB per chip) | 21.50 USD ([AWS Trn1 page](https://aws.amazon.com/ec2/instance-types/trn1/), region not stated) |
+| trn1n.32xlarge | 16 | 2 | 95 TFLOPS | 16 GiB | 24.78 USD (same page) |
+
+Link tiers (`mfu_model._tier_span_bw`): one NeuronLink-v2 tier (2D torus, 384 GB/s per chip, 96 GB/s per NeuronCore per direction, 32 NeuronCores = one instance), then the EFA:
+800 Gbps per instance on trn1 (3.125 GB/s per NeuronCore) and 1600 Gbps on trn1n (6.25). A group that spans instances is limited by the smaller of the torus and its NeuronCores' EFA share,
+the rule the GPUs use. The link efficiencies of the torus and the switch (`LINK_EFFICIENCY`) are assumptions equal to NVLink's; no Neuron measurement exists.
+
+### 7.2 Neuron rules, each tied to a Neuron SDK version
+
+| Rule in the calculator | Neuron SDK version and source |
+|---|---|
+| Plans are DP, TP (up to 32 NeuronCores), PP and ZeRO-1 only | NxD Training (NxDT) supports DP, TP, sequence parallel, PP (1F1B, interleaved) and ZeRO-1, [NxDT overview, 2.27.1](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.27.1/libraries/nxd-training/overview.html); the two calibration rows are NxDT, 2.24.0 |
+| NxDT is end of support from Neuron 2.29 (April 2026), maintenance only in 2.30, not in the DLAMIs from 2.31; the native PyTorch path (DDP, FSDP2, DTensor TP) replaces it | [What's new, 2.32.0](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.32.0/about-neuron/whats-new.html). The rules above may go stale; they describe the 2.24 recipes the data comes from |
+| EP and CP are not planned | MoE training collectives are experimental in Neuron 2.31 (same page). A MoE model is sized without EP and is labelled uncalibrated for the experts |
+| FP8 / MXFP8 is refused (error, not a warning) | MXFP8 training kernels (2.30) and MXFP8 blockwise-MoE forward (2.32) are experimental kernels in the NKI Library; no end-to-end FP8 pre-training recipe (same page) |
+| Memory mode `bf16_fp32_optimizer` (default) | BF16 autocast with an FP32 optimizer, the mode of the published rows: the reference mixed-precision memory accounting |
+| Memory mode `bf16_sr` (request field `neuron_precision`) | BF16 with stochastic rounding, no FP32 master copy ([AWS blog, Llama 2 7B on 128 trn1](https://aws.amazon.com/blogs/machine-learning/end-to-end-llm-training-on-instance-clusters-with-over-100-nodes-using-aws-trainium/)): weights 2 B, gradients 2 B, optimizer states 4 B. The 2 + 4 bytes are an assumption: no Neuron page states them |
+
+Not modelled: the XLA compile time and graph cache, a one-time cost per job.
+
+### 7.3 Trn1 calibration
+
+One constant fitted on the 2 published rows, no hold-out (`docs/CALCULATOR-MFU.md` section 7c): in-sample median error 13.1%, worst 13.5%. The
+published TP 32 PP 8 plan of Llama-3.1-70B is viable in the memory model, and its estimate is within 15% of the published run. Every Trn1 result carries the calibration text
+in `hardware.calibration` and in `disclaimer`, which the reports print. Unknown: the usable HBM per NeuronCore after the Neuron runtime reserve (the memory model uses the full 16 GiB).

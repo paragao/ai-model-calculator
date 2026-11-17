@@ -37,6 +37,10 @@ import math
 
 MODEL_VERSION = "mfu-model-4"
 
+GIB = 1.073741824  # 1 GiB/s in GB/s (the Neuron pages give NeuronLink in GiB/s on Trn2)
+CALIBRATION_TRN1 = ("calibrated on the 2 published Neuron Trn1 rows (Llama-3.1 8B and 70B, BF16, Neuron 2.24.0); there is no hold-out, "
+                    "so no error on unseen runs is known")
+
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
 #       B200 and B300: 2250 BF16, 4500 FP8 dense; HGX B300 = 36 PFLOPS FP8 dense / 8 GPUs).
@@ -107,6 +111,27 @@ HARDWARE = {
     #   QUANTUM-X800 (800Gbps)": https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf
     "dgx-gb300":        {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
                          "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0},
+    # --- AWS Trainium (Trn1, Trn1n): one rank = one logical NeuronCore, as in the Neuron recipes (TP 32 = 32 cores = 16 chips) ---
+    # The calculator counts chips ("GPUs" in the request and the result) and plans in ranks: TP, PP and DP degrees count NeuronCores.
+    #   ranks_per_chip 2: Trainium has 2 NeuronCore-v2  https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trainium.html
+    #   bf16 95: 190 TFLOPS BF16 (dense) per chip / 2 cores, same page. fp8 None: FP8 training is refused (Neuron SDK 2.30 and 2.32:
+    #       MXFP8 kernels in the NKI Library are experimental, https://awsdocs-neuron.readthedocs-hosted.com/en/v2.32.0/about-neuron/whats-new.html)
+    #   memory 16 GiB per rank: 32 GiB per chip / 2 cores, same page (mem_gb is set in lambda_function._get_hardware_specs)
+    #   16 chips per instance, NeuronLink-v2 2D torus, 384 GB/s per chip:
+    #       https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trn1-arch.html
+    #       https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html (chip comparison table)
+    #   nvlink 96: 384 GB/s per chip / 2 (per direction, as for NVLink) / 2 cores per chip. The tier is the whole instance: 32 ranks.
+    #   net 3.125 (trn1) / 6.25 (trn1n): EFA 800 / 1600 Gbps per instance (https://aws.amazon.com/ec2/instance-types/trn1/) / 32 ranks, in GB/s.
+    #   price: trn1.32xlarge 21.50 and trn1n.32xlarge 24.78 USD per hour on that AWS page (region not stated); see lambda_function.
+    # Calibrated on the two Neuron Trn1 rows of validation_runs.TRN1_RUNS only: there is no hold-out (docs/CALCULATOR-HARDWARE.md section 7).
+    "trn1.32xlarge":    {"gpu": "Trainium1", "family": "trainium1", "bf16": 95.0, "fp8": None, "nvlink": 96.0, "net": 3.125, "gpn": 32,
+                         "ranks_per_chip": 2, "domain_gpus": 16, "instance_gpus": 16, "billing_gpus": 16,
+                         "tiers": ((32, 96.0, "torus"),), "calibration": CALIBRATION_TRN1,
+                         "unknowns": ("usable HBM per NeuronCore after the Neuron runtime reserve",)},
+    "trn1n.32xlarge":   {"gpu": "Trainium1", "family": "trainium1", "bf16": 95.0, "fp8": None, "nvlink": 96.0, "net": 6.25, "gpn": 32,
+                         "ranks_per_chip": 2, "domain_gpus": 16, "instance_gpus": 16, "billing_gpus": 16,
+                         "tiers": ((32, 96.0, "torus"),), "calibration": CALIBRATION_TRN1,
+                         "unknowns": ("usable HBM per NeuronCore after the Neuron runtime reserve",)},
     # DGX GB200 NVL72 (validation only): 18 compute trays x 4 GPUs, each tray 4 x ConnectX-7 NDR 400 Gb/s = 50 GB/s per GPU
     #   https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html
     "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
@@ -138,8 +163,17 @@ def billing_gpus(hw):
 # its 72 GPUs, as NeMo's GB200 recipes do (64, 128 or 256 GPUs; NeMo 25.07 performance summary), and is still
 # billed for the whole UltraServer. HGX nodes (domain 8) are never touched by these helpers.
 
+def is_trainium(hw):
+    """Hardware counted in chips with NeuronCores as ranks (hw["ranks_per_chip"])."""
+    return bool(hw and hw.get("ranks_per_chip"))
+
+
+def ranks_per_chip(hw):
+    return int(hw.get("ranks_per_chip") or 1)
+
+
 def is_rack_scale(hw):
-    return domain_gpus(hw) > 8
+    return domain_gpus(hw) > 8 and not is_trainium(hw)
 
 
 def _largest_pow2_below(n, multiple_of):
@@ -184,6 +218,18 @@ def auto_gpu_counts(hw, gpus_per_node, limit):
     """GPU counts the automatic search tries, smallest first. HGX nodes: gpus_per_node, doubling. Rack-scale:
     steps of the instance size inside one domain (4, 8, 16, 32, 64), then whole domains (72, 144, 288, ...) and
     the power-of-two share of each (128, 256, ...)."""
+    if is_trainium(hw):  # chips: doubling inside one domain, then whole domains (Trn2 UltraServer 64, Trn3 144 chips)
+        step, domain = instance_gpus(hw), domain_gpus(hw)
+        out, n = [], step
+        while n <= min(domain, limit):
+            out.append(n)
+            n *= 2
+        n = domain
+        while n <= limit:
+            if n not in out:
+                out.append(n)
+            n *= 2
+        return sorted(out)
     if not is_rack_scale(hw):
         out, n = [], gpus_per_node
         while n <= limit:
@@ -211,6 +257,7 @@ BASE_EFFICIENCY = {
     ("blackwell", "bf16"): 0.443,
     ("blackwell", "fp8"): 0.417,
     ("ampere", "bf16"): 0.471,
+    ("trainium1", "bf16"): 0.33,  # fitted on the two Neuron Trn1 rows (validation_runs.fit_trainium1)
 }
 # Routed-expert matmuls (grouped GEMMs, permute/unpermute, routing) run at
 #   moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
@@ -225,7 +272,9 @@ MOE_EXPERT_HALF_FFN = 1024
 TGP_EXPONENT = 1.25
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
-LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80}
+LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80, "torus": 0.76, "switch": 0.76}
+# torus, switch (NeuronLink): assumption, no Neuron measurement exists; set equal to nvlink. Only the base efficiency of the Trainium
+#   families is fitted (validation_runs.fit_trainium1), not the link efficiencies.
 # nvlink 0.76: our DeepEP intranode dispatch 340 GB/s on p5en vs 450 GB/s per direction
 #   (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes). net 0.80: assumption (NCCL ring busbw).
 OVERLAP = {"tp": 0.5, "cp": 0.9, "ep": 0.3, "dp": 0.9, "fsdp": 0.8}
@@ -267,6 +316,7 @@ VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6
                       "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 19.8,
                       "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
                       "superseded_runs": 2,
+                      "trainium1_rows": 2, "trainium1_median_abs_error_pct": 13.1, "trainium1_max_abs_error_pct": 13.5,
                       "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
                       "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.1,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
@@ -438,12 +488,28 @@ def _bw(hw, kind):
     return hw[kind] * LINK_EFFICIENCY[kind] * 1e9  # bytes/s
 
 
+def _tier_span_bw(hw, inner, group):
+    """Collective bandwidth when the hardware has link tiers (Trainium): the group spans inner x group ranks.
+    tiers: ((ranks reached, GB/s per rank per direction, kind), ...) from the innermost out. The smallest tier that holds the span
+    carries it. Past the last tier the traffic leaves through the EFA: the group has r = last tier size / inner ranks in each
+    domain and each brings its own adapter share (min of the last tier and r x EFA per rank), as for the GPUs."""
+    span = inner * group
+    for size, bw, kind in hw["tiers"]:
+        if span <= size:
+            return bw * LINK_EFFICIENCY[kind] * 1e9
+    size, bw, kind = hw["tiers"][-1]
+    r = max(1, size // inner)
+    return min(bw * LINK_EFFICIENCY[kind], r * hw["net"] * LINK_EFFICIENCY["net"]) * 1e9
+
+
 def _span_bw(hw, inner, group):
     """Collective bandwidth of `group` ranks spaced `inner` apart (ring/tree, NCCL-style).
 
     Inside one node: NVLink. Across nodes: the group has r = gpn / inner ranks on each node and
     its traffic leaves through those r GPUs' NICs, so bandwidth = min(NVLink, r x NIC per GPU).
     """
+    if hw.get("tiers"):
+        return _tier_span_bw(hw, inner, group)
     if inner * group <= hw["gpn"]:
         return _bw(hw, "nvlink")
     r = max(1, hw["gpn"] // inner)
@@ -552,6 +618,9 @@ def estimate(shape, hw, plan, precision="bf16"):
     if per_stage % (etp * ep):
         raise ValueError(f"EP {ep} x expert TP {etp} does not divide {per_stage} GPUs per pipeline stage")
     prec = "fp8" if str(precision).lower() == "fp8" else "bf16"
+    if hw[prec] is None:
+        raise ValueError(f"{prec.upper()} training on {hw['gpu']} is not sized: FP8 / MXFP8 training kernels are experimental in the Neuron SDK "
+                         "(2.30 and 2.32). Use BF16.")
     peak = hw[prec] * 1e12
     gbs_given = plan.get("gbs")
     gbs = int(gbs_given) if gbs_given else default_global_batch(seq, dp, mbs)
@@ -686,10 +755,11 @@ def mfu_factors(est):
     }
 
 
-def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096):
+def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096, tp_options=(1, 2, 4, 8)):
     """Plans the search tries: TP in {1,2,4,8} (<= node), PP up to 16 (layer divisors and powers
-    of 2), CP 1 (CP > 1 only for sequences >= 32K), EP powers of 2 dividing the experts."""
-    tps = [t for t in (1, 2, 4, 8) if t <= gpn and num_gpus % t == 0]
+    of 2), CP 1 (CP > 1 only for sequences >= 32K), EP powers of 2 dividing the experts.
+    tp_options: Trainium plans TP in NeuronCores, up to 32 (Neuron recipes: Llama 3.1 TP 32)."""
+    tps = [t for t in tp_options if t <= gpn and num_gpus % t == 0]
     divisors = {p for p in range(1, layers + 1) if layers % p == 0}
     pps = sorted({p for p in divisors | {1, 2, 4, 8, 16} if p <= min(16, layers)})
     cps = [1] + ([2, 4, 8] if seq >= 32768 else [])
