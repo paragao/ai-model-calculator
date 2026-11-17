@@ -41,6 +41,11 @@ GIB = 1.073741824  # 1 GiB/s in GB/s (the Neuron pages give NeuronLink in GiB/s 
 CALIBRATION_TRN1 = ("calibrated on the 2 published Neuron Trn1 rows (Llama-3.1 8B and 70B, BF16, Neuron 2.24.0); there is no hold-out, "
                     "so no error on unseen runs is known")
 
+CALIBRATION_TRN2 = ("uncalibrated: no published Trn2 training data (Trn1's base efficiency and NVLink's link efficiency are assumed, "
+                    "so the throughput, days and cost are a model, not a forecast)")
+UNKNOWNS_TRN2 = ("any measured Trn2 training throughput or MFU", "on-demand price", "usable HBM per NeuronCore after the Neuron runtime reserve",
+                 "efficiency of the NeuronLink torus and ring")
+
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
 #       B200 and B300: 2250 BF16, 4500 FP8 dense; HGX B300 = 36 PFLOPS FP8 dense / 8 GPUs).
@@ -132,6 +137,29 @@ HARDWARE = {
                          "ranks_per_chip": 2, "domain_gpus": 16, "instance_gpus": 16, "billing_gpus": 16,
                          "tiers": ((32, 96.0, "torus"),), "calibration": CALIBRATION_TRN1,
                          "unknowns": ("usable HBM per NeuronCore after the Neuron runtime reserve",)},
+    # --- Trainium2 (Trn2): uncalibrated, there is no published Trn2 training throughput or MFU (docs/CALCULATOR-HARDWARE.md section 7) ---
+    # Sources: Trainium2 chip https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html
+    #          Trn2 instances https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn2-arch.html
+    #          LNC https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-features/logical-neuroncore-config.html
+    #   ranks_per_chip 4: 8 physical NeuronCore-v3 per chip, LNC=2 (the default) groups them into 4 logical NeuronCores; 64 per trn2.48xlarge
+    #   bf16 166.75: 667 BF16 TFLOPS per chip (dense) / 4. fp8 None: 1,299 cFP8 TFLOPS per chip exist, but FP8 training is refused (Neuron 2.30, 2.32)
+    #   memory 24 GiB per rank: 96 GiB per chip / 4 (four 24 GB HBM banks, two physical cores each), set in lambda_function._get_hardware_specs
+    #   16 chips per trn2.48xlarge / trn2u.48xlarge in a 4x4 2D torus; Trn2 UltraServer = 4 x trn2u.48xlarge = 64 chips, chips with the same
+    #       coordinates in each instance form a ring across the four instances
+    #   tier 1 (instance, 64 ranks): NeuronLink-v3 1,024 GiB/s per chip: 1024 x 1.0737 / 2 (per direction) / 4 ranks = 137.44 GB/s per rank
+    #   tier 2 (UltraServer, 256 ranks): 256 GiB/s per chip between instances: 256 x 1.0737 / 2 / 4 = 34.36 GB/s per rank
+    #   (the chip page's 1.28 TB/s per chip = 1,024 + 256 GiB/s, the same two tiers)
+    #   net 6.25: EFAv3 3.2 Tbps per instance (16 x 200 Gigabit, AWS instance table) = 400 GB/s / 64 ranks; 25 GB/s per chip. The Neuron instance
+    #       page prints "3,200 GB/s" in the same table as "3.2 Tbps": a unit slip for Gbps.
+    #   price: no on-demand price on the AWS or Neuron pages checked: unknown, no cost line.
+    # The base efficiency is Trn1's (BASE_EFFICIENCY trainium2 = trainium1: an assumption), the link efficiencies are NVLink's (assumption).
+    "trn2.48xlarge":    {"gpu": "Trainium2", "family": "trainium2", "bf16": 166.75, "fp8": None, "nvlink": 137.44, "net": 6.25, "gpn": 64,
+                         "ranks_per_chip": 4, "domain_gpus": 16, "instance_gpus": 16, "billing_gpus": 16,
+                         "tiers": ((64, 137.44, "torus"),), "calibration": CALIBRATION_TRN2, "unknowns": UNKNOWNS_TRN2},
+    "trn2-ultraserver": {"gpu": "Trainium2", "family": "trainium2", "bf16": 166.75, "fp8": None, "nvlink": 137.44, "net": 6.25, "gpn": 256,
+                         "ranks_per_chip": 4, "domain_gpus": 64, "instance_gpus": 16, "billing_gpus": 64,
+                         "tiers": ((64, 137.44, "torus"), (256, 34.36, "torus")), "calibration": CALIBRATION_TRN2,
+                         "unknowns": UNKNOWNS_TRN2},
     # DGX GB200 NVL72 (validation only): 18 compute trays x 4 GPUs, each tray 4 x ConnectX-7 NDR 400 Gb/s = 50 GB/s per GPU
     #   https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html
     "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
@@ -258,6 +286,7 @@ BASE_EFFICIENCY = {
     ("blackwell", "fp8"): 0.417,
     ("ampere", "bf16"): 0.471,
     ("trainium1", "bf16"): 0.33,  # fitted on the two Neuron Trn1 rows (validation_runs.fit_trainium1)
+    ("trainium2", "bf16"): 0.33,  # NOT fitted: Trn1's value, an assumption (no published Trn2 training data); test pins it equal
 }
 # Routed-expert matmuls (grouped GEMMs, permute/unpermute, routing) run at
 #   moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)

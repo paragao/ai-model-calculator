@@ -43,6 +43,11 @@ HARDWARE_ALIASES = {
     # Trainium 1 (Trn1, Trn1n): AWS instance table https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html
     "trn1.32xlarge": "trn1.32xlarge", "trn1": "trn1.32xlarge", "trainium1": "trn1.32xlarge",
     "trn1n.32xlarge": "trn1n.32xlarge", "trn1n": "trn1n.32xlarge",
+    # Trainium2: trn2.48xlarge is one instance (16 chips). trn2u.48xlarge is one of the 4 instances of a Trn2 UltraServer (64 chips), which is
+    # what the calculator sizes and bills; with no size given "trn2u" means the UltraServer. trn2.3xlarge (1 chip, no NeuronLink) is not modelled.
+    "trn2.48xlarge": "trn2.48xlarge", "trn2": "trn2.48xlarge", "trainium2": "trn2.48xlarge",
+    "trn2-ultraserver": "trn2-ultraserver", "trn2u": "trn2-ultraserver", "trn2u.48xlarge": "trn2-ultraserver",
+    "trn2.ultraserver": "trn2-ultraserver", "trn2u-ultraserver": "trn2-ultraserver",
     # GB300: AWS has published no instance type names. The calculator's own label is the UltraServer (72 GPUs).
     "p6e-gb300-ultraserver": "p6e-gb300-ultraserver", "gb300": "p6e-gb300-ultraserver", "p6e-gb300": "p6e-gb300-ultraserver",
     "gb300-nvl72": "p6e-gb300-ultraserver", "gb300-ultraserver": "p6e-gb300-ultraserver",
@@ -54,6 +59,7 @@ GPU_OF_INSTANCE = {
     "u-p6e-gb200x72": "GB200 185GB", "u-p6e-gb200x36": "GB200 185GB",
     "p6e-gb300-ultraserver": "GB300 279GB",
     "trn1.32xlarge": "Trainium1 32GiB (16 chips)", "trn1n.32xlarge": "Trainium1 32GiB (16 chips)",
+    "trn2.48xlarge": "Trainium2 96GiB (16 chips)", "trn2-ultraserver": "Trainium2 96GiB (64 chips, UltraServer)",
 }
 
 # Names that are a family, not one system: refused with the choices (never guessed).
@@ -99,6 +105,10 @@ INSTANCE_SPECS = {
     # per chip; 95 BF16 TFLOPS per NeuronCore (190 per chip). Sources: mfu_model.HARDWARE.
     "trn1.32xlarge": {"mem_gb": 16, "inter_node_bw_gb": 100, "intra_node_bw_gbps": 384, "peak_tflops_bf16": 95},
     "trn1n.32xlarge": {"mem_gb": 16, "inter_node_bw_gb": 200, "intra_node_bw_gbps": 384, "peak_tflops_bf16": 95},
+    # Trainium2 (LNC=2): 24 GiB per logical NeuronCore (96 GiB chip / 4); EFA 400 GB/s per instance; NeuronLink 1,024 GiB/s per chip;
+    # 166.75 BF16 TFLOPS per logical NeuronCore (667 per chip). Sources: mfu_model.HARDWARE.
+    "trn2.48xlarge": {"mem_gb": 24, "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1100, "peak_tflops_bf16": 166.75},
+    "trn2-ultraserver": {"mem_gb": 24, "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1100, "peak_tflops_bf16": 166.75},
     "u-p6e-gb200x72": {"mem_gb": 185, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
@@ -115,7 +125,7 @@ INSTANCE_COST_PER_HOUR = {
 }
 # No public on-demand price: GB200 UltraServers are sold through EC2 Capacity Blocks for ML and the price is set at
 # purchase (https://aws.amazon.com/ec2/capacityblocks/pricing/). The estimate shows no cost; it never invents one.
-PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver")
+PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver", "trn2.48xlarge", "trn2-ultraserver")
 PRICE_UNKNOWN_NOTE = ("Price unknown: this hardware is sold through EC2 Capacity Blocks for ML and AWS publishes no "
                       "on-demand price, so no cost is estimated. GPU count, time and billed units are still given.")
 MAX_AUTO_GPUS = 4096
@@ -125,6 +135,14 @@ def default_gpus_per_node(instance):
     """GPUs billed as one node: 8 for an HGX instance, the whole UltraServer (72 or 36) for GB200."""
     hw = mm.HARDWARE.get(instance)
     return mm.billing_gpus(hw) if hw else 8
+
+
+PRICE_UNKNOWN_NOTE_TRAINIUM = ("Price unknown: no AWS page publishes an on-demand price for this hardware, so no cost is estimated. "
+                               "Chip count, time and billed units are still given.")
+
+
+def price_note(mm_hw):
+    return PRICE_UNKNOWN_NOTE_TRAINIUM if mm.is_trainium(mm_hw) else PRICE_UNKNOWN_NOTE
 
 
 def trainium_fields(mm_hw, chips, ranks, mode):
@@ -427,7 +445,10 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         "calculation_type": "Calculated/Projected",
         "disclaimer": "Reference ai-model-calculator memory model; MFU, step time and throughput from "
                       f"mfu_model ({mm.MODEL_VERSION}), see docs/CALCULATOR-MFU.md."
-                      + (f" Calibration: {mm_hw['calibration']}." if mm_hw.get("calibration") else ""),
+                      + (f" Calibration: {mm_hw['calibration']}." if mm_hw.get("calibration") else "")
+                      + (" Mixture of experts on Trainium: the expert matmul factor comes from GPU runs and there is no Neuron MoE data, "
+                         "so the expert part is uncalibrated; EP is not planned (experimental, Neuron 2.31)."
+                         if trn and n_experts else ""),
         "model": {
             "name": variant["name"],
             "total_params_B": variant["total_params_B"],
@@ -494,7 +515,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         "cost_estimate": (
             {"cost_per_hour_usd": round(cost_per_hour, 2), "total_cost_usd": round(total_cost, 0),
              "note": "On-demand pricing estimate"} if price is not None else
-            {"cost_per_hour_usd": None, "total_cost_usd": None, "price_known": False, "note": PRICE_UNKNOWN_NOTE}),
+            {"cost_per_hour_usd": None, "total_cost_usd": None, "price_known": False, "note": price_note(mm_hw)}),
         "mfu_breakdown": {
             "model_version": mm.MODEL_VERSION,
             "precision_peak_tflops_per_gpu": est["peak_tflops_per_gpu"],

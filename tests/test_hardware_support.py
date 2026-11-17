@@ -204,7 +204,7 @@ class Gb200Reachable(unittest.TestCase):
             self.assertEqual(p9.normalise_hardware(given), "u-p6e-gb200x36", given)
 
     def test_other_accelerators_are_still_refused(self):
-        for given in ("trn2", "trn2.48xlarge", "trainium", "tpu-v5", "b800"):
+        for given in ("trainium", "tpu-v5", "b800", "nd96p"):
             with self.assertRaises(ValueError, msg=given):
                 p9.normalise_hardware(given)
 

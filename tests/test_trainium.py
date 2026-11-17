@@ -224,5 +224,129 @@ class Trainium1Phase9(unittest.TestCase):
         self.assertLessEqual(b["training_time"]["training_days"], 30)
 
 
+class Trainium2Hardware(unittest.TestCase):
+    """Step 7: Trn2, uncalibrated. Every number is the Neuron page's; the efficiency is Trn1's, an assumption, and says so."""
+
+    LABEL = "uncalibrated: no published Trn2 training data"
+
+    def test_chip_numbers_from_the_neuron_pages(self):
+        hw = mm.HARDWARE["trn2.48xlarge"]
+        self.assertEqual((hw["family"], hw["ranks_per_chip"], hw["fp8"]), ("trainium2", 4, None))
+        self.assertEqual(hw["bf16"] * 4, 667.0)  # 667 BF16 TFLOPS per chip (dense), LNC=2: 4 logical NeuronCores per chip
+        self.assertEqual((hw["domain_gpus"], hw["instance_gpus"], hw["billing_gpus"], hw["gpn"]), (16, 16, 16, 64))  # chips; NeuronCores
+        self.assertEqual(hw["net"] * 64, 400.0)  # EFAv3 3.2 Tbps per instance = 400 GB/s; 25 GB/s per chip
+        self.assertEqual(hw["net"] * 4, 25.0)
+
+    def test_neuronlink_tiers_in_gib_per_second(self):
+        inst, ultra = mm.HARDWARE["trn2.48xlarge"], mm.HARDWARE["trn2-ultraserver"]
+        self.assertEqual(inst["tiers"], ((64, 137.44, "torus"),))
+        self.assertEqual(ultra["tiers"], ((64, 137.44, "torus"), (256, 34.36, "torus")))
+        self.assertAlmostEqual(1024 * mm.GIB / 2 / 4, 137.44, places=1)  # 1,024 GiB/s per chip, per direction, per NeuronCore
+        self.assertAlmostEqual(256 * mm.GIB / 2 / 4, 34.36, places=1)    # 256 GiB/s per chip between instances
+        # the chip page: 1.28 TB/s per chip = the two tiers
+        self.assertAlmostEqual((1024 + 256) * mm.GIB, 1374.4, delta=1)
+
+    def test_ultraserver_is_a_64_chip_domain_billed_whole(self):
+        ultra = mm.HARDWARE["trn2-ultraserver"]
+        self.assertEqual((ultra["domain_gpus"], ultra["instance_gpus"], ultra["billing_gpus"], ultra["gpn"]), (64, 16, 64, 256))
+        self.assertEqual(mm.auto_gpu_counts(ultra, 64, 400), [16, 32, 64, 128, 256])
+        self.assertEqual(mm.auto_gpu_counts(mm.HARDWARE["trn2.48xlarge"], 16, 100), [16, 32, 64])
+
+    def test_group_bandwidth_follows_the_three_tiers(self):
+        ultra = mm.HARDWARE["trn2-ultraserver"]
+        t1, t2 = 137.44 * mm.LINK_EFFICIENCY["torus"] * 1e9, 34.36 * mm.LINK_EFFICIENCY["torus"] * 1e9
+        self.assertEqual(mm._span_bw(ultra, 1, 64), t1)    # inside one instance (64 NeuronCores)
+        self.assertEqual(mm._span_bw(ultra, 1, 128), t2)   # across instances of the UltraServer
+        self.assertEqual(mm._span_bw(ultra, 1, 256), t2)
+        efa = mm._span_bw(ultra, 256, 2)                   # two UltraServers, one NeuronCore each: its EFA share
+        self.assertEqual(efa, 6.25 * mm.LINK_EFFICIENCY["net"] * 1e9)
+        self.assertLess(efa, t2)
+        # without the UltraServer the second tier does not exist: 128 ranks cross the EFA
+        inst = mm.HARDWARE["trn2.48xlarge"]
+        self.assertLessEqual(mm._span_bw(inst, 1, 128), t1)
+        self.assertGreaterEqual(mm._span_bw(inst, 1, 128), mm._span_bw(inst, 64, 2))
+
+    def test_uncalibrated_and_unknowns_are_stated(self):
+        for key in ("trn2.48xlarge", "trn2-ultraserver"):
+            hw = mm.HARDWARE[key]
+            self.assertTrue(hw["calibration"].startswith(self.LABEL), key)
+            text = " ".join(hw["unknowns"]).lower()
+            for word in ("measured trn2", "price", "hbm", "torus"):
+                self.assertIn(word, text, key)
+        # the efficiency is Trn1's, on purpose and pinned
+        self.assertEqual(mm.BASE_EFFICIENCY[("trainium2", "bf16")], mm.BASE_EFFICIENCY[("trainium1", "bf16")])
+        self.assertNotIn("trainium2_bf16", vr.fit())  # not fitted: no data
+
+    def test_no_trainium2_row_is_in_any_validation_set(self):
+        for r in vr.RUNS + vr.RACK_RUNS + vr.TRN1_RUNS:
+            self.assertNotIn("trn2", r["hardware"])
+
+    def test_fp8_is_refused(self):
+        shape = mm.model_shape(vr.ARCH["Llama-3-8B"])
+        with self.assertRaises(ValueError):
+            mm.estimate(shape, mm.HARDWARE["trn2.48xlarge"], dict(num_gpus=64, tp=8, gbs=64, mbs=1, seq=4096), "fp8")
+
+    def test_estimate_is_a_model_not_a_forecast_and_in_a_sane_range(self):
+        shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
+        e = mm.estimate(shape, mm.HARDWARE["trn2-ultraserver"], dict(num_gpus=1024, tp=16, pp=4, gbs=1024, mbs=1, seq=8192), "bf16")
+        self.assertGreater(e["mfu"], 0.15)
+        self.assertLess(e["mfu"], 0.40)
+
+
+class Trainium2Phase9(unittest.TestCase):
+    LABEL = "uncalibrated: no published Trn2 training data"
+
+    def test_names(self):
+        for given, want in (("trn2", "trn2.48xlarge"), ("trn2.48xlarge", "trn2.48xlarge"), ("Trainium2", "trn2.48xlarge"),
+                            ("trn2u", "trn2-ultraserver"), ("trn2u.48xlarge", "trn2-ultraserver"), ("Trn2 UltraServer", "trn2-ultraserver"),
+                            ("trn2-ultraserver", "trn2-ultraserver")):
+            self.assertEqual(p9.normalise_hardware(given), want, given)
+        with self.assertRaises(ValueError):
+            p9.normalise_hardware("trn2.3xlarge")
+
+    def test_the_label_is_in_the_result_the_disclaimer_and_the_unknowns(self):
+        for hw in ("trn2", "trn2u"):
+            b = run("Llama-3.1-8B", hardware=hw, num_gpus=64, total_tokens_b=100)
+            self.assertNotIn("error", b, b)
+            self.assertTrue(b["hardware"]["calibration"].startswith(self.LABEL))
+            self.assertIn("Calibration: " + self.LABEL, b["disclaimer"])
+            self.assertIn("any measured Trn2 training throughput or MFU", b["hardware"]["unknowns"])
+
+    def test_price_is_unknown_and_there_is_no_cost_line(self):
+        b = run("Llama-3.1-8B", hardware="trn2", num_gpus=64, total_tokens_b=100)
+        c = b["cost_estimate"]
+        self.assertEqual((c["cost_per_hour_usd"], c["total_cost_usd"], c["price_known"]), (None, None, False))
+        self.assertIn("no AWS page publishes", c["note"])
+        self.assertIn("Cost**: unknown", p9.format_estimate(b))
+
+    def test_instance_and_ultraserver_billing(self):
+        a = run("Llama-3.1-70B", hardware="trn2", num_gpus=48, total_tokens_b=1000)
+        self.assertEqual((a["parallelism"]["total_gpus"], a["parallelism"]["total_ranks"], a["parallelism"]["num_nodes"]), (48, 192, 3))
+        u = run("Llama-3.1-70B", hardware="trn2u", num_gpus=96, total_tokens_b=1000)
+        h = u["hardware"]
+        self.assertEqual((u["parallelism"]["num_nodes"], h["billed_units"], h["billing_gpus"], h["domain_gpus"], h["instance_gpus"]),
+                         (2, 2, 64, 64, 16))
+        self.assertEqual(h["billing_unit"], "UltraServer (64 chips)")
+        self.assertEqual(u["memory_breakdown"]["gpu_capacity_gb"], 24)
+
+    def test_plan_is_dp_tp_pp_zero1_and_fp8_is_refused(self):
+        p = run("Llama-3.1-70B", hardware="trn2u", num_gpus=64, total_tokens_b=1000)["parallelism"]
+        self.assertEqual((p["zero_stage"], p["expert_parallel"]), (1, 1))
+        self.assertIn("error", run("Llama-3.1-8B", hardware="trn2", num_gpus=16, total_tokens_b=100, precision="fp8"))
+
+    def test_moe_is_labelled_uncalibrated_for_the_experts_on_every_trainium(self):
+        for hw in ("trn1", "trn2"):
+            moe = run("Qwen3-30B-A3B", hardware=hw, num_gpus=64, total_tokens_b=100)
+            self.assertIn("Mixture of experts on Trainium", moe["disclaimer"], hw)
+            self.assertEqual(moe["parallelism"]["expert_parallel"], 1)
+        self.assertNotIn("Mixture of experts", run("Llama-3.1-8B", hardware="trn2", num_gpus=64, total_tokens_b=100)["disclaimer"])
+
+    def test_auto_search_in_whole_instances_then_ultraservers(self):
+        b = run("Llama-3.1-70B", hardware="trn2u", total_tokens_b=1000, num_gpus="auto", target_days=60)
+        counts = [t["num_gpus"] for t in b["gpu_count_search"]["tried"]]
+        self.assertEqual(counts[:3], [16, 32, 64])
+        self.assertLessEqual(b["training_time"]["training_days"], 60)
+
+
 if __name__ == "__main__":
     unittest.main()
