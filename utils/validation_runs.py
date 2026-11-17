@@ -448,6 +448,22 @@ def attention_exp_share(shape, seq, tokens_per_s_per_gpu, tera_exp):
     return tokens_per_s_per_gpu * exps_per_token / (tera_exp * 1e12)
 
 
+# AWS Trainium 1 (hardware step 6): the only published Trainium training throughput (Neuron 2.24.0, NxD Training, BF16 autocast with an
+# FP32 optimizer, micro batch 1, global batch 1024, sequence 8192, 32 x trn1.32xlarge = 1024 NeuronCores = ranks), a table of the Neuron docs.
+# Two rows, one source, one model family: they fit ONE constant (BASE_EFFICIENCY[("trainium1", "bf16")], fit_trainium1) and leave nothing for
+# a hold-out. Trn2 and Trn3 have no published training numbers at all (docs/CALCULATOR-HARDWARE.md section 7).
+# Kept apart from RUNS: the 38-run summary and its fit are unchanged.
+NEURON_TRN1 = ("https://awsdocs-neuron.readthedocs-hosted.com/en/v2.27.1/about-neuron/benchmarks/trn1/trn1-training-performance.html "
+               "(Neuron 2.24.0, NxDT, BF16 + FP32 optimizer)")
+TRN1_RUNS = [
+    _run("neuron-trn1-llama31-8b", "Llama-3-8B", "trn1.32xlarge", "bf16", 1024, 1024, 1, 8192, tp=32,
+         metric="tokens_per_gpu", value=round(47.95 * 8192 / 1024, 2), source=NEURON_TRN1, fit=True,
+         note="TP 32 DP 32 PP 1 ZeRO-1; 47.95 seq/s; Llama 3.1 8B has the shape of Llama 3 8B"),
+    _run("neuron-trn1-llama31-70b", "Llama-3-70B", "trn1.32xlarge", "bf16", 1024, 1024, 1, 8192, tp=32, pp=8,
+         metric="tokens_per_gpu", value=round(7.94 * 8192 / 1024, 2), source=NEURON_TRN1, fit=True,
+         note="TP 32 DP 4 PP 8; 7.94 seq/s; Llama 3.1 70B has the shape of Llama 3 70B"),
+]
+
 # Rows added with mfu-model-3 (reported as their own group).
 NEW_MOE_RUNS = {"mb2509-h100-dsv3", "mb2604-b200-dsv3", "mb2604-b300-dsv3", "mb2604-b200-qwen3-30b",
                 "mb2604-b300-qwen3-30b", "mb2604-h100-qwen3-30b", "mb2604-b200-qwen3-235b", "mb2604-b300-qwen3-235b",
@@ -572,6 +588,27 @@ def pairs_markdown(rows):
     return "\n".join(out)
 
 
+def fit_trainium1():
+    """BASE_EFFICIENCY[("trainium1", "bf16")]: geometric mean of the per-row solutions of the two Neuron Trn1 rows."""
+    saved = dict(mm.BASE_EFFICIENCY)
+    shapes, sols = {}, []
+    try:
+        for r in TRN1_RUNS:
+            def f(x, r=r):
+                mm.BASE_EFFICIENCY[("trainium1", "bf16")] = x
+                return predict(r, shapes)[0]
+            sols.append(_solve(f, r["reported"]))
+    finally:
+        mm.BASE_EFFICIENCY.clear()
+        mm.BASE_EFFICIENCY.update(saved)
+    return round(math.exp(statistics.mean(math.log(v) for v in sols)), 3)
+
+
+def trn1_summary(rows):
+    errs = [abs(x["error_pct"]) for x in rows]
+    return {"runs": len(errs), "median_abs_error_pct": round(statistics.median(errs), 1), "max_abs_error_pct": round(max(errs), 1)}
+
+
 def rack_summary(rows):
     """Median and worst absolute error of the rack-scale hold-out rows (evaluate(RACK_RUNS))."""
     errs = [abs(x["error_pct"]) for x in rows]
@@ -630,6 +667,7 @@ def fit():
     return {"base_efficiency": {f"{k[0]}/{k[1]}": v for k, v in sorted(fitted.items())},
             "moe_expert_factor": moe_factor, "moe_expert_half_ffn": moe_half, "overlap_ep": ov_ep,
             "tgp_exponent": fit_tgp_exponent(),
+            "trainium1_bf16": fit_trainium1(),
             "fit_runs": [r["id"] for r in RUNS if r["fit"]]}
 
 
@@ -686,6 +724,10 @@ if __name__ == "__main__":
     print("\nRack-scale hold-out (DGX GB200, NeMo 25.07)\n")
     print(markdown(rack_rows))
     print(json.dumps(rack_summary(rack_rows), indent=1))
+    trn_rows = evaluate(TRN1_RUNS)
+    print("\nAWS Trainium 1, the two Neuron rows (fit, no hold-out)\n")
+    print(markdown(trn_rows))
+    print(json.dumps(trn1_summary(trn_rows), indent=1))
     pair_rows = evaluate_pairs(ALL_GB300_PAIRS)
     print("\nGB300 vs GB200, same recipe (NeMo 26.04.01 and 26.08.01)\n")
     print(pairs_markdown(pair_rows))

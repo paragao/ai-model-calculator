@@ -27,6 +27,10 @@ EP = 8   # Expert parallelism degree (experts distributed across GPUs; 1 for den
 # Training configuration
 TOTAL_TOKENS = 15e12  # Total tokens to train on (15T = 15 trillion)
 PRECISION = "BF16"    # Training precision: "BF16" (16-bit) or "FP8" (8-bit)
+# Memory mode overrides (bytes per parameter); None keeps the mixed-precision accounting of advanced_config. Set by the Trainium
+# "bf16_sr" mode (BF16 with stochastic rounding, no FP32 master copy), see lambda_function.NEURON_MEMORY_MODES.
+GRAD_BYTES_PER_PARAM_OVERRIDE = None
+OPTIM_BYTES_PER_PARAM_OVERRIDE = None
 
 # Performance and time estimation
 MFU = 0.40  # Model FLOPs Utilization - fraction of peak achieved (typically 0.35-0.50)

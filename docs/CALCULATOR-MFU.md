@@ -366,6 +366,24 @@ With 1,100 W against 1,000 W and the same exponent (fitted on GB300 only):
 | b300-vs-b200-gpt-oss-120b | 1.123 | 1.119 | -0.3% |
 | b300-vs-b200-qwen3-30b | 1.132 | 1.102 | -2.7% |
 
+### 7c. AWS Trainium 1 (the only published Trainium training numbers)
+
+Added with the Trainium hardware step. The Neuron documentation publishes one Trainium training table:
+[Trn1/Trn1n Training Performance](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.27.1/about-neuron/benchmarks/trn1/trn1-training-performance.html), Neuron 2.24.0, NxD Training, BF16 autocast with an FP32 optimizer, micro batch 1,
+global batch 1024, sequence 8192, 32 x trn1.32xlarge = 1,024 NeuronCores. Two rows (`validation_runs.TRN1_RUNS`): Llama-3.1-8B (47.95 seq/s, TP 32 DP 32)
+and Llama-3.1-70B (7.94 seq/s, TP 32 DP 4 PP 8). A rank is a NeuronCore, so the throughput below is per NeuronCore.
+
+One constant is fitted on them: `BASE_EFFICIENCY[("trainium1", "bf16")]` = 0.33 (`fit_trainium1`, geometric mean of the two per-row solutions).
+**There is no hold-out: both rows are in the fit, and the errors below are in-sample.** Two rows from one source and one model family cannot also test the model.
+
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| neuron-trn1-llama31-8b | Llama-3-8B | 1024 | trn1.32xlarge | bf16 | tokens_per_gpu | 384 tok/s/GPU | 435 tok/s/GPU | +13.5% | 26.5% | 29.5 / 26.0 | fit |
+| neuron-trn1-llama31-70b | Llama-3-70B | 1024 | trn1.32xlarge | bf16 | tokens_per_gpu | 64 tok/s/GPU | 56 tok/s/GPU | -12.6% | 28.1% | 177.9 / 203.7 | fit |
+
+In-sample error: median 13.1%, worst 13.5%. The model over-predicts the 8B run (+13.5%) and under-predicts the 70B run (-12.6%) with one constant:
+the published MFU of the two runs is 23.4% and 32.2% (PaLM FLOPs, 190 TFLOPS per chip), a spread one constant cannot follow. They are not in the 38-run set; its summary is unchanged.
+
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}

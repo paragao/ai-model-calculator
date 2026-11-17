@@ -162,3 +162,94 @@ BF16 constant and of the MoE constants, so the term would need a joint refit, wh
 Our own p6-b300 runs are already over-predicted by 19%, so adding 12% would make estimates for the AWS instance worse, while the ratio check against NVIDIA's DGX runs improves.
 Both statements hold: a B300 is about 12% faster than a B200 on the same plan, and the model is already optimistic for the p6-b300 MoE runs we measured. Applying the term to B300 (set
 `tgp_w` 1100 and `tgp_ref_w` 1000 on the two B300 entries) needs the joint refit and a decision on the p5en and B200 numbers; it is left for review.
+
+## 7. AWS Trainium: Trn1 (calibrated), Trn2 and Trn3 (uncalibrated)
+
+Sources are the Neuron pages [Trainium](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trainium.html),
+[Trn1](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-hardware/trn1-arch.html),
+[Trainium2](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html),
+[Trn2](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn2-arch.html),
+[Trainium3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium3.html),
+[Trn3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn3-arch.html) and the AWS
+[instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html). Each number is linked in the code comments of `mfu_model.HARDWARE`.
+
+### 7.1 Chips and NeuronCores
+
+The request and the result count **chips** (the `num_gpus` field). The plan counts **ranks = logical NeuronCores**, as the Neuron recipes do (Llama 3.1 TP 32 = 32 cores = 16 chips of one
+trn1.32xlarge). TP, PP and DP degrees in the result are in NeuronCores; `hardware.chips`, `hardware.ranks` and `hardware.ranks_per_chip` say how they relate.
+Memory per GPU in the result is memory per NeuronCore.
+
+| System | Chips per instance | NeuronCores per chip | BF16 per NeuronCore | Memory per NeuronCore | Price per instance hour |
+|---|---|---|---|---|---|
+| trn1.32xlarge | 16 | 2 (NeuronCore-v2) | 95 TFLOPS (190 per chip) | 16 GiB (32 GiB per chip) | 21.50 USD ([AWS Trn1 page](https://aws.amazon.com/ec2/instance-types/trn1/), region not stated) |
+| trn1n.32xlarge | 16 | 2 | 95 TFLOPS | 16 GiB | 24.78 USD (same page) |
+
+Link tiers (`mfu_model._tier_span_bw`): one NeuronLink-v2 tier (2D torus, 384 GB/s per chip, 96 GB/s per NeuronCore per direction, 32 NeuronCores = one instance), then the EFA:
+800 Gbps per instance on trn1 (3.125 GB/s per NeuronCore) and 1600 Gbps on trn1n (6.25). A group that spans instances is limited by the smaller of the torus and its NeuronCores' EFA share,
+the rule the GPUs use. The link efficiencies of the torus and the switch (`LINK_EFFICIENCY`) are assumptions equal to NVLink's; no Neuron measurement exists.
+
+### 7.2 Neuron rules, each tied to a Neuron SDK version
+
+| Rule in the calculator | Neuron SDK version and source |
+|---|---|
+| Plans are DP, TP (up to 32 NeuronCores), PP and ZeRO-1 only | NxD Training (NxDT) supports DP, TP, sequence parallel, PP (1F1B, interleaved) and ZeRO-1, [NxDT overview, 2.27.1](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.27.1/libraries/nxd-training/overview.html); the two calibration rows are NxDT, 2.24.0 |
+| NxDT is end of support from Neuron 2.29 (April 2026), maintenance only in 2.30, not in the DLAMIs from 2.31; the native PyTorch path (DDP, FSDP2, DTensor TP) replaces it | [What's new, 2.32.0](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.32.0/about-neuron/whats-new.html). The rules above may go stale; they describe the 2.24 recipes the data comes from |
+| EP and CP are not planned | MoE training collectives are experimental in Neuron 2.31 (same page). A MoE model is sized without EP and is labelled uncalibrated for the experts |
+| FP8 / MXFP8 is refused (error, not a warning) | MXFP8 training kernels (2.30) and MXFP8 blockwise-MoE forward (2.32) are experimental kernels in the NKI Library; no end-to-end FP8 pre-training recipe (same page) |
+| Memory mode `bf16_fp32_optimizer` (default) | BF16 autocast with an FP32 optimizer, the mode of the published rows: the reference mixed-precision memory accounting |
+| Memory mode `bf16_sr` (request field `neuron_precision`) | BF16 with stochastic rounding, no FP32 master copy ([AWS blog, Llama 2 7B on 128 trn1](https://aws.amazon.com/blogs/machine-learning/end-to-end-llm-training-on-instance-clusters-with-over-100-nodes-using-aws-trainium/)): weights 2 B, gradients 2 B, optimizer states 4 B. The 2 + 4 bytes are an assumption: no Neuron page states them |
+
+Not modelled: the XLA compile time and graph cache, a one-time cost per job.
+
+### 7.3 Trn1 calibration
+
+One constant fitted on the 2 published rows, no hold-out (`docs/CALCULATOR-MFU.md` section 7c): in-sample median error 13.1%, worst 13.5%. The
+published TP 32 PP 8 plan of Llama-3.1-70B is viable in the memory model, and its estimate is within 15% of the published run. Every Trn1 result carries the calibration text
+in `hardware.calibration` and in `disclaimer`, which the reports print. Unknown: the usable HBM per NeuronCore after the Neuron runtime reserve (the memory model uses the full 16 GiB).
+
+### 7.4 Trn2 (uncalibrated)
+
+**Label on every Trn2 result: "uncalibrated: no published Trn2 training data".** The Neuron documentation publishes a Trn1 training table only
+([benchmarks index](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.28.1/about-neuron/benchmarks/index.html)); no Trn2 training throughput or MFU was found.
+The result says it in `hardware.calibration` and in `disclaimer` (which the reports print), the agent repeats it, and the price is unknown.
+The estimate is a model with Trn1's base efficiency (`BASE_EFFICIENCY[("trainium2", "bf16")]`, an assumption, pinned equal to Trn1's by a test)
+and the same link efficiencies as NVLink (assumption). To calibrate Trn2 it must be measured (for example Llama 3.1 8B and 70B BF16 on 2 to 8 trn2.48xlarge).
+
+| Field | Value | Source |
+|---|---|---|
+| Chip | 8 physical NeuronCore-v3; 667 BF16 TFLOPS dense; 1,299 cFP8 TFLOPS (not used: FP8 training is refused, Neuron 2.30 and 2.32); 96 GiB HBM, 2.9 TB/s | [Trainium2](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html) |
+| Rank | logical NeuronCore, LNC=2 (the default): 4 per chip, 64 per trn2.48xlarge; 166.75 BF16 TFLOPS and 24 GiB each. LNC=1 (8 per chip) is not modelled | [LNC](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-features/logical-neuroncore-config.html) |
+| trn2.48xlarge | 16 chips in a 4x4 2D torus, NeuronLink-v3 1,024 GiB/s per chip (tier 1, 137.44 GB/s per NeuronCore per direction); EFAv3 3.2 Tbps = 400 GB/s per instance = 25 GB/s per chip. The instance page prints "3,200 GB/s" next to "3.2 Tbps": a unit slip for Gbps | [Trn2 instances](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn2-arch.html), [AWS instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html) |
+| Trn2 UltraServer (`trn2-ultraserver`, also `trn2u`, `trn2u.48xlarge`) | 4 x trn2u.48xlarge = 64 chips; chips with the same coordinates form a ring across the instances, 256 GiB/s per chip (tier 2, 34.36 GB/s per NeuronCore per direction); billed as a whole UltraServer of 64 chips | same page |
+| Not modelled | trn2.3xlarge (1 chip, no NeuronLink, no EFA); LNC=1 | same page |
+| Price | **Unknown.** No AWS or Neuron page checked lists an on-demand price. A third-party tracker lists one; it is not used | none |
+
+Three link tiers: 16 chips (64 NeuronCores) at 1,024 GiB/s per chip, the 64-chip UltraServer (256 NeuronCores) at 256 GiB/s per chip, and the EFA at 25 GB/s per chip
+between UltraServers (`test_group_bandwidth_follows_the_three_tiers`). On trn2.48xlarge without the UltraServer the second tier does not exist and traffic between instances goes over the EFA.
+Mixture-of-experts models are sized without EP (experimental in Neuron 2.31) and the result says the expert part is uncalibrated.
+
+### 7.5 Trn3 Gen1 and Gen2 (uncalibrated)
+
+**Label on every Trn3 result: "uncalibrated: no published Trn3 training data".** The Trn3 pages give peak specifications only. Same assumptions as Trn2: Trn1's base
+efficiency (pinned equal by a test) and NVLink's link efficiencies. **Unknown and kept unknown:** AWS instance type names (the calculator's labels `trn3-gen1-ultraserver`
+and `trn3-gen2-ultraserver` are its own, and `trn3` alone is refused with the choice), the default LNC on Trn3 (the LNC page names LNC=2 as the default for Trainium2 only; LNC=2, 4 NeuronCores
+per chip, is assumed and listed), price, usable HBM, and the efficiency of the switched tiers. Sources: [Trainium3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium3.html),
+[Trn3 UltraServers](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn3-arch.html).
+
+| Field | Gen1 UltraServer | Gen2 UltraServer |
+|---|---|---|
+| Chips | 64 (4 servers of 16, 2 racks) | 144 (36 servers of 4, 2 racks of 18) |
+| Per chip | 8 NeuronCore-v4, 671 BF16 TFLOPS dense, 144 GiB HBM at 4.9 TB/s; MXFP8 / MXFP4 2,517 TFLOPS (not used: MXFP8 training is experimental, Neuron 2.30 and 2.32, refused) | same |
+| NeuronCores (LNC=2 assumed) | 4 per chip, 256 per UltraServer, 167.75 BF16 TFLOPS and 36 GiB each | 576, same |
+| Tier 1 | paired chip, direct link, 1,024 GB/s per chip (2 chips) | server switch (radix 4), 1,024 GB/s per chip (4 chips) |
+| Tier 2 | rack switch (radix 32), 1,024 GB/s per chip (32 chips) | rack switch (radix 36), 1,280 GB/s per chip (72 chips) |
+| Tier 3 | same chip in the other rack, direct, 512 GB/s per chip (64 chips) | same chip in the other rack, direct, 256 GB/s per chip (144 chips) |
+| NeuronLink total | 2,560 GB/s per chip (the three tiers add up to it) | 2,560 GB/s per chip |
+| EFA | 12,800 Gbps per UltraServer = 25 GB/s per chip | 57,600 Gbps = 50 GB/s per chip |
+| Billing | whole UltraServer, 64 chips | whole UltraServer, 144 chips |
+| Price | unknown | unknown |
+
+What changes against Trn2 (`mfu_model._tier_span_bw`): the tiers are switched, so a collective inside a tier gets the per-chip rate for any group shape (`test_switched_tiers_do_not_depend_on_the_group_shape`);
+an expert-parallel all-to-all inside the 72-chip rack, and inside the whole UltraServer, uses no EFA, and only a group that spans two UltraServers does
+(`test_ep_all_to_all_inside_the_rack_and_the_ultraserver_stays_off_the_efa`). The BF16 peak per chip (671 against 667 TFLOPS) is Trn2's, so the gain over Trn2 is memory (144 GiB, 4.9 TB/s)
+and links, not BF16 compute; a Trn3 estimate has no data behind it.

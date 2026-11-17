@@ -13,6 +13,7 @@ Most users should leave these at their default values.
 
 # Import PRECISION from project config to determine PARAM_BYTES
 from .project_config import PRECISION
+from . import project_config as _project_config
 
 # Target batch size configuration
 #
@@ -242,7 +243,8 @@ NUM_EMBEDDINGS_TABLES = 2
 # A fixed 6 was correct only in BF16 (2 * 6 = 12). Under FP8 it gave 1 * 6 = 6,
 # understating optimizer memory 2x -- the optimizer does not shrink just because
 # the parameters are fp8.
-OPTIM_BYTES_PER_PARAM = 12  # fp32 master + fp32 momentum + fp32 variance
+OPTIM_BYTES_PER_PARAM = (getattr(_project_config, "OPTIM_BYTES_PER_PARAM_OVERRIDE", None)
+                         or 12)  # fp32 master + fp32 momentum + fp32 variance (Trainium bf16_sr: 4, two BF16 moments)
 # Divided by PARAM_STORAGE_BYTES, not PARAM_BYTES, because model_mem_gb now carries
 # the STORAGE size. Since storage is BF16 at either precision this is a constant
 # 6.0, and the product stays at OPTIM_BYTES_PER_PARAM as it must.
@@ -276,7 +278,8 @@ OPTIM_BYTES = OPTIM_BYTES_PER_PARAM / PARAM_STORAGE_BYTES  # 6.0 at either preci
 # buffer is a gradient, not optimizer state. Our grad_mem is already divided by the
 # ZeRO sharding width where the strategy shards gradients (ZeRO-2+), so raising
 # this constant does not double-charge a sharded configuration.
-GRAD_BYTES_PER_PARAM = 4  # fp32 main-grad buffer (main_grads_dtype=torch.float32)
+GRAD_BYTES_PER_PARAM = (getattr(_project_config, "GRAD_BYTES_PER_PARAM_OVERRIDE", None)
+                        or 4)  # fp32 main-grad buffer (main_grads_dtype=torch.float32) (Trainium bf16_sr: 2)
 # Divided by PARAM_STORAGE_BYTES for the same reason as OPTIM_BYTES above. Both
 # are now constant across PRECISION, which is the point: neither gradients nor
 # optimizer state shrink under FP8, and neither do the weights themselves.
