@@ -227,3 +227,29 @@ and the same link efficiencies as NVLink (assumption). To calibrate Trn2 it must
 Three link tiers: 16 chips (64 NeuronCores) at 1,024 GiB/s per chip, the 64-chip UltraServer (256 NeuronCores) at 256 GiB/s per chip, and the EFA at 25 GB/s per chip
 between UltraServers (`test_group_bandwidth_follows_the_three_tiers`). On trn2.48xlarge without the UltraServer the second tier does not exist and traffic between instances goes over the EFA.
 Mixture-of-experts models are sized without EP (experimental in Neuron 2.31) and the result says the expert part is uncalibrated.
+
+### 7.5 Trn3 Gen1 and Gen2 (uncalibrated)
+
+**Label on every Trn3 result: "uncalibrated: no published Trn3 training data".** The Trn3 pages give peak specifications only. Same assumptions as Trn2: Trn1's base
+efficiency (pinned equal by a test) and NVLink's link efficiencies. **Unknown and kept unknown:** AWS instance type names (the calculator's labels `trn3-gen1-ultraserver`
+and `trn3-gen2-ultraserver` are its own, and `trn3` alone is refused with the choice), the default LNC on Trn3 (the LNC page names LNC=2 as the default for Trainium2 only; LNC=2, 4 NeuronCores
+per chip, is assumed and listed), price, usable HBM, and the efficiency of the switched tiers. Sources: [Trainium3](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium3.html),
+[Trn3 UltraServers](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn3-arch.html).
+
+| Field | Gen1 UltraServer | Gen2 UltraServer |
+|---|---|---|
+| Chips | 64 (4 servers of 16, 2 racks) | 144 (36 servers of 4, 2 racks of 18) |
+| Per chip | 8 NeuronCore-v4, 671 BF16 TFLOPS dense, 144 GiB HBM at 4.9 TB/s; MXFP8 / MXFP4 2,517 TFLOPS (not used: MXFP8 training is experimental, Neuron 2.30 and 2.32, refused) | same |
+| NeuronCores (LNC=2 assumed) | 4 per chip, 256 per UltraServer, 167.75 BF16 TFLOPS and 36 GiB each | 576, same |
+| Tier 1 | paired chip, direct link, 1,024 GB/s per chip (2 chips) | server switch (radix 4), 1,024 GB/s per chip (4 chips) |
+| Tier 2 | rack switch (radix 32), 1,024 GB/s per chip (32 chips) | rack switch (radix 36), 1,280 GB/s per chip (72 chips) |
+| Tier 3 | same chip in the other rack, direct, 512 GB/s per chip (64 chips) | same chip in the other rack, direct, 256 GB/s per chip (144 chips) |
+| NeuronLink total | 2,560 GB/s per chip (the three tiers add up to it) | 2,560 GB/s per chip |
+| EFA | 12,800 Gbps per UltraServer = 25 GB/s per chip | 57,600 Gbps = 50 GB/s per chip |
+| Billing | whole UltraServer, 64 chips | whole UltraServer, 144 chips |
+| Price | unknown | unknown |
+
+What changes against Trn2 (`mfu_model._tier_span_bw`): the tiers are switched, so a collective inside a tier gets the per-chip rate for any group shape (`test_switched_tiers_do_not_depend_on_the_group_shape`);
+an expert-parallel all-to-all inside the 72-chip rack, and inside the whole UltraServer, uses no EFA, and only a group that spans two UltraServers does
+(`test_ep_all_to_all_inside_the_rack_and_the_ultraserver_stays_off_the_efa`). The BF16 peak per chip (671 against 667 TFLOPS) is Trn2's, so the gain over Trn2 is memory (144 GiB, 4.9 TB/s)
+and links, not BF16 compute; a Trn3 estimate has no data behind it.

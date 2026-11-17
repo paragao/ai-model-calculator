@@ -48,6 +48,11 @@ HARDWARE_ALIASES = {
     "trn2.48xlarge": "trn2.48xlarge", "trn2": "trn2.48xlarge", "trainium2": "trn2.48xlarge",
     "trn2-ultraserver": "trn2-ultraserver", "trn2u": "trn2-ultraserver", "trn2u.48xlarge": "trn2-ultraserver",
     "trn2.ultraserver": "trn2-ultraserver", "trn2u-ultraserver": "trn2-ultraserver",
+    # Trainium3: two UltraServer generations, no AWS instance type names yet (labels are the calculator's own, from the Trn3 architecture page).
+    "trn3-gen1-ultraserver": "trn3-gen1-ultraserver", "trn3-gen1": "trn3-gen1-ultraserver", "trn3gen1": "trn3-gen1-ultraserver",
+    "trn3-gen1.ultraserver": "trn3-gen1-ultraserver",
+    "trn3-gen2-ultraserver": "trn3-gen2-ultraserver", "trn3-gen2": "trn3-gen2-ultraserver", "trn3gen2": "trn3-gen2-ultraserver",
+    "trn3-gen2.ultraserver": "trn3-gen2-ultraserver",
     # GB300: AWS has published no instance type names. The calculator's own label is the UltraServer (72 GPUs).
     "p6e-gb300-ultraserver": "p6e-gb300-ultraserver", "gb300": "p6e-gb300-ultraserver", "p6e-gb300": "p6e-gb300-ultraserver",
     "gb300-nvl72": "p6e-gb300-ultraserver", "gb300-ultraserver": "p6e-gb300-ultraserver",
@@ -60,11 +65,14 @@ GPU_OF_INSTANCE = {
     "p6e-gb300-ultraserver": "GB300 279GB",
     "trn1.32xlarge": "Trainium1 32GiB (16 chips)", "trn1n.32xlarge": "Trainium1 32GiB (16 chips)",
     "trn2.48xlarge": "Trainium2 96GiB (16 chips)", "trn2-ultraserver": "Trainium2 96GiB (64 chips, UltraServer)",
+    "trn3-gen1-ultraserver": "Trainium3 144GiB (64 chips, Gen1 UltraServer)", "trn3-gen2-ultraserver": "Trainium3 144GiB (144 chips, Gen2 UltraServer)",
 }
 
 # Names that are a family, not one system: refused with the choices (never guessed).
 AMBIGUOUS_HARDWARE = {
     "trainium": "Trainium is a family: trn1 (Trainium1), trn2 (Trainium2) or trn3 (Trainium3). Name one of them.",
+    "trn3": "Trn3 has two UltraServer generations: trn3-gen1 (64 chips) and trn3-gen2 (144 chips). AWS has published no Trn3 instance names. Name one.",
+    "trainium3": "Trn3 has two UltraServer generations: trn3-gen1 (64 chips) and trn3-gen2 (144 chips). AWS has published no Trn3 instance names. Name one.",
 }
 
 # Trainium memory modes (Neuron SDK 2.24 recipes): the two published Trn1 rows use BF16 autocast with an FP32 optimizer, the mixed-precision
@@ -109,6 +117,10 @@ INSTANCE_SPECS = {
     # 166.75 BF16 TFLOPS per logical NeuronCore (667 per chip). Sources: mfu_model.HARDWARE.
     "trn2.48xlarge": {"mem_gb": 24, "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1100, "peak_tflops_bf16": 166.75},
     "trn2-ultraserver": {"mem_gb": 24, "inter_node_bw_gb": 400, "intra_node_bw_gbps": 1100, "peak_tflops_bf16": 166.75},
+    # Trainium3 (LNC=2 assumed, 4 logical NeuronCores per chip): 36 GiB each (144 GiB chip / 4); EFA per UltraServer 1,600 GB/s (Gen1, 12,800 Gbps)
+    # and 7,200 GB/s (Gen2, 57,600 Gbps); NeuronLink-v4 2,560 GB/s per chip; 167.75 BF16 TFLOPS each (671 per chip). Sources: mfu_model.HARDWARE.
+    "trn3-gen1-ultraserver": {"mem_gb": 36, "inter_node_bw_gb": 1600, "intra_node_bw_gbps": 2560, "peak_tflops_bf16": 167.75},
+    "trn3-gen2-ultraserver": {"mem_gb": 36, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 2560, "peak_tflops_bf16": 167.75},
     "u-p6e-gb200x72": {"mem_gb": 185, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
@@ -125,7 +137,8 @@ INSTANCE_COST_PER_HOUR = {
 }
 # No public on-demand price: GB200 UltraServers are sold through EC2 Capacity Blocks for ML and the price is set at
 # purchase (https://aws.amazon.com/ec2/capacityblocks/pricing/). The estimate shows no cost; it never invents one.
-PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver", "trn2.48xlarge", "trn2-ultraserver")
+PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver", "trn2.48xlarge", "trn2-ultraserver",
+                          "trn3-gen1-ultraserver", "trn3-gen2-ultraserver")
 PRICE_UNKNOWN_NOTE = ("Price unknown: this hardware is sold through EC2 Capacity Blocks for ML and AWS publishes no "
                       "on-demand price, so no cost is estimated. GPU count, time and billed units are still given.")
 MAX_AUTO_GPUS = 4096
