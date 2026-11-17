@@ -676,54 +676,121 @@ class NvlinkInsideDomainEfaBetween(unittest.TestCase):
             for shape, plan in ((dense, self.DENSE), (moe, self.moe_plan(n))):
                 a = self.times(mm.HARDWARE["u-p6e-gb200x72"], shape, n, **plan)
                 b = self.times(mm.HARDWARE["p6e-gb300-ultraserver"], shape, n, **plan)
-                self.assertEqual(a, b, (n, plan))  # same compute peak, same links
+                for k in ("tp_total", "cp_total", "ep_total", "dp_total"):  # same links; the compute differs by the power term
+                    self.assertEqual(a[k], b[k], (n, plan, k))
 
 
 class Gb300Validation(unittest.TestCase):
-    """GB300 / GB200 throughput ratio of the same NeMo 26.08.01 recipe, four pairs. Nothing is fitted to them."""
+    """GB300 / GB200 throughput ratio of the same NeMo recipe, 12 pairs. The power exponent is fitted on 2 (dense FP8, 26.04.01);
+    the other 10 are hold-out: dense MXFP8, the MoE pairs of 26.04.01 and the four MoE pairs of 26.08.01."""
 
     @classmethod
     def setUpClass(cls):
-        cls.rows = vr.evaluate_pairs()
-        cls.summary = vr.pair_summary(cls.rows)
+        cls.rows = vr.evaluate_pairs(vr.ALL_GB300_PAIRS)
+        cls.groups = vr.pair_groups(cls.rows)
+        cls.before = vr.evaluate_pairs(vr.ALL_GB300_PAIRS, tgp_exponent=0.0)
 
-    def test_four_pairs_all_hold_out_and_not_in_the_fit_set(self):
-        self.assertEqual([r["id"] for r in self.rows], ["gb300-vs-gb200-dsv3", "gb300-vs-gb200-gpt-oss-120b",
-                                                        "gb300-vs-gb200-qwen3-30b", "gb300-vs-gb200-qwen3-235b"])
-        for p in vr.GB300_PAIRS:
+    def test_twelve_pairs_two_fit_ten_hold_out(self):
+        self.assertEqual(len(self.rows), 12)
+        self.assertEqual([r["id"] for r in self.rows if r["fit"]],
+                         ["gb300-vs-gb200-llama3-70b-fp8-2604", "gb300-vs-gb200-llama31-405b-fp8-2604"])
+        run_ids = {r["id"] for r in vr.RUNS}
+        for p in vr.ALL_GB300_PAIRS:
             for side in ("gb300", "gb200"):
-                self.assertFalse(p[side]["fit"])
-                self.assertNotIn(p[side]["id"], {r["id"] for r in vr.RUNS})
+                self.assertFalse(p[side]["fit"])  # not part of the 38-run fit
+                self.assertNotIn(p[side]["id"], run_ids)
                 self.assertNotIn(p[side]["id"], vr.fit()["fit_runs"])
             self.assertEqual((p["gb300"]["hardware"], p["gb200"]["hardware"]), ("dgx-gb300", "dgx-gb200"))
             self.assertEqual(p["gb300"]["plan"]["gbs"], p["gb200"]["plan"]["gbs"])  # same global batch
-            self.assertTrue(p["gb300"]["layout"].startswith("unverified: "))
+        dense_fit = [p for p in vr.ALL_GB300_PAIRS if p["fit"]]
+        self.assertTrue(all(p["model"].startswith("Llama") and p["gb300"]["precision"] == "fp8" for p in dense_fit))
 
-    def test_ratio_error_within_30_percent_and_the_typical_error_is_pinned(self):
+    def test_ratio_error_after_the_power_term_meets_the_bar(self):
+        g = self.groups
+        # bar: 15% typical, 30% worst. Pinned numbers: hold-out median 3.8%, worst 7.1%.
+        self.assertEqual((g["hold_out"]["pairs"], g["hold_out"]["median_abs_error_pct"], g["hold_out"]["max_abs_error_pct"]), (10, 3.8, 7.1))
+        self.assertEqual((g["fit"]["median_abs_error_pct"], g["fit"]["max_abs_error_pct"]), (2.1, 3.1))
         for r in self.rows:
             self.assertLessEqual(abs(r["ratio_error_pct"]), 30.0, r)
-        # Typical error 15.3% against the 15% bar: reported as it is, not tuned (docs/CALCULATOR-MFU.md section 7b).
-        self.assertEqual((self.summary["pairs"], self.summary["median_abs_error_pct"], self.summary["max_abs_error_pct"]),
-                         (4, 15.3, 21.2))
+        for key in ("hold_out_dense", "hold_out_moe_2604", "hold_out_moe_2608"):
+            self.assertLessEqual(g[key]["median_abs_error_pct"], 15, key)
+            self.assertLessEqual(g[key]["max_abs_error_pct"], 30, key)
 
-    def test_known_limit_gb300_compute_is_gb200_compute(self):
-        """The model has one Blackwell efficiency, so it predicts GB300 about equal to GB200 on the same plan. The published
-        GB300 runs are 9-28% faster (more memory, larger micro batches, Blackwell Ultra attention). Pinned so a change shows."""
-        for r in self.rows:
-            self.assertGreater(r["published_ratio"], 1.05, r)
-            self.assertAlmostEqual(r["predicted_ratio"], 1.0, delta=0.02, msg=r["id"])
-            self.assertLess(r["predicted_ratio"], r["published_ratio"], r)
+    def test_before_the_term_the_ratio_was_one_and_the_typical_error_above_the_bar(self):
+        """Fails on the branch before this change (the model gave GB300 the same speed as GB200 per plan)."""
+        for r in self.before:
+            self.assertAlmostEqual(r["predicted_ratio"], 1.0, delta=0.05, msg=r["id"])  # plan effects only
+            self.assertGreater(r["published_ratio"], 1.08, r)
+        hold = vr.pair_summary([r for r in self.before if not r["fit"]])
+        self.assertEqual((hold["median_abs_error_pct"], hold["max_abs_error_pct"]), (15.8, 22.7))
+        self.assertGreater(hold["median_abs_error_pct"], 15)
+        before_2608 = vr.pair_summary([r for r in self.before if r["release"] == "2608"])
+        self.assertEqual((before_2608["median_abs_error_pct"], before_2608["max_abs_error_pct"]), (15.3, 21.2))
 
-    def test_pinned_summary_is_current(self):
-        v = mm.VALIDATION_SUMMARY
-        self.assertEqual((v["gb300_pairs"], v["gb300_pair_median_abs_error_pct"], v["gb300_pair_max_abs_error_pct"]),
-                         (self.summary["pairs"], self.summary["median_abs_error_pct"], self.summary["max_abs_error_pct"]))
+    def test_the_exponent_is_the_fit_of_the_fit_pairs(self):
+        self.assertEqual(vr.fit_tgp_exponent(), mm.TGP_EXPONENT)
+        self.assertEqual(mm.TGP_EXPONENT, 1.25)
+        self.assertEqual(vr.fit()["tgp_exponent"], mm.TGP_EXPONENT)
+
+    def test_the_term_is_board_power_and_only_on_gb300(self):
+        gb300 = [k for k, hw in mm.HARDWARE.items() if hw.get("tgp_ref_w")]
+        self.assertEqual(sorted(gb300), ["dgx-gb300", "p6e-gb300-ultraserver"])
+        for k in gb300:  # NVIDIA Blackwell Ultra table: up to 1,400 W against up to 1,200 W at the same 5 PF dense FP8
+            self.assertEqual((mm.HARDWARE[k]["tgp_w"], mm.HARDWARE[k]["tgp_ref_w"]), (1400.0, 1200.0))
+            self.assertEqual(mm.HARDWARE[k]["fp8"], mm.HARDWARE["u-p6e-gb200x72"]["fp8"])
+        shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
+        plan = dict(num_gpus=64, tp=1, pp=1, cp=1, vp=1, ep=1, mbs=2, seq=8192, gbs=256, fsdp=True)
+        a = mm.estimate(shape, mm.HARDWARE["dgx-gb200"], plan, "fp8")
+        b = mm.estimate(shape, mm.HARDWARE["dgx-gb300"], plan, "fp8")
+        self.assertEqual((a["tgp_gain"], b["tgp_gain"]), (1.0, round((1400 / 1200) ** 1.25, 4)))
+        self.assertAlmostEqual(b["tokens_per_second"] / a["tokens_per_second"], (1400 / 1200) ** 1.25, delta=0.01)
+        self.assertEqual(a["time_s"]["dp_total"], b["time_s"]["dp_total"])  # communication is untouched
+
+    def test_the_other_causes_do_not_explain_the_gap(self):
+        """Peaks and HBM bandwidth are equal (NVIDIA table); the faster attention SFU can save at most 1.5 points of 18-24."""
+        for p in vr.GB300_FIT_PAIRS:
+            shape = mm.model_shape(vr.ARCH[p["model"]])
+            seq = p["gb200"]["plan"]["seq"]
+            share = vr.attention_exp_share(shape, seq, p["gb200"]["reported"], vr.SFU_TERA_EXP["blackwell"])
+            ultra = vr.attention_exp_share(shape, seq, p["gb300"]["reported"], vr.SFU_TERA_EXP["blackwell-ultra"])
+            self.assertLess(share, 0.04, p["id"])           # attention exponentials: under 4% of a GB200 second at SFU peak
+            self.assertLess(share * (1 - 5.0 / 10.7), 0.02, p["id"])  # so a 2.14x faster SFU saves under 2%
+            self.assertLess(ultra, share, p["id"])
+            gap = p["gb300"]["reported"] / p["gb200"]["reported"] - 1
+            self.assertGreater(gap, 0.15, p["id"])
+        # same plan, same micro batch, 70B FP8: the gap is not capacity (larger micro batches) and not the plan
+        p = vr.GB300_FIT_PAIRS[0]
+        keys = ("tp", "pp", "cp", "vp", "ep", "mbs", "gbs", "seq")
+        self.assertEqual({k: p["gb300"]["plan"][k] for k in keys}, {k: p["gb200"]["plan"][k] for k in keys})
+
+    def test_b300_hgx_check_the_term_would_be_right_but_it_is_not_applied(self):
+        off, on = vr.evaluate_b300_pairs(False), vr.evaluate_b300_pairs(True)
+        self.assertEqual(len(off), 3)
+        self.assertGreater(vr.pair_summary(off)["median_abs_error_pct"], 10)   # ratio predicted 1.0, published 1.11-1.13
+        self.assertLessEqual(vr.pair_summary(on)["max_abs_error_pct"], 3.0)    # with 1,100 W / 1,000 W: within 3%
+        self.assertNotIn("tgp_ref_w", mm.HARDWARE["dgx-b300"])                  # shipped: not applied
+        self.assertNotIn("tgp_ref_w", mm.HARDWARE["p6-b300.48xlarge"])
+        self.assertNotIn("tgp_ref_w", mm.HARDWARE["dgx-b300"])                  # evaluate_b300_pairs restored it
+
+    def test_existing_b300_rows_do_not_move(self):
+        by = {r["id"]: r["error_pct"] for r in vr.evaluate()}
+        self.assertEqual({k: by[k] for k in ("repo-qwen3-8b-bf16-b300", "mb2604-b300-dsv3", "mb2604-b300-qwen3-30b",
+                                             "mb2604-b300-qwen3-235b", "repo-kimi-k2-b300-32n", "repo-dsv3-b300-32n")},
+                         {"repo-qwen3-8b-bf16-b300": -5.0, "mb2604-b300-dsv3": 7.4, "mb2604-b300-qwen3-30b": 1.6,
+                          "mb2604-b300-qwen3-235b": -1.2, "repo-kimi-k2-b300-32n": 19.0, "repo-dsv3-b300-32n": 18.7})
 
     def test_the_existing_summaries_are_untouched(self):
         s = vr.summary(vr.evaluate())
         self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.1, 58.9))
+        self.assertEqual((s["hold_out"]["median_abs_error_pct"], s["fit"]["median_abs_error_pct"]), (7.4, 5.8))
         self.assertEqual(vr.rack_summary(vr.evaluate(vr.RACK_RUNS)),
                          {"runs": 8, "median_abs_error_pct": 10.4, "max_abs_error_pct": 82.3})
+
+    def test_pinned_summary_is_current(self):
+        v = mm.VALIDATION_SUMMARY
+        h = self.groups["hold_out"]
+        self.assertEqual((v["gb300_fit_pairs"], v["gb300_pairs"], v["gb300_pair_median_abs_error_pct"], v["gb300_pair_max_abs_error_pct"]),
+                         (self.groups["fit"]["pairs"], h["pairs"], h["median_abs_error_pct"], h["max_abs_error_pct"]))
 
     def test_gpt_oss_120b_matches_its_model_card(self):
         s = mm.model_shape(vr.ARCH["GPT-OSS-120B"])
@@ -732,6 +799,25 @@ class Gb300Validation(unittest.TestCase):
     def test_docs_table_is_current(self):
         doc = DOC_MFU.read_text() if hasattr(DOC_MFU, "read_text") else open(DOC_MFU).read()
         self.assertIn(vr.pairs_markdown(self.rows), doc)
+
+
+class Gb300PowerTermInTheResult(unittest.TestCase):
+    """The board-power term shows in the phase 9 result for GB300 and nowhere else."""
+
+    def test_gb300_result_has_the_power_gain_and_is_faster_than_gb200_on_the_same_plan(self):
+        kw = dict(num_gpus=72, total_tokens_b=2000, tensor_parallel=1, pipeline_parallel=4)
+        a = run("Llama-3.1-70B", hardware="GB200", **kw)
+        b = run("Llama-3.1-70B", hardware="GB300", **kw)
+        self.assertNotIn("power_gain", a["mfu_breakdown"])
+        self.assertEqual(b["mfu_breakdown"]["power_gain"], round((1400 / 1200) ** 1.25, 4))
+        ratio = b["training_time"]["tokens_per_second"] / a["training_time"]["tokens_per_second"]
+        self.assertGreater(ratio, 1.15)
+        self.assertLess(ratio, 1.25)
+
+    def test_no_other_hardware_has_it(self):
+        for hw in ("B200", "B300", "H200", "H100", "A100", "GB200"):
+            r = run("Llama-3.1-8B", hardware=hw, num_gpus=8, total_tokens_b=100)
+            self.assertNotIn("power_gain", r["mfu_breakdown"], hw)
 
 
 if __name__ == "__main__":

@@ -86,10 +86,9 @@ never filled in by a guess; what paragao gave is listed in `hardware.user_provid
 | Instance types and sizes | **Unknown** as AWS instance names. 4 GPUs per server is from paragao, 2026-11-17 (and the NVL72 compute tray, below), used for the GPU-count steps | [NVIDIA DGX SuperPOD GB300 reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf), paragao, 2026-11-17 |
 | On-demand price | **Unknown.** No cost line | none |
 
-Validation: four GB300 / GB200 pairs of the NeMo 26.08.01 performance summary (`docs/CALCULATOR-MFU.md` section 7b). Ratio error
-median 15.3%, worst 21.2%. The model predicts GB300 about equal to GB200 (same dense peak, one Blackwell efficiency), while the published
-GB300 runs are 9-28% faster. A GB300 estimate is GB200-class and low by about that much. `dgx-gb300` (validation only) has 100 GB/s per GPU
-(4 x ConnectX-8 800 Gb/s per 4-GPU compute tray).
+Validation: twelve GB300 / GB200 pairs of NeMo / Megatron-Bridge results (`docs/CALCULATOR-MFU.md` section 7b). GB300 runs faster than GB200 at the same listed peak;
+section 6 gives the cause and the term. Ratio error on the 10 hold-out pairs: median 3.8%, worst 7.1% (before the term: 15.8% and 22.7%).
+`dgx-gb300` (validation only) has 100 GB/s per GPU (4 x ConnectX-8 800 Gb/s per 4-GPU compute tray).
 
 ### 5a. Scale-out: 72 and 144 GPUs (GB200 x72 and GB300 are the same)
 
@@ -106,16 +105,60 @@ A group spread over both UltraServers is limited by the smaller of NVLink and th
 so a DP group that uses all 72 GPUs of each UltraServer stays NVLink-limited, and only groups with few ranks per UltraServer
 (or the EP all-to-all, which is timed on the EFA directly) are EFA-limited. This is the same rule the model uses for HGX nodes.
 
-Example, Llama-3.1-70B BF16 on GB300, 2T tokens, calculator Lambda (plan search chooses TP/PP/ZeRO):
+Example, Llama-3.1-70B BF16 on GB300 (with the board-power term of section 6), 2T tokens, calculator Lambda (plan search chooses TP/PP/ZeRO):
 
 | GPUs | UltraServers | Plan | MFU | tokens/s | tokens/s per GPU | Days |
 |---|---|---|---|---|---|---|
-| 72 | 1 | TP 1, PP 1, DP 72, ZeRO-2 | 43.75% | 175,210 | 2,433 | 146.8 |
-| 144 | 2 | TP 1, PP 1, DP 144, ZeRO-2 | 43.74% | 350,313 | 2,433 | 73.4 |
+| 72 | 1 | TP 1, PP 4, DP 18, ZeRO-1 | 53.0% | 212,271 | 2,948 | 121.2 |
+| 144 | 2 | TP 1, PP 1, DP 144, ZeRO-2 | 52.9% | 423,621 | 2,942 | 60.7 |
 
 Example, mfu_model, DeepSeek-V3 shape with 288 experts, FP8, EP = number of GPUs, GB300:
 
 | GPUs | EP all-to-all per step | Step | MFU |
 |---|---|---|---|
-| 72 | 314.2 ms (NVLink) | 1.825 s | 26.1% |
-| 144 | 1,352.8 ms (half over EFA) | 2.552 s | 18.7% |
+| 72 | 314.2 ms (NVLink) | 1.546 s | 30.8% |
+| 144 | 1,352.8 ms (half over EFA) | 2.273 s | 21.0% |
+
+## 6. Why GB300 is faster than GB200 at the same peak
+
+Observed: in the 12 NeMo pairs the same recipe runs 8.7% to 31% faster per GPU on GB300 (dense FP8 70B with the same plan and micro batch on both:
++24%; 405B: +19%). The model gave GB300 the same compute efficiency as GB200 and so predicted a ratio of 1.0 (typical error 15.8%, worst 22.7% on the hold-out).
+
+Candidate causes, with the numbers that rule them in or out (NVIDIA's [Blackwell Ultra table](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) unless marked):
+
+| Cause | Blackwell (GB200) | Blackwell Ultra (GB300) | Explains the gap? |
+|---|---|---|---|
+| Dense FP8 peak | 5 PFLOPS | 5 PFLOPS | No: equal. The 1.5x of Blackwell Ultra is NVFP4 only (15 against 10 PFLOPS); the NVFP4 pairs show about 1.5x, as expected, and are not modelled |
+| HBM bandwidth | 8 TB/s | 8 TB/s | No: equal |
+| HBM capacity | 192 GB | 288 GB | No: the 70B FP8 pair uses the same plan and micro batch 2 on both and still shows +24%. Larger micro batches matter only where the published plans differ (the plan search already follows memory) |
+| Attention softmax (SFU exponentials) | 5.0 tera-exp/s | 10.7 tera-exp/s | Not more than 1 to 2 points: the exponentials of attention take 3.5% (70B, 8k) and 2.3% (405B, 8k) of a GB200 second even at the SFU peak (`attention_exp_share`), so a 2.14x faster SFU saves under 2% of 18% to 24% |
+| Board power (TGP) | up to 1,200 W | up to 1,400 W | **Yes, mostly.** Ratio 1.167. Large-GEMM transformer training draws the whole envelope (ViT-Large: 92 to 97% of TDP on both B200 and B300; B300 +16% training and +21% inference at 1,100 W against 1,000 W, [arXiv 2610.41919](https://arxiv.org/abs/2610.41919)). At a fixed listed peak, sustained tensor throughput follows the power headroom |
+| Software release | | | Noise of about +-10% in any ratio: between NeMo 26.04.01 and 26.08.01 GB300 gained 26% on DeepSeek-V3 and 40% on Qwen3-30B-A3B, GB200 15% and 57%. The dense pairs of 26.04.01 and the MoE pairs of both releases give the same ratio band |
+
+The term is `eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT` (`mfu_model.estimate`), a general term for any system
+that has a board power and the board power of the Blackwell part whose constant it uses: GB300 has 1,400 W and 1,200 W. The one constant, `TGP_EXPONENT = 1.25`, is
+fitted on two pairs and checked on ten. An exponent above 1 says the power ratio (1.167) accounts for about 1.17 of the 1.21 gain, and about 3 to 4 points of the gap come
+from somewhere this data cannot separate (performance per watt, kernels tuned for sm_103). They are not hidden: they sit in the exponent.
+
+Before and after on the hold-out (ratio error GB300 / GB200): median 15.8% to 3.8%, worst 22.7% to 7.1% (`docs/CALCULATOR-MFU.md` section 7b).
+
+### 6a. HGX B300: the same term is right for the ratio, and is not applied
+
+HGX B300 (1,100 W) against HGX B200 (1,000 W) at the same plan shows the same gain: published 1.11, 1.12, 1.13 (NeMo 26.04 and 26.04.01: DeepSeek-V3, GPT-OSS, Qwen3-30B-A3B).
+With the term (exponent fitted on GB300 only) the predicted ratios are 1.113, 1.119 and 1.102: errors +0.1%, -0.3% and -2.7%. Without it the model predicts 1.0 (about -11%).
+
+It is not applied to `p6-b300.48xlarge` and `dgx-b300`, because the absolute B300 rows already in the validation set would move the wrong way. They are part of the fit of the Blackwell
+BF16 constant and of the MoE constants, so the term would need a joint refit, which also moves the p5en, B200 and H100 results. Without the refit (exponent 1.25):
+
+| Row | Set | Error now | Error with the term |
+|---|---|---|---|
+| repo-qwen3-8b-bf16-b300 (our run, p6-b300) | fit | -5.0% | +7.0% |
+| mb2604-b300-dsv3 | fit | +7.4% | +19.6% |
+| mb2604-b300-qwen3-30b | hold-out | +1.6% | +11.9% |
+| mb2604-b300-qwen3-235b | hold-out | -1.2% | +9.5% |
+| repo-kimi-k2-b300-32n (our run, p6-b300) | hold-out | +19.0% | +29.5% |
+| repo-dsv3-b300-32n (our run, p6-b300) | hold-out | +18.7% | +31.2% |
+
+Our own p6-b300 runs are already over-predicted by 19%, so adding 12% would make estimates for the AWS instance worse, while the ratio check against NVIDIA's DGX runs improves.
+Both statements hold: a B300 is about 12% faster than a B200 on the same plan, and the model is already optimistic for the p6-b300 MoE runs we measured. Applying the term to B300 (set
+`tgp_w` 1100 and `tgp_ref_w` 1000 on the two B300 entries) needs the joint refit and a decision on the p5en and B200 numbers; it is left for review.

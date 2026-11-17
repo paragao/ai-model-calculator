@@ -438,6 +438,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "expert_flops_share": est["expert_flops_share"],
             "base_efficiency": est["base_efficiency"],
             "base_efficiency_key": f"{mm_hw['family']}/{est['precision']}",
+            **({"power_gain": est["tgp_gain"]} if est["tgp_gain"] != 1.0 else {}),
             "moe_expert_factor": est["moe_expert_factor"],
             "compute_efficiency": est["compute_efficiency"],
             "bubble_fraction": est["bubble_fraction"],

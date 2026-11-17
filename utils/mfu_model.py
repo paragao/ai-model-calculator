@@ -87,8 +87,17 @@ HARDWARE = {
     #       (the same per-GPU figure as GB200). EFA carries traffic only between UltraServers; inside the 72-GPU domain it is NVLink.
     # Left unknown on purpose (never filled in by a guess), listed in "unknowns":
     #   memory per GPU (279 GB is derived), price, instance type names and sizes: not published.
+    # Board power (the "tgp_w" fields): NVIDIA lists the maximum board power (TGP) of Blackwell (B200, GB200) as up to 1,200 W
+    # and of Blackwell Ultra (B300, GB300) as up to 1,400 W, at the same dense FP8 peak of 5 PFLOPS and the same 8 TB/s of HBM:
+    #   https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/ (Table 2)
+    # Large-GEMM transformer training draws the whole envelope (ViT-Large: 92-97% of TDP on B200 and B300, B300 +16% training,
+    # +21% inference): arXiv 2610.41919. At equal listed peak, sustained tensor throughput follows the power headroom, see
+    # TGP_EXPONENT. "tgp_ref_w" is the board power of the Blackwell part whose efficiency constant the system uses.
+    # Applied to GB300 only. HGX B300 (1,100 W against 1,000 W) shows the same direction (+10% to +13% at the same plan in NeMo
+    # 26.02 to 26.04.01), but the B300 rows of validation_runs.py are part of the fit of the Blackwell constants (BF16 and the MoE
+    # factor), so the same term would push them 9 to 10 points up without a joint refit; see docs/CALCULATOR-HARDWARE.md section 6.
     "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
-                              "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72,
+                              "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
                               "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",),
                               "unknowns": ("usable GPU memory (279 GB is used: 1.5 x GB200's 13.4 TB / 72, AWS gives only the 1.5x)",
                                            "on-demand price", "instance type names and sizes")},
@@ -97,7 +106,7 @@ HARDWARE = {
     #   NVIDIA DGX SuperPOD GB300 reference architecture (PDF), "The compute tray integrates four ConnectX-8 NICs ...
     #   QUANTUM-X800 (800Gbps)": https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf
     "dgx-gb300":        {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
-                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0},
     # DGX GB200 NVL72 (validation only): 18 compute trays x 4 GPUs, each tray 4 x ConnectX-7 NDR 400 Gb/s = 50 GB/s per GPU
     #   https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/dgx-superpod-components.html
     "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
@@ -208,6 +217,12 @@ BASE_EFFICIENCY = {
 # of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
 MOE_EXPERT_FACTOR = 0.78
 MOE_EXPERT_HALF_FFN = 1024
+# Sustained tensor throughput at equal listed peak scales with board power: for a system with "tgp_w" and "tgp_ref_w",
+#   eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT
+# One constant, fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01 (validation_runs.fit_tgp_exponent), checked on the
+# other GB300 pairs. An exponent above 1 means the power ratio explains most of the gap and a small part (about 3 to 4 points
+# for GB300, 1,400 W against 1,200 W) comes from elsewhere, see docs/CALCULATOR-HARDWARE.md section 6.
+TGP_EXPONENT = 1.25
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
 LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80}
@@ -253,7 +268,7 @@ VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6
                       "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
                       "superseded_runs": 2,
                       "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
-                      "gb300_pairs": 4, "gb300_pair_median_abs_error_pct": 15.3, "gb300_pair_max_abs_error_pct": 21.2,
+                      "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.1,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {
@@ -546,6 +561,8 @@ def estimate(shape, hw, plan, precision="bf16"):
     fl = flops_per_token(shape, seq)
     f_gpu = fl["total"] * tokens_step / n
     eta_base = BASE_EFFICIENCY.get((hw["family"], prec)) or BASE_EFFICIENCY[(hw["family"], "bf16")]
+    tgp_gain = (hw["tgp_w"] / hw["tgp_ref_w"]) ** TGP_EXPONENT if hw.get("tgp_ref_w") else 1.0
+    eta_base = eta_base * tgp_gain
     f_e = fl["experts"] / fl["total"] if fl["total"] else 0.0
     moe_factor = moe_expert_factor(shape["expert_ffn"]) if f_e else 1.0
     eta = 1.0 / ((1 - f_e) / eta_base + f_e / (eta_base * moe_factor))
@@ -639,7 +656,8 @@ def estimate(shape, hw, plan, precision="bf16"):
         "flops_per_token": fl["total"],
         "attention_flops_share": round(fl["attention"] / fl["total"], 4) if fl["total"] else 0,
         "expert_flops_share": round(f_e, 4),
-        "base_efficiency": eta_base,
+        "base_efficiency": round(eta_base, 4),
+        "tgp_gain": round(tgp_gain, 4),
         "moe_expert_factor": round(moe_factor, 4) if f_e else None,
         "compute_efficiency": round(eta, 4),
         "recompute_flops_share": round(rec_share, 4),

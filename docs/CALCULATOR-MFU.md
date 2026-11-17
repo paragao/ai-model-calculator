@@ -133,6 +133,7 @@ steady state (1F1B); its fill and drain is the bubble term.
 | LINK_EFFICIENCY nvlink / net | 0.76 / 0.80 | nvlink: our DeepEP intranode 340 GB/s vs 450 (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes); net: assumption |
 | OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.3 / 0.9 / 0.8 | assumptions, except EP: fitted with the MoE constants (grid 0 / 0.3 / 0.5 / 0.7 / 0.9); a plan may set `overlap_ep` (DualPipe 0.95) |
 | SMS_PER_GPU | H100 / H200 / H800 132, A100 108, B200 148, B300 160 | NVIDIA H100 and A100 whitepapers; [B200: 74 per die](https://chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut); [B300: up to 160](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) |
+| TGP_EXPONENT | 1.25 | fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01; applies to systems with `tgp_w` and `tgp_ref_w` (GB300: 1,400 W against 1,200 W); section 7b |
 | COMM_SMS | 20 | DeepSeek-V3 paper Sec. 3.2.2 |
 | DEFAULT_TOKENS_PER_STEP | 16,777,216 (16M) | Llama 3 405B, Llama 3 paper Table 4 |
 | GOODPUT | 0.90 | Llama 3 paper Sec. 3.3.4 (> 90% effective training time) |
@@ -287,28 +288,83 @@ Median absolute error 10.4%, worst 82.3% over 8 rows (the bar is 15% typical,
 The same-GPU ratio the step is about: predicted GB200 / B200 against published for the same recipe is within
 15% for Llama 3 70B and Mixtral 8x7B (`test_same_recipe_on_b200_and_gb200_keeps_its_ratio`).
 
-### 7b. GB300 against GB200, same recipe (NeMo 26.08.01)
+### 7b. GB300 against GB200, same recipe (NeMo 26.04.01 and 26.08.01)
 
-Added with the GB300 hardware step. 4 pairs of the NeMo 26.08.01 performance summary
-([source](https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html)): the same model, global batch and sequence on DGX-GB300 and DGX-GB200, MXFP8 (counted as
-FP8). The check is the **ratio** GB300 / GB200: published against predicted. Each system runs its own published plan
-(GB300's larger memory allows larger micro batches). All are hold-out; nothing was fitted.
-`dgx-gb300` has 100 GB/s of network per GPU (4 x ConnectX-8 800 Gb/s per compute tray, [NVIDIA DGX SuperPOD GB300
-reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf) and [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/)).
-Left out: DeepSeek-V4 Flash and Nemotron 3.5 Lightning (architectures not verifiable), and the two NVFP4 pairs (no FP4 mode).
+Added with the GB300 hardware step. 12 pairs of NeMo / Megatron-Bridge results
+([26.08.01](https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html), [26.04.01](https://docs.nvidia.com/nemo/megatron-bridge/nightly/performance-summary-archive.html)): the same model, global batch and sequence on DGX-GB300 and DGX-GB200, MXFP8 or FP8 counted
+as FP8, BF16 for GPT-OSS 26.04.01. The check is the **ratio** GB300 / GB200: published against predicted, each system with its own
+published plan. `dgx-gb300` has 100 GB/s of network per GPU (4 x ConnectX-8 800 Gb/s per compute tray, [NVIDIA DGX SuperPOD GB300
+reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf)).
 
-| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | Ratio error | GB300 error | GB200 error |
-|---|---|---|---|---|---|---|---|---|
-| gb300-vs-gb200-dsv3 | 256 | 6,288 / 4,505 | 4,912 / 4,468 | 1.280 | 1.008 | -21.2% | -28.4% | -9.0% |
-| gb300-vs-gb200-gpt-oss-120b | 64 | 33,024 / 34,380 | 28,544 / 34,237 | 1.157 | 1.004 | -13.2% | +4.1% | +19.9% |
-| gb300-vs-gb200-qwen3-30b | 8 | 44,544 / 34,004 | 40,960 / 34,004 | 1.087 | 1.000 | -8.0% | -23.7% | -17.0% |
-| gb300-vs-gb200-qwen3-235b | 256 | 8,832 / 6,597 | 7,264 / 6,569 | 1.216 | 1.004 | -17.4% | -25.3% | -9.6% |
+**The cause of the gap and the term** (full analysis in `docs/CALCULATOR-HARDWARE.md` section 6): at the same listed dense FP8 peak and the same
+HBM bandwidth, Blackwell Ultra's board power is up to 1,400 W against 1,200 W ([NVIDIA Table 2](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/)),
+and large-GEMM training runs at the power limit. Sustained tensor efficiency is scaled by
+`(tgp_w / tgp_ref_w) ** TGP_EXPONENT`; the exponent is one constant, `TGP_EXPONENT = 1.25`, fitted on the two dense FP8 pairs (`fit_tgp_exponent`),
+and applied to GB300 only. Before it, GB300 had the same efficiency as GB200 and the model predicted a ratio of about 1.0.
 
-Ratio error: median 15.3%, worst 21.2% (the bar is 15% typical, 30% worst: the worst is met, the
-typical error is 0.3 points above it; reported, not tuned). The model gives GB300 the same compute as GB200 (equal
-BF16 and FP8 dense peak, one Blackwell efficiency per precision), so it predicts a ratio of about 1.0. The published GB300
-runs are 9-28% faster: more memory, Blackwell Ultra attention, larger micro batches. **A GB300 estimate is therefore
-GB200-class and low by about that much.** `test_known_limit_gb300_compute_is_gb200_compute` pins this.
+Before and after (ratio GB300 / GB200):
+
+| Pair | Set | Ratio reported | Ratio before | Error before | Ratio after | Error after |
+|---|---|---|---|---|---|---|
+| gb300-vs-gb200-llama3-70b-fp8-2604 | fit | 1.242 | 1.000 | -19.5% | 1.205 | -3.1% |
+| gb300-vs-gb200-llama31-405b-fp8-2604 | fit | 1.185 | 1.001 | -15.6% | 1.199 | +1.2% |
+| gb300-vs-gb200-llama3-70b-mxfp8-2604 | hold-out | 1.310 | 1.013 | -22.7% | 1.228 | -6.3% |
+| gb300-vs-gb200-llama31-405b-mxfp8-2604 | hold-out | 1.200 | 1.033 | -13.9% | 1.247 | +3.9% |
+| gb300-vs-gb200-dsv3-2604 | hold-out | 1.173 | 1.005 | -14.3% | 1.188 | +1.3% |
+| gb300-vs-gb200-gpt-oss-120b-2604 | hold-out | 1.154 | 1.000 | -13.3% | 1.196 | +3.7% |
+| gb300-vs-gb200-qwen3-30b-2604 | hold-out | 1.216 | 1.000 | -17.7% | 1.165 | -4.2% |
+| gb300-vs-gb200-qwen3-235b-2604 | hold-out | 1.223 | 1.004 | -17.9% | 1.177 | -3.7% |
+| gb300-vs-gb200-dsv3 | hold-out | 1.280 | 1.008 | -21.2% | 1.192 | -6.9% |
+| gb300-vs-gb200-gpt-oss-120b | hold-out | 1.157 | 1.004 | -13.2% | 1.189 | +2.8% |
+| gb300-vs-gb200-qwen3-30b | hold-out | 1.087 | 1.000 | -8.0% | 1.165 | +7.1% |
+| gb300-vs-gb200-qwen3-235b | hold-out | 1.216 | 1.004 | -17.4% | 1.177 | -3.2% |
+
+| Set | Pairs | Median error before | Worst before | Median error after | Worst after |
+|---|---|---|---|---|---|
+| Fit (dense FP8, 26.04.01) | 2 | 17.6% | 19.5% | 2.1% | 3.1% |
+| **Hold-out, all** | 10 | 15.8% | 22.7% | **3.8%** | **7.1%** |
+| Hold-out, dense MXFP8 | 2 | 18.3% | 22.7% | 5.1% | 6.3% |
+| Hold-out, MoE, 26.04.01 | 4 | 16.0% | 17.9% | 3.7% | 4.2% |
+| Hold-out, MoE, 26.08.01 | 4 | 15.3% | 21.2% | 5.1% | 7.1% |
+
+The bar is 15% typical and 30% worst; both are met on every hold-out group. Full table, with the absolute errors of each system:
+
+| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | Ratio error | GB300 error | GB200 error | Set |
+|---|---|---|---|---|---|---|---|---|---|
+| gb300-vs-gb200-llama3-70b-fp8-2604 | 64 | 5,248 / 5,054 | 4,224 / 4,196 | 1.242 | 1.205 | -3.1% | -3.7% | -0.7% | fit |
+| gb300-vs-gb200-llama31-405b-fp8-2604 | 256 | 1,024 / 892 | 864 / 744 | 1.185 | 1.199 | +1.2% | -12.8% | -13.9% | fit |
+| gb300-vs-gb200-llama3-70b-mxfp8-2604 | 64 | 4,864 / 5,054 | 3,712 / 4,115 | 1.310 | 1.228 | -6.3% | +3.9% | +10.8% | hold-out |
+| gb300-vs-gb200-llama31-405b-mxfp8-2604 | 256 | 960 / 932 | 800 / 748 | 1.200 | 1.247 | +3.9% | -2.9% | -6.6% | hold-out |
+| gb300-vs-gb200-dsv3-2604 | 256 | 4,992 / 5,309 | 4,256 / 4,468 | 1.173 | 1.188 | +1.3% | +6.3% | +5.0% | hold-out |
+| gb300-vs-gb200-gpt-oss-120b-2604 | 64 | 19,200 / 22,991 | 16,640 / 19,222 | 1.154 | 1.196 | +3.7% | +19.7% | +15.5% | hold-out |
+| gb300-vs-gb200-qwen3-30b-2604 | 8 | 31,744 / 39,616 | 26,112 / 34,004 | 1.216 | 1.165 | -4.2% | +24.8% | +30.2% | hold-out |
+| gb300-vs-gb200-qwen3-235b-2604 | 256 | 6,944 / 7,734 | 5,680 / 6,569 | 1.223 | 1.177 | -3.7% | +11.4% | +15.6% | hold-out |
+| gb300-vs-gb200-dsv3 | 256 | 6,288 / 5,327 | 4,912 / 4,468 | 1.280 | 1.192 | -6.9% | -15.3% | -9.0% | hold-out |
+| gb300-vs-gb200-gpt-oss-120b | 64 | 33,024 / 40,722 | 28,544 / 34,237 | 1.157 | 1.189 | +2.8% | +23.3% | +19.9% | hold-out |
+| gb300-vs-gb200-qwen3-30b | 8 | 44,544 / 39,616 | 40,960 / 34,004 | 1.087 | 1.165 | +7.1% | -11.1% | -17.0% | hold-out |
+| gb300-vs-gb200-qwen3-235b | 256 | 8,832 / 7,734 | 7,264 / 6,569 | 1.216 | 1.177 | -3.2% | -12.4% | -9.6% | hold-out |
+
+The absolute GB300 errors are larger than the ratio errors (for example -12.8% for 405B, +23.3% for GPT-OSS 26.08.01) because they carry the
+errors the model already has on GB200 (-13.9% and +19.9% on the same rows): the plan, the dispatcher and the NeMo software release are not
+pinned. The 38-run summary, the 8 GB200 rows and every row of `RUNS` are unchanged: no GB300 row is in them.
+
+**HGX B300 against B200, same plan** (a check of the same term on a second system, not applied to the B300):
+
+Without the term the model predicts a ratio of 1.0:
+
+| Pair | Ratio reported | Ratio predicted | Ratio error |
+|---|---|---|---|
+| b300-vs-b200-dsv3 | 1.112 | 1.000 | -10.1% |
+| b300-vs-b200-gpt-oss-120b | 1.123 | 1.000 | -10.9% |
+| b300-vs-b200-qwen3-30b | 1.132 | 1.000 | -11.7% |
+
+With 1,100 W against 1,000 W and the same exponent (fitted on GB300 only):
+
+| Pair | Ratio reported | Ratio predicted | Ratio error |
+|---|---|---|---|
+| b300-vs-b200-dsv3 | 1.112 | 1.113 | +0.1% |
+| b300-vs-b200-gpt-oss-120b | 1.123 | 1.119 | -0.3% |
+| b300-vs-b200-qwen3-30b | 1.132 | 1.102 | -2.7% |
 
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 

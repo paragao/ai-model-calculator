@@ -319,25 +319,67 @@ RACK_RUNS = [
 ]
 
 
-# GB300 hold-out (hardware step 5): NeMo 26.08.01 publishes the same recipe on DGX-GB300 and DGX-GB200 (MXFP8, counted as
-# FP8 as for the Megatron-Bridge rows above). The model is checked on the RATIO GB300 / GB200, per pair: what changes is the
-# GPU (more memory, so larger micro batches and other plans) and the network, not the NVLink domain. No constant is fitted.
-# Pairs left out: DeepSeek-V4 Flash and Nemotron 3.5 Lightning (architectures not verifiable here), and the two NVFP4 pairs
-# (no FP4 mode). https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html
+# GB300 against GB200, same recipe (hardware step 5). NeMo / Megatron-Bridge publish the same model, global batch and sequence on
+# DGX-GB300 and DGX-GB200 (MXFP8 and FP8 counted as FP8 as for the Megatron-Bridge rows above). The model is checked on the RATIO
+# GB300 / GB200 per pair, each system with its own published plan (GB300's larger memory allows other micro batches and plans).
+# One constant is fitted on part of the pairs (mfu_model.TGP_EXPONENT, see fit_tgp_exponent): the two dense FP8 pairs of 26.04.01.
+# Everything else is hold-out: the dense MXFP8 pairs, the MoE pairs of 26.04.01 and the four MoE pairs of 26.08.01.
+# Pairs left out: DeepSeek-V4 Flash and Nemotron 3.5 Lightning / Super / Ultra (architectures not verifiable here: hybrid Mamba or
+# unpublished), Kimi-K2 (no GB200 row), and the NVFP4 pairs (no FP4 mode).
 NEMO_2608 = "https://docs.nvidia.com/nemo-framework/user-guide/latest/performance/performance-summary.html"
 _UNVERIFIED_2608 = "unverified: the 26.08.01 recipe is not pinned (expert TP 1 and the dispatcher are assumed)"
+_UNVERIFIED_2604 = "unverified: the 26.04.01 recipe is not pinned (expert TP 1 and the dispatcher are assumed)"
+_DENSE = "dense model: no expert or dispatcher settings"
 
 
-def _pair(name, model, n, gbs, seq, gb300, gb200, ep_kw=None):
+def _pair(name, model, n, gbs, seq, gb300, gb200, *, tag="nemo2608", source=NEMO_2608 + " (26.08.01, MXFP8)",
+          layout=_UNVERIFIED_2608, moe=True, prec="fp8", fit=False, fsdp=False):
     """gb300, gb200: dicts of plan fields and the published tokens/s/GPU of each system."""
     rows = []
     for hw, d in (("dgx-gb300", gb300), ("dgx-gb200", gb200)):
         plan = {k: v for k, v in d.items() if k != "value"}
-        rows.append(_run(f"nemo2608-{hw[4:]}-{name}", model, hw, "fp8", n, gbs, plan.pop("mbs"), seq, etp=1,
-                         metric="tokens_per_gpu", value=d["value"], source=NEMO_2608 + " (26.08.01, MXFP8)",
-                         layout=_UNVERIFIED_2608, **plan))
-    return {"id": f"gb300-vs-gb200-{name}", "model": model, "gpus": n, "gb300": rows[0], "gb200": rows[1]}
+        kw = dict(etp=1) if moe else {}
+        if fsdp and plan.get("tp", 1) == 1 and plan.get("pp", 1) == 1:
+            kw["fsdp"] = True
+        rows.append(_run(f"{tag}-{hw[4:]}-{name}", model, hw, prec, n, gbs, plan.pop("mbs"), seq,
+                         metric="tokens_per_gpu", value=d["value"], source=source, layout=layout if moe else "",
+                         **kw, **plan))
+    return {"id": f"gb300-vs-gb200-{name}" + ("" if tag == "nemo2608" else "-" + tag[4:]), "model": model, "gpus": n,
+            "gb300": rows[0], "gb200": rows[1], "fit": fit, "release": tag[4:]}
 
+
+_MB2604 = MB + " (26.04.01, "
+
+# Fit: the two dense FP8 pairs of 26.04.01 (the same plan on both systems for 70B; pipeline 8 against 16 for 405B).
+GB300_FIT_PAIRS = [
+    _pair("llama3-70b-fp8", "Llama-3-70B", 64, 256, 8192,
+          dict(mbs=2, value=5248), dict(mbs=2, value=4224), tag="nemo2604", source=_MB2604 + "FP8)", moe=False, fit=True, fsdp=True),
+    _pair("llama31-405b-fp8", "Llama-3.1-405B", 256, 1536, 8192,
+          dict(mbs=1, tp=4, pp=8, vp=4, value=1024), dict(mbs=1, tp=4, pp=16, vp=4, value=864),
+          tag="nemo2604", source=_MB2604 + "FP8)", moe=False, fit=True),
+]
+
+# Hold-out: the dense MXFP8 pairs and the MoE pairs of 26.04.01, and the four MoE pairs of 26.08.01.
+GB300_PAIRS_2604 = [
+    _pair("llama3-70b-mxfp8", "Llama-3-70B", 64, 256, 8192,
+          dict(mbs=1, pp=4, vp=5, value=4864), dict(mbs=1, tp=2, pp=4, vp=5, value=3712),
+          tag="nemo2604", source=_MB2604 + "MXFP8)", moe=False),
+    _pair("llama31-405b-mxfp8", "Llama-3.1-405B", 256, 1536, 8192,
+          dict(mbs=1, tp=2, pp=8, cp=2, vp=4, value=960), dict(mbs=1, tp=4, pp=16, vp=8, value=800),
+          tag="nemo2604", source=_MB2604 + "MXFP8)", moe=False),
+    _pair("dsv3", "DeepSeek-V3", 256, 4096, 4096,
+          dict(mbs=2, pp=2, vp=8, ep=32, value=4992), dict(mbs=1, pp=4, vp=4, ep=64, value=4256),
+          tag="nemo2604", source=_MB2604 + "MXFP8)", layout=_UNVERIFIED_2604),
+    _pair("gpt-oss-120b", "GPT-OSS-120B", 64, 1280, 4096,
+          dict(mbs=4, ep=64, value=19200), dict(mbs=4, ep=64, value=16640),
+          tag="nemo2604", source=_MB2604 + "BF16)", layout=_UNVERIFIED_2604, prec="bf16"),
+    _pair("qwen3-30b", "Qwen3-30B-A3B", 8, 512, 4096,
+          dict(mbs=8, ep=8, value=31744), dict(mbs=4, ep=8, value=26112),
+          tag="nemo2604", source=_MB2604 + "MXFP8)", layout=_UNVERIFIED_2604),
+    _pair("qwen3-235b", "Qwen3-235B-A22B", 256, 8192, 4096,
+          dict(mbs=2, pp=4, vp=12, ep=32, value=6944), dict(mbs=1, pp=8, vp=3, ep=32, value=5680),
+          tag="nemo2604", source=_MB2604 + "MXFP8)", layout=_UNVERIFIED_2604),
+]
 
 GB300_PAIRS = [
     _pair("dsv3", "DeepSeek-V3", 256, 4096, 4096,
@@ -349,6 +391,62 @@ GB300_PAIRS = [
     _pair("qwen3-235b", "Qwen3-235B-A22B", 256, 8192, 4096,
           dict(mbs=2, pp=4, vp=12, ep=32, value=8832), dict(mbs=1, pp=8, vp=3, ep=32, value=7264)),
 ]
+ALL_GB300_PAIRS = GB300_FIT_PAIRS + GB300_PAIRS_2604 + GB300_PAIRS
+
+# HGX B300 against HGX B200, same plan on both (NeMo 26.04 / 26.04.01): checks whether the power term (1,100 W against 1,000 W)
+# would be right for the B300 as well. Not used for any constant; the term is not applied to the B300 (see mfu_model).
+def _b300_pair(name, model, n, gbs, seq, b300, b200, prec="fp8", source=None):
+    rows = []
+    for hw, d in (("dgx-b300", b300), ("dgx-b200", b200)):
+        plan = {k: v for k, v in d.items() if k != "value"}
+        rows.append(_run(f"b300pair-{hw[4:]}-{name}", model, hw, prec, n, gbs, plan.pop("mbs"), seq, etp=1,
+                         metric="tokens_per_gpu", value=d["value"], source=source, layout=_UNVERIFIED_2604, **plan))
+    return {"id": f"b300-vs-b200-{name}", "model": model, "gpus": n, "gb300": rows[0], "gb200": rows[1], "fit": False,
+            "release": "2604"}
+
+
+B300_PAIRS = [
+    _b300_pair("dsv3", "DeepSeek-V3", 256, 4096, 4096, dict(mbs=1, pp=16, ep=8, value=3131), dict(mbs=1, pp=16, ep=8, value=2815),
+               source=MB + " (26.04, MXFP8)"),
+    _b300_pair("gpt-oss-120b", "GPT-OSS-120B", 64, 1280, 4096, dict(mbs=4, ep=8, value=15232), dict(mbs=4, ep=8, value=13568),
+               prec="bf16", source=MB + " (26.04.01, BF16)"),
+    _b300_pair("qwen3-30b", "Qwen3-30B-A3B", 8, 512, 4096, dict(mbs=8, ep=8, value=30720), dict(mbs=4, ep=8, value=27136),
+               source=MB + " (26.04.01, MXFP8)"),
+]
+
+
+def evaluate_b300_pairs(apply_power_term=False):
+    """B300 / B200 ratio, published against predicted. apply_power_term=True gives the B300 the board-power term (1,100 W against
+    the B200's 1,000 W) for this call only, to see what it would do; the shipped model does not apply it."""
+    hw = mm.HARDWARE["dgx-b300"]
+    saved = {k: hw.get(k) for k in ("tgp_w", "tgp_ref_w")}
+    try:
+        if apply_power_term:
+            hw["tgp_w"], hw["tgp_ref_w"] = 1100.0, 1000.0
+        return evaluate_pairs(B300_PAIRS)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                hw.pop(k, None)
+            else:
+                hw[k] = v
+
+
+# Physical bounds of the GB300 / GB200 gap, from NVIDIA's Blackwell Ultra table (Table 2 of
+# https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/):
+#   dense FP8 5 PFLOPS on both, HBM 8 TB/s on both, board power up to 1,200 W against 1,400 W,
+#   SFU exponentials 5 against 10.7 tera-exponentials per second (attention softmax).
+SFU_TERA_EXP = {"blackwell": 5.0, "blackwell-ultra": 10.7}
+
+
+def attention_exp_share(shape, seq, tokens_per_s_per_gpu, tera_exp):
+    """Share of one GPU-second the attention exponentials would take at the SFU peak (an upper bound on what a faster SFU can
+    save). Per token and layer: one exponential per head and key position, half of them with a causal mask, run in the forward
+    pass and again in the backward pass (the softmax is recomputed): heads x seq per layer."""
+    a = shape["attention"]
+    exps_per_token = a["heads"] * seq * a["full_layers"]
+    return tokens_per_s_per_gpu * exps_per_token / (tera_exp * 1e12)
+
 
 # Rows added with mfu-model-3 (reported as their own group).
 NEW_MOE_RUNS = {"mb2509-h100-dsv3", "mb2604-b200-dsv3", "mb2604-b300-dsv3", "mb2604-b200-qwen3-30b",
@@ -403,13 +501,24 @@ def summary(rows):
             "superseded": stats([x for x in rows if x.get("superseded")])}
 
 
-def evaluate_pairs(pairs=GB300_PAIRS):
-    """Per pair: published and predicted GB300 / GB200 throughput ratio and the error of the ratio."""
+def evaluate_pairs(pairs=GB300_PAIRS, tgp_exponent=None):
+    """Per pair: published and predicted GB300 / GB200 throughput ratio and the error of the ratio.
+    tgp_exponent: evaluate with another power exponent (0 = the model before the power term)."""
     out = []
+    saved = mm.TGP_EXPONENT
+    if tgp_exponent is not None:
+        mm.TGP_EXPONENT = tgp_exponent
+    try:
+        return _evaluate_pairs(pairs, out)
+    finally:
+        mm.TGP_EXPONENT = saved
+
+
+def _evaluate_pairs(pairs, out):
     for p in pairs:
         a, b = evaluate([p["gb300"]])[0], evaluate([p["gb200"]])[0]
         published, predicted = a["reported"] / b["reported"], a["predicted"] / b["predicted"]
-        out.append({"id": p["id"], "model": p["model"], "gpus": p["gpus"],
+        out.append({"id": p["id"], "model": p["model"], "gpus": p["gpus"], "fit": p["fit"], "release": p["release"],
                     "published_gb300": a["reported"], "published_gb200": b["reported"],
                     "predicted_gb300": a["predicted"], "predicted_gb200": b["predicted"],
                     "published_ratio": round(published, 3), "predicted_ratio": round(predicted, 3),
@@ -424,15 +533,42 @@ def pair_summary(rows):
             "max_abs_error_pct": round(max(errs), 1) if errs else None}
 
 
+def pair_groups(rows):
+    """Summaries of the fit pairs and of the hold-out pairs (all, dense, MoE of 26.04.01, MoE of 26.08.01)."""
+    hold = [x for x in rows if not x["fit"]]
+    moe = lambda x: x["model"] in ("DeepSeek-V3", "GPT-OSS-120B", "Qwen3-30B-A3B", "Qwen3-235B-A22B")  # noqa: E731
+    return {"fit": pair_summary([x for x in rows if x["fit"]]), "hold_out": pair_summary(hold),
+            "hold_out_dense": pair_summary([x for x in hold if not moe(x)]),
+            "hold_out_moe_2604": pair_summary([x for x in hold if moe(x) and x["release"] == "2604"]),
+            "hold_out_moe_2608": pair_summary([x for x in hold if moe(x) and x["release"] == "2608"])}
+
+
+def fit_tgp_exponent(pairs=GB300_FIT_PAIRS):
+    """TGP_EXPONENT: least squares of the log ratio error on the fit pairs. The ratio is predicted with the exponent 0 (no
+    power term, everything else of the model) and the exponent is what turns that into the published ratio:
+        ln(published / predicted_0) = exponent x ln(tgp_w / tgp_ref_w)"""
+    saved = mm.TGP_EXPONENT
+    mm.TGP_EXPONENT = 0.0
+    try:
+        gaps = []
+        for p in pairs:
+            a, b = predict(p["gb300"])[0], predict(p["gb200"])[0]
+            gaps.append(math.log((p["gb300"]["reported"] / p["gb200"]["reported"]) / (a / b)))
+    finally:
+        mm.TGP_EXPONENT = saved
+    hw = mm.HARDWARE["dgx-gb300"]
+    return round(sum(gaps) / (len(gaps) * math.log(hw["tgp_w"] / hw["tgp_ref_w"])), 2)
+
+
 def pairs_markdown(rows):
     out = ["| Pair | GPUs | GB300 reported / predicted | GB200 reported / predicted | Ratio reported | Ratio predicted | "
-           "Ratio error | GB300 error | GB200 error |",
-           "|---|---|---|---|---|---|---|---|---|"]
+           "Ratio error | GB300 error | GB200 error | Set |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
     for x in rows:
         out.append(f"| {x['id']} | {x['gpus']} | {x['published_gb300']:,.0f} / {x['predicted_gb300']:,.0f} | "
                    f"{x['published_gb200']:,.0f} / {x['predicted_gb200']:,.0f} | {x['published_ratio']:.3f} | "
                    f"{x['predicted_ratio']:.3f} | {x['ratio_error_pct']:+.1f}% | {x['gb300_error_pct']:+.1f}% | "
-                   f"{x['gb200_error_pct']:+.1f}% |")
+                   f"{x['gb200_error_pct']:+.1f}% | {'fit' if x['fit'] else 'hold-out'} |")
     return "\n".join(out)
 
 
@@ -493,6 +629,7 @@ def fit():
     mm.OVERLAP["ep"] = saved_ov
     return {"base_efficiency": {f"{k[0]}/{k[1]}": v for k, v in sorted(fitted.items())},
             "moe_expert_factor": moe_factor, "moe_expert_half_ffn": moe_half, "overlap_ep": ov_ep,
+            "tgp_exponent": fit_tgp_exponent(),
             "fit_runs": [r["id"] for r in RUNS if r["fit"]]}
 
 
@@ -549,7 +686,7 @@ if __name__ == "__main__":
     print("\nRack-scale hold-out (DGX GB200, NeMo 25.07)\n")
     print(markdown(rack_rows))
     print(json.dumps(rack_summary(rack_rows), indent=1))
-    pair_rows = evaluate_pairs()
-    print("\nGB300 vs GB200, same recipe (NeMo 26.08.01, MXFP8)\n")
+    pair_rows = evaluate_pairs(ALL_GB300_PAIRS)
+    print("\nGB300 vs GB200, same recipe (NeMo 26.04.01 and 26.08.01)\n")
     print(pairs_markdown(pair_rows))
-    print(json.dumps(pair_summary(pair_rows), indent=1))
+    print(json.dumps(pair_groups(pair_rows), indent=1))
