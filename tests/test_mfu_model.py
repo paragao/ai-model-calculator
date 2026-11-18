@@ -27,8 +27,13 @@ FIXTURES = Path(__file__).parent / "fixtures"
 EXPLAINED_OUTLIERS = {
     # Megatron alltoall dispatcher (no DeepEP/HybridEP) at v0.4.2; the dispatcher kind is recorded, not modelled
     "mb2604-b200-qwen3-235b": 60.0,
-    # DeepEP with moe_a2a_overlap hides more all-to-all than the default EP overlap (0.3)
-    "mb2604-b200-dsv3": 35.0,
+    # DeepEP with moe_a2a_overlap hides more all-to-all than the default EP overlap (0.3); -30.8% in mfu-model-4, -35.6% since the
+    # Blackwell MoE half width (mfu-model-5) lowers every Blackwell MoE estimate
+    "mb2604-b200-dsv3": 40.0,
+    # Our p6-b300 dispatcher A/B runs (TP 8, EP 32 over 4 nodes of EFA, VP 2): the measured all-to-all over EFA costs several
+    # seconds a step, the model 0.5 to 1.0 s (docs/CALCULATOR-HARDWARE.md section 6b). +26.3% and +29.9% in mfu-model-5.
+    "repo-kimi-k2-b300-32n": 35.0,
+    "repo-dsv3-b300-32n": 35.0,
 }
 
 

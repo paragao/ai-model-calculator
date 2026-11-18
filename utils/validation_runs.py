@@ -21,6 +21,7 @@ Metrics: "tokens_per_gpu" (tokens per second per GPU; clean across FLOP conventi
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import statistics
@@ -123,6 +124,8 @@ MB = "https://docs.nvidia.com/nemo/megatron-bridge/nightly/performance-summary-a
 # Recipes of the release that published the 26.04.01 numbers (v0.4.2 carries "26.04.01_perf_summary").
 MB_V042 = "https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/v0.4.2/scripts/performance/configs/"
 NEMO_R240 = "https://github.com/NVIDIA/NeMo/blob/r2.4.0/scripts/performance/"
+# Source of our two p6-b300 MoE rows (the repo's benchmark pages say "Data sourced from awsome-distributed-ai").
+AWSOME_MB = "https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/"
 
 
 def _run(rid, model, hw, prec, n, gbs, mbs, seq, tp=1, pp=1, cp=1, vp=1, ep=1, fsdp=False, *,
@@ -271,17 +274,23 @@ RUNS = [
          etp=1, dispatcher="alltoall", a2a_overlap=True,
          metric="tokens_per_gpu", value=1712, source=MB + " (26.04.01, FP8)", fit=True,
          layout="pinned: " + MB_V042 + "qwen/qwen3_workload_base_configs.py QWEN3_235B_A22B_PRETRAIN_CONFIG_H100_FP8_CS_V2"),
-    # Our own MoE pre-training runs on p6-b300 (DeepEP over EFA, all-to-all overlap on)
-    _run("repo-kimi-k2-b300-32n", "Kimi-K2", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, ep=32, etp=1,
+    # Our own MoE pre-training runs on p6-b300 (DeepEP over EFA, all-to-all overlap on). VP 2, not the 1 of config.yaml: with
+    # MOE_A2A_OVERLAP=on and PP > 1 the bench sets virtual_pipeline_model_parallel_size = 2 (the recipe's (8, 2) layout) and turns
+    # recompute off (AWSOME_MB + "kimi-k2/benchmarks/bench_kimi_k2_pretrain.py" and "dsv3/benchmarks/RESULTS.md", "overlap=on
+    # required VPP=2 + recompute OFF"). These are dispatcher A/B runs at a layout "not tuned-optimal for K2" (TP 8, EP 32 over
+    # 4 nodes of EFA); see docs/CALCULATOR-HARDWARE.md section 6b for why the model is high on them.
+    _run("repo-kimi-k2-b300-32n", "Kimi-K2", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, vp=2, ep=32, etp=1,
          dispatcher="deepep", a2a_overlap=True,
          metric="tokens_per_gpu", value=round(280200 / 256, 1),
          source=REPO + "pretrain-kimi-k2-moe-bf16/p6-b300-32nodes (nvshmem-mb4-overlap-on, 280,200 tok/s)",
-         layout="unverified: expert TP 1 assumed (not in config.yaml)"),
-    _run("repo-dsv3-b300-32n", "DeepSeek-V3", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, ep=32, etp=1,
+         layout="unverified: expert TP 1 assumed (not in config.yaml); VP 2 and no recompute from the bench script",
+         note="config.yaml says VPP 1; the overlap-on bench sets VPP 2 (" + AWSOME_MB + "kimi-k2/benchmarks/bench_kimi_k2_pretrain.py)"),
+    _run("repo-dsv3-b300-32n", "DeepSeek-V3", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, vp=2, ep=32, etp=1,
          dedup_by_group=True, dispatcher="deepep", a2a_overlap=True,
          metric="tokens_per_gpu", value=round(256 * 4096 / 3.84 / 256, 1),
          source=REPO + "pretrain-deepseek-v3-moe-bf16/p6-b300-32nodes (uccl-mb4-overlap-on, 3.84 s/step)",
-         layout="unverified: expert TP 1 assumed (not in config.yaml)"),
+         layout="unverified: expert TP 1 assumed (not in config.yaml); VP 2 and no recompute from the bench script",
+         note="config.yaml says VPP 1; the overlap-on run used VPP 2 (" + AWSOME_MB + "dsv3/benchmarks/RESULTS.md)"),
 ]
 
 
@@ -393,8 +402,8 @@ GB300_PAIRS = [
 ]
 ALL_GB300_PAIRS = GB300_FIT_PAIRS + GB300_PAIRS_2604 + GB300_PAIRS
 
-# HGX B300 against HGX B200, same plan on both (NeMo 26.04 / 26.04.01): checks whether the power term (1,100 W against 1,000 W)
-# would be right for the B300 as well. Not used for any constant; the term is not applied to the B300 (see mfu_model).
+# B300 against B200, same plan on both (NVIDIA's published DGX runs, NeMo 26.04 / 26.04.01): a hold-out check of the power term on the B300 (1,100 W
+# against 1,000 W, applied since mfu-model-5). Not used for any constant: TGP_EXPONENT is fitted on the GB300 fit pairs only.
 def _b300_pair(name, model, n, gbs, seq, b300, b200, prec="fp8", source=None):
     rows = []
     for hw, d in (("dgx-b300", b300), ("dgx-b200", b200)):
@@ -415,21 +424,56 @@ B300_PAIRS = [
 ]
 
 
-def evaluate_b300_pairs(apply_power_term=False):
-    """B300 / B200 ratio, published against predicted. apply_power_term=True gives the B300 the board-power term (1,100 W against
-    the B200's 1,000 W) for this call only, to see what it would do; the shipped model does not apply it."""
-    hw = mm.HARDWARE["dgx-b300"]
-    saved = {k: hw.get(k) for k in ("tgp_w", "tgp_ref_w")}
+B300_KEYS = ("p6-b300.48xlarge", "dgx-b300")
+
+
+@contextlib.contextmanager
+def mfu_model_4():
+    """The model as it was before the B300 refit (mfu-model-4), for before / after tables: no power term on the B300, Blackwell
+    BF16 base efficiency 0.443, the shared MoE half width on Blackwell, and VP 1 on our two p6-b300 MoE rows."""
+    saved_hw = {k: {f: mm.HARDWARE[k].get(f) for f in ("tgp_w", "tgp_ref_w")} for k in B300_KEYS}
+    saved_base, saved_half = mm.BASE_EFFICIENCY[("blackwell", "bf16")], dict(mm.MOE_EXPERT_HALF_FFN_FAMILY)
+    rows = [r for r in RUNS if r["id"] in VP2_CORRECTED]
     try:
-        if apply_power_term:
-            hw["tgp_w"], hw["tgp_ref_w"] = 1100.0, 1000.0
-        return evaluate_pairs(B300_PAIRS)
+        for k in B300_KEYS:
+            mm.HARDWARE[k].pop("tgp_w", None)
+            mm.HARDWARE[k].pop("tgp_ref_w", None)
+        mm.BASE_EFFICIENCY[("blackwell", "bf16")] = 0.443
+        mm.MOE_EXPERT_HALF_FFN_FAMILY.clear()
+        for r in rows:
+            r["plan"]["vp"] = 1
+        yield
     finally:
-        for k, v in saved.items():
-            if v is None:
-                hw.pop(k, None)
-            else:
-                hw[k] = v
+        for k, fields in saved_hw.items():
+            for f, v in fields.items():
+                if v is not None:
+                    mm.HARDWARE[k][f] = v
+        mm.BASE_EFFICIENCY[("blackwell", "bf16")] = saved_base
+        mm.MOE_EXPERT_HALF_FFN_FAMILY.clear()
+        mm.MOE_EXPERT_HALF_FFN_FAMILY.update(saved_half)
+        for r in rows:
+            r["plan"]["vp"] = 2
+
+
+@contextlib.contextmanager
+def without_b300_power_term():
+    """The shipped model with the B300 power term removed (everything else as shipped)."""
+    saved = {k: {f: mm.HARDWARE[k][f] for f in ("tgp_w", "tgp_ref_w")} for k in B300_KEYS}
+    try:
+        for k in B300_KEYS:
+            del mm.HARDWARE[k]["tgp_w"], mm.HARDWARE[k]["tgp_ref_w"]
+        yield
+    finally:
+        for k, fields in saved.items():
+            mm.HARDWARE[k].update(fields)
+
+
+def evaluate_b300_pairs(power_term=True):
+    """B300 / B200 ratio, published against predicted. power_term=False removes the B300 board-power term for this call only."""
+    if power_term:
+        return evaluate_pairs(B300_PAIRS)
+    with without_b300_power_term():
+        return evaluate_pairs(B300_PAIRS)
 
 
 # Physical bounds of the GB300 / GB200 gap, from NVIDIA's Blackwell Ultra table (Table 2 of
@@ -463,6 +507,9 @@ TRN1_RUNS = [
          metric="tokens_per_gpu", value=round(7.94 * 8192 / 1024, 2), source=NEURON_TRN1, fit=True,
          note="TP 32 DP 4 PP 8; 7.94 seq/s; Llama 3.1 70B has the shape of Llama 3 70B"),
 ]
+
+# Rows whose VP was corrected from 1 to 2 in mfu-model-5 (the bench script, see the rows).
+VP2_CORRECTED = ("repo-kimi-k2-b300-32n", "repo-dsv3-b300-32n")
 
 # Rows added with mfu-model-3 (reported as their own group).
 NEW_MOE_RUNS = {"mb2509-h100-dsv3", "mb2604-b200-dsv3", "mb2604-b300-dsv3", "mb2604-b200-qwen3-30b",
@@ -627,45 +674,130 @@ def _solve(fn, target, lo=0.05, hi=1.5):
     return (lo + hi) / 2
 
 
+MOE_FIT_FACTORS = [x / 100 for x in range(30, 101, 1)]
+MOE_FIT_HALVES = (0, 128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096)
+BLACKWELL_HALVES = tuple(range(512, 4097, 64))
+
+
+def _moe_fit_runs(shapes, family=None):
+    return [r for r in RUNS if r["fit"] and shapes.setdefault(r["model"], mm.model_shape(ARCH[r["model"]]))["n_experts"]
+            and (family is None or mm.HARDWARE[r["hardware"]]["family"] == family)]
+
+
+def _moe_loss(runs, shapes):
+    return sum(math.log(predict(r, shapes)[0] / r["reported"]) ** 2 for r in runs)
+
+
+@contextlib.contextmanager
+def _moe_constants():
+    saved = (mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN, mm.OVERLAP["ep"], dict(mm.MOE_EXPERT_HALF_FFN_FAMILY))
+    try:
+        yield
+    finally:
+        mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN, mm.OVERLAP["ep"] = saved[:3]
+        mm.MOE_EXPERT_HALF_FFN_FAMILY.clear()
+        mm.MOE_EXPERT_HALF_FFN_FAMILY.update(saved[3])
+
+
+def fit_moe_shared(shapes=None):
+    """MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN and OVERLAP["ep"]: least squares of the log error over all MoE fit runs, on the grid
+    (factor 0.30..1.00, half width MOE_FIT_HALVES, overlap FIT_OVERLAP_EP), with the rest of the model as it stands."""
+    shapes = {} if shapes is None else shapes
+    runs, best = _moe_fit_runs(shapes), None
+    with _moe_constants():
+        for ov in FIT_OVERLAP_EP:
+            mm.OVERLAP["ep"] = ov
+            for fmax in MOE_FIT_FACTORS:
+                for half in MOE_FIT_HALVES:
+                    mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN = fmax, half
+                    loss = _moe_loss(runs, shapes)
+                    if best is None or loss < best[0]:
+                        best = (loss, fmax, half, ov)
+    return {"moe_expert_factor": best[1], "moe_expert_half_ffn": best[2], "overlap_ep": best[3]}
+
+
+def fit_blackwell_moe_half(shapes=None):
+    """MOE_EXPERT_HALF_FFN_FAMILY["blackwell"]: least squares of the log error over the Blackwell MoE fit runs (mb2604-b300-dsv3,
+    mb2604-b200-qwen3-30b) on a 64-wide grid, with the shared MoE constants and everything else as they stand."""
+    shapes = {} if shapes is None else shapes
+    runs, best = _moe_fit_runs(shapes, "blackwell"), None
+    with _moe_constants():
+        for half in BLACKWELL_HALVES:
+            mm.MOE_EXPERT_HALF_FFN_FAMILY["blackwell"] = half
+            loss = _moe_loss(runs, shapes)
+            if best is None or loss < best[0]:
+                best = (loss, half)
+    return best[1]
+
+
+def fit_moe_joint(shapes=None):
+    """The alternative that was NOT taken: refit the shared MoE constants and the Blackwell half width together on all MoE fit runs.
+    Returns the best grid point. It lowers the fit-row error but raises the hold-out error and moves every Hopper (p5en) MoE answer,
+    see docs/CALCULATOR-HARDWARE.md section 6a."""
+    shapes = {} if shapes is None else shapes
+    runs, best = _moe_fit_runs(shapes), None
+    with _moe_constants():
+        for ov in FIT_OVERLAP_EP:
+            mm.OVERLAP["ep"] = ov
+            for fmax in [x / 100 for x in range(60, 96)]:
+                mm.MOE_EXPERT_FACTOR = fmax
+                for half in MOE_FIT_HALVES:
+                    mm.MOE_EXPERT_HALF_FFN = half
+                    for bh in (None,) + BLACKWELL_HALVES:
+                        mm.MOE_EXPERT_HALF_FFN_FAMILY["blackwell"] = half if bh is None else bh
+                        loss = _moe_loss(runs, shapes)
+                        if best is None or loss < best[0]:
+                            best = (loss, fmax, half, ov, mm.MOE_EXPERT_HALF_FFN_FAMILY["blackwell"])
+    return {"moe_expert_factor": best[1], "moe_expert_half_ffn": best[2], "overlap_ep": best[3], "blackwell_moe_half_ffn": best[4]}
+
+
+@contextlib.contextmanager
+def moe_constants(moe_expert_factor, moe_expert_half_ffn, overlap_ep, blackwell_moe_half_ffn):
+    """Evaluate with other MoE constants (for the joint-fit comparison)."""
+    with _moe_constants():
+        mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN, mm.OVERLAP["ep"] = moe_expert_factor, moe_expert_half_ffn, overlap_ep
+        mm.MOE_EXPERT_HALF_FFN_FAMILY["blackwell"] = blackwell_moe_half_ffn
+        yield
+
+
 def fit():
-    """Fit BASE_EFFICIENCY per (family, precision) on dense fit runs, then MOE_EXPERT_FACTOR,
-    MOE_EXPERT_HALF_FFN and the default EP overlap (OVERLAP["ep"]) on the MoE fit runs.
-    Each cell is the geometric mean of the per-run solutions."""
-    saved_base, saved_moe, saved_half = dict(mm.BASE_EFFICIENCY), mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN
-    saved_ov = mm.OVERLAP["ep"]
+    """The joint refit of mfu-model-5 (docs/CALCULATOR-MFU.md section 3):
+    1. BASE_EFFICIENCY per (family, precision) on the dense fit runs, with the board-power term on GB300 and B300 in place.
+       Each cell is the geometric mean of the per-run solutions.
+    2. The shared MoE constants (MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN, OVERLAP["ep"]) stay the mfu-model-4 fit: the grid of
+       fit_moe_shared() run on the model as it was (mfu_model_4()). They are not refitted, so no Hopper answer moves; the joint
+       alternative (fit_moe_joint) is worse on the hold-out.
+    3. MOE_EXPERT_HALF_FFN_FAMILY["blackwell"] on the two Blackwell MoE fit runs, given 1 and 2.
+    4. TGP_EXPONENT on the two GB300 fit pairs (fit_tgp_exponent)."""
+    saved_base = dict(mm.BASE_EFFICIENCY)
     shapes = {}
     cells = {}
-    for r in RUNS:
-        if not r["fit"]:
-            continue
-        shape = shapes.setdefault(r["model"], mm.model_shape(ARCH[r["model"]]))
-        if shape["n_experts"]:
-            continue
-        key = (mm.HARDWARE[r["hardware"]]["family"], r["precision"])
+    try:
+        for r in RUNS:
+            if not r["fit"]:
+                continue
+            shape = shapes.setdefault(r["model"], mm.model_shape(ARCH[r["model"]]))
+            if shape["n_experts"]:
+                continue
+            key = (mm.HARDWARE[r["hardware"]]["family"], r["precision"])
 
-        def f(x, r=r, key=key):
-            mm.BASE_EFFICIENCY[key] = x
-            return predict(r, shapes)[0]
-        cells.setdefault(key, []).append(_solve(f, r["reported"]))
-    fitted = {k: round(math.exp(statistics.mean(math.log(v) for v in vs)), 3) for k, vs in cells.items()}
-    mm.BASE_EFFICIENCY.update(fitted)
-    moe_runs = [r for r in RUNS if r["fit"] and shapes.setdefault(r["model"], mm.model_shape(ARCH[r["model"]]))["n_experts"]]
-    best = None
-    for ov in FIT_OVERLAP_EP:
-        mm.OVERLAP["ep"] = ov
-        for fmax in [x / 100 for x in range(30, 101, 1)]:
-            for half in (0, 128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096):
-                mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN = fmax, half
-                loss = sum(math.log(predict(r, shapes)[0] / r["reported"]) ** 2 for r in moe_runs)
-                if best is None or loss < best[0]:
-                    best = (loss, fmax, half, ov)
-    moe_factor, moe_half, ov_ep = (best[1], best[2], best[3]) if best else (saved_moe, saved_half, saved_ov)
-    mm.BASE_EFFICIENCY.clear()
-    mm.BASE_EFFICIENCY.update(saved_base)
-    mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN = saved_moe, saved_half
-    mm.OVERLAP["ep"] = saved_ov
+            def f(x, r=r, key=key):
+                mm.BASE_EFFICIENCY[key] = x
+                return predict(r, shapes)[0]
+            cells.setdefault(key, []).append(_solve(f, r["reported"]))
+        fitted = {k: round(math.exp(statistics.mean(math.log(v) for v in vs)), 3) for k, vs in cells.items()}
+        mm.BASE_EFFICIENCY.update(fitted)
+        with mfu_model_4():  # restores the mfu-model-4 Blackwell BF16 cell (0.443) for this step
+            shared = fit_moe_shared(shapes)
+        with _moe_constants():
+            mm.MOE_EXPERT_FACTOR, mm.MOE_EXPERT_HALF_FFN, mm.OVERLAP["ep"] = (shared["moe_expert_factor"], shared["moe_expert_half_ffn"],
+                                                                             shared["overlap_ep"])
+            blackwell_half = fit_blackwell_moe_half(shapes)
+    finally:
+        mm.BASE_EFFICIENCY.clear()
+        mm.BASE_EFFICIENCY.update(saved_base)
     return {"base_efficiency": {f"{k[0]}/{k[1]}": v for k, v in sorted(fitted.items())},
-            "moe_expert_factor": moe_factor, "moe_expert_half_ffn": moe_half, "overlap_ep": ov_ep,
+            **shared, "moe_expert_half_ffn_family": {"blackwell": blackwell_half},
             "tgp_exponent": fit_tgp_exponent(),
             "trainium1_bf16": fit_trainium1(),
             "fit_runs": [r["id"] for r in RUNS if r["fit"]]}
@@ -732,3 +864,7 @@ if __name__ == "__main__":
     print("\nGB300 vs GB200, same recipe (NeMo 26.04.01 and 26.08.01)\n")
     print(pairs_markdown(pair_rows))
     print(json.dumps(pair_groups(pair_rows), indent=1))
+    b300_rows = evaluate_b300_pairs()
+    print("\nB300 vs B200, same plan (hold-out of the power term)\n")
+    print(pairs_markdown(b300_rows))
+    print(json.dumps(pair_summary(b300_rows), indent=1))

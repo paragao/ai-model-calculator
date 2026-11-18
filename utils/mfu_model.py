@@ -20,7 +20,9 @@ Step-time model (per GPU, one optimizer step)
 ---------------------------------------------
   t_compute = F x tokens_per_step / N / (peak x eta)
       eta = 1 / ((1 - f_e) / eta_base + f_e / (eta_base x moe_factor))
-      moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+      moe_factor = MOE_EXPERT_FACTOR x expert_ffn / (expert_ffn + half),  half = MOE_EXPERT_HALF_FFN_FAMILY[family]
+                   or MOE_EXPERT_HALF_FFN
+      eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ^ TGP_EXPONENT (board power, GB300 and B300)
       f_e = share of F spent in routed-expert matmuls
   t_pipe    = t_compute / (1 - bubble),  bubble = (PP - 1) / (VP x m + PP - 1)
       m = micro-batches per DP rank per step = GBS / (DP x MBS)
@@ -35,7 +37,7 @@ from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-4"
+MODEL_VERSION = "mfu-model-5"
 
 GIB = 1.073741824  # 1 GiB/s in GB/s (the Neuron pages give NeuronLink in GiB/s on Trn2)
 CALIBRATION_TRN1 = ("calibrated on the 2 published Neuron Trn1 rows (Llama-3.1 8B and 70B, BF16, Neuron 2.24.0); there is no hold-out, "
@@ -54,7 +56,8 @@ UNKNOWNS_TRN3 = ("any measured Trn3 training throughput or MFU", "AWS instance t
 
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
-#       B200 and B300: 2250 BF16, 4500 FP8 dense; HGX B300 = 36 PFLOPS FP8 dense / 8 GPUs).
+#       B200 and B300: 2250 BF16, 4500 FP8 dense; p6-b300.48xlarge has the FP8 and BF16 of p6-b200.48xlarge,
+#       its 1.5x is FP4 only, AWS P6 page https://aws.amazon.com/ec2/instance-types/p6/).
 # nvlink: per GPU total NVLink bandwidth / 2 (H100/H200 900 GB/s, B200/B300 1800 GB/s,
 #       A100 600 GB/s, H800 400 GB/s).
 # net: scale-out bandwidth per GPU = instance (node) network bandwidth / 8 GPUs.
@@ -66,18 +69,20 @@ HARDWARE = {
     "p5e.48xlarge":     {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "p5en.48xlarge":    {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "p6-b200.48xlarge": {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
-    "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
+    "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8,
+                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0},
     "p4d.24xlarge":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
     "p4de.24xlarge":    {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
     # Non-AWS systems, used only by the validation set (published runs).
     "dgx-h100":         {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "dgx-b200":         {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
-    "dgx-b300":         {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8},
+    "dgx-b300":         {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8,
+                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0},
     "dgx-a100-40g":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 25.0,  "gpn": 8},
     "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
     # --- Rack-scale systems: one NVLink domain of 72 (or 36) GPUs. ---------------------------------
-    # Three sizes that are all "8" on an HGX node differ here, so each has its own field:
+    # Three sizes that are all "8" on an 8-GPU node differ here, so each has its own field:
     #   domain_gpus   GPUs one NVLink domain reaches (what "gpn" means to the formulas below)
     #   instance_gpus GPUs of the smallest launchable instance (p6e-gb200.36xlarge: 4)
     #   billing_gpus  GPUs bought as one unit (a Capacity Block buys whole UltraServers)
@@ -108,9 +113,12 @@ HARDWARE = {
     # Large-GEMM transformer training draws the whole envelope (ViT-Large: 92-97% of TDP on B200 and B300, B300 +16% training,
     # +21% inference): arXiv 2610.41919. At equal listed peak, sustained tensor throughput follows the power headroom, see
     # TGP_EXPONENT. "tgp_ref_w" is the board power of the Blackwell part whose efficiency constant the system uses.
-    # Applied to GB300 only. HGX B300 (1,100 W against 1,000 W) shows the same direction (+10% to +13% at the same plan in NeMo
-    # 26.02 to 26.04.01), but the B300 rows of validation_runs.py are part of the fit of the Blackwell constants (BF16 and the MoE
-    # factor), so the same term would push them 9 to 10 points up without a joint refit; see docs/CALCULATOR-HARDWARE.md section 6.
+    # GB300: 1,400 W against GB200's 1,200 W (NVIDIA table above).
+    # B300 (p6-b300.48xlarge, and dgx-b300 for NVIDIA's published runs): 1,100 W against the B200's 1,000 W (mfu-model-5, joint
+    #   refit, docs/CALCULATOR-HARDWARE.md 6a). Hardware: AWS P6 page https://aws.amazon.com/ec2/instance-types/p6/ and instance table
+    #   https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (p6-b300.48xlarge: 8 x B300, 6400 Gbps).
+    #   Board power per GPU: arXiv 2610.41919 (https://arxiv.org/abs/2610.41919), "TDP per GPU" 1000 W (B200) and 1100 W (B300).
+    #   AWS and NVIDIA publish no B300 per-GPU power figure; AWS does not publish the p6-b300.48xlarge power setting (assumed 1,100 W).
     "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
                               "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
                               "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",),
@@ -203,7 +211,7 @@ HARDWARE = {
 
 
 def domain_gpus(hw):
-    """GPUs one NVLink domain reaches: 8 on an HGX node, 72 on a GB200 NVL72 UltraServer."""
+    """GPUs one NVLink domain reaches: 8 on an 8-GPU node, 72 on a GB200 NVL72 UltraServer."""
     return int(hw.get("domain_gpus") or hw["gpn"])
 
 
@@ -220,7 +228,7 @@ def billing_gpus(hw):
 # --- Rack-aware GPU counts (hardware whose NVLink domain is larger than 8 GPUs) -----------------
 # 72 is not a power of two. A job that wants EP 64 (or any power-of-two layout) on an UltraServer uses 64 of
 # its 72 GPUs, as NeMo's GB200 recipes do (64, 128 or 256 GPUs; NeMo 25.07 performance summary), and is still
-# billed for the whole UltraServer. HGX nodes (domain 8) are never touched by these helpers.
+# billed for the whole UltraServer. 8-GPU nodes (domain 8) are never touched by these helpers.
 
 def is_trainium(hw):
     """Hardware counted in chips with NeuronCores as ranks (hw["ranks_per_chip"])."""
@@ -245,14 +253,14 @@ def _largest_pow2_below(n, multiple_of):
 
 
 def rack_share(hw):
-    """GPUs of each domain a power-of-two layout uses: 64 of 72 (0 for HGX nodes)."""
+    """GPUs of each domain a power-of-two layout uses: 64 of 72 (0 for 8-GPU nodes)."""
     return _largest_pow2_below(domain_gpus(hw) + 1, instance_gpus(hw)) if is_rack_scale(hw) else 0
 
 
 def rack_hw(hw, n):
     """`hw` as seen by a job of n GPUs. On rack-scale hardware, n GPUs that do not fill whole domains (128 on
     72-GPU UltraServers) run as the largest power-of-two share of each domain that divides n (64 per UltraServer),
-    so a group of that size still sits on NVLink. Any other case, and every HGX node, returns `hw` itself."""
+    so a group of that size still sits on NVLink. Any other case, and every 8-GPU node, returns `hw` itself."""
     if not is_rack_scale(hw):
         return hw
     domain = domain_gpus(hw)
@@ -266,7 +274,7 @@ def rack_hw(hw, n):
 
 def rack_alternatives(hw, n):
     """GPU counts below n worth trying instead of n on rack-scale hardware: the largest power of two (a multiple of
-    the instance size) when n is not one, e.g. 64 for 72 and 128 for 144. Empty for HGX nodes."""
+    the instance size) when n is not one, e.g. 64 for 72 and 128 for 144. Empty for 8-GPU nodes."""
     if not is_rack_scale(hw) or n <= instance_gpus(hw):
         return []
     p = _largest_pow2_below(n, instance_gpus(hw))
@@ -274,7 +282,7 @@ def rack_alternatives(hw, n):
 
 
 def auto_gpu_counts(hw, gpus_per_node, limit):
-    """GPU counts the automatic search tries, smallest first. HGX nodes: gpus_per_node, doubling. Rack-scale:
+    """GPU counts the automatic search tries, smallest first. 8-GPU nodes: gpus_per_node, doubling. Rack-scale:
     steps of the instance size inside one domain (4, 8, 16, 32, 64), then whole domains (72, 144, 288, ...) and
     the power-of-two share of each (128, 256, ...)."""
     if is_trainium(hw):  # chips: doubling inside one domain, then whole domains (Trn2 UltraServer 64, Trn3 144 chips)
@@ -313,7 +321,7 @@ def auto_gpu_counts(hw, gpus_per_node, limit):
 BASE_EFFICIENCY = {
     ("hopper", "bf16"): 0.573,
     ("hopper", "fp8"): 0.45,
-    ("blackwell", "bf16"): 0.443,
+    ("blackwell", "bf16"): 0.417,  # mfu-model-5: 0.443 before the B300 power term (its B300 fit row now carries x1.127)
     ("blackwell", "fp8"): 0.417,
     ("ampere", "bf16"): 0.471,
     ("trainium1", "bf16"): 0.33,  # fitted on the two Neuron Trn1 rows (validation_runs.fit_trainium1)
@@ -325,11 +333,18 @@ BASE_EFFICIENCY = {
 # of eta_base: small experts (narrow GEMMs) are less efficient than wide ones.
 MOE_EXPERT_FACTOR = 0.78
 MOE_EXPERT_HALF_FFN = 1024
+# Per GPU family, the expert width at which a routed-expert matmul reaches half of MOE_EXPERT_FACTOR (default MOE_EXPERT_HALF_FFN).
+# Blackwell: fitted on the two Blackwell MoE fit rows (validation_runs.fit_blackwell_moe_half), with the shared MoE constants held.
+# With the B300 power term the Blackwell MoE rows ran 8 to 18 points high at the shared 1024; narrow expert GEMMs lose more of
+# Blackwell's peak than of Hopper's. Hopper, Ampere and Trainium keep MOE_EXPERT_HALF_FFN.
+MOE_EXPERT_HALF_FFN_FAMILY = {"blackwell": 1664}
 # Sustained tensor throughput at equal listed peak scales with board power: for a system with "tgp_w" and "tgp_ref_w",
 #   eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT
 # One constant, fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01 (validation_runs.fit_tgp_exponent), checked on the
 # other GB300 pairs. An exponent above 1 means the power ratio explains most of the gap and a small part (about 3 to 4 points
 # for GB300, 1,400 W against 1,200 W) comes from elsewhere, see docs/CALCULATOR-HARDWARE.md section 6.
+# mfu-model-5 applies the same term to the B300 (p6-b300.48xlarge, 1,100 W against 1,000 W). The refit after that change gives 1.25 again (the GB300
+# fit pairs are ratios, which the Blackwell constants do not move); the three B300 / B200 pairs stay a hold-out check of it.
 TGP_EXPONENT = 1.25
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
@@ -372,14 +387,15 @@ GATED_ACTIVATIONS = ("silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh")
 
 # Pinned result of validation_runs.py (test_mfu_model checks it is current).
 # Scored runs only: superseded runs are printed but not scored (validation_runs.summary).
-VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6.1, "max_abs_error_pct": 58.9,
-                      "hold_out_median_abs_error_pct": 7.4, "hold_out_max_abs_error_pct": 58.9,
-                      "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 19.8,
-                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 12.2, "new_moe_max_abs_error_pct": 58.9,
+VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6.0, "max_abs_error_pct": 38.2,
+                      "hold_out_median_abs_error_pct": 7.4, "hold_out_max_abs_error_pct": 38.2,
+                      "original_runs": 27, "original_median_abs_error_pct": 5.7, "original_max_abs_error_pct": 17.8,
+                      "new_moe_runs": 11, "new_moe_median_abs_error_pct": 7.7, "new_moe_max_abs_error_pct": 38.2,
                       "superseded_runs": 2,
                       "trainium1_rows": 2, "trainium1_median_abs_error_pct": 13.1, "trainium1_max_abs_error_pct": 13.5,
-                      "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 10.4, "rack_scale_max_abs_error_pct": 82.3,
-                      "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.1,
+                      "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 8.9, "rack_scale_max_abs_error_pct": 64.7,
+                      "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.8,
+                      "b300_pairs": 3, "b300_pair_median_abs_error_pct": 0.2, "b300_pair_max_abs_error_pct": 2.3,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {
@@ -529,8 +545,9 @@ def model_shape(cfg, params_total_b=None):
     }
 
 
-def moe_expert_factor(expert_ffn):
-    return MOE_EXPERT_FACTOR * expert_ffn / (expert_ffn + MOE_EXPERT_HALF_FFN)
+def moe_expert_factor(expert_ffn, family=None):
+    half = MOE_EXPERT_HALF_FFN_FAMILY.get(family, MOE_EXPERT_HALF_FFN)
+    return MOE_EXPERT_FACTOR * expert_ffn / (expert_ffn + half)
 
 
 def flops_per_token(shape, seq):
@@ -694,7 +711,7 @@ def estimate(shape, hw, plan, precision="bf16"):
     tgp_gain = (hw["tgp_w"] / hw["tgp_ref_w"]) ** TGP_EXPONENT if hw.get("tgp_ref_w") else 1.0
     eta_base = eta_base * tgp_gain
     f_e = fl["experts"] / fl["total"] if fl["total"] else 0.0
-    moe_factor = moe_expert_factor(shape["expert_ffn"]) if f_e else 1.0
+    moe_factor = moe_expert_factor(shape["expert_ffn"], hw["family"]) if f_e else 1.0
     eta = 1.0 / ((1 - f_e) / eta_base + f_e / (eta_base * moe_factor))
     t_compute = f_gpu / (peak * eta)
     # Recompute: hardware runs more FLOPs than the model counts (MFU keeps the model-FLOPs convention).
