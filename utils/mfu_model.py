@@ -56,7 +56,8 @@ UNKNOWNS_TRN3 = ("any measured Trn3 training throughput or MFU", "AWS instance t
 
 # --- Hardware (dense tensor peak per GPU, TFLOPS; per-direction link bandwidth per GPU, GB/s) ---
 # peak: NVIDIA datasheets (H100/H200/H800: 989 BF16, 1979 FP8 dense; A100: 312 BF16 dense;
-#       B200 and B300: 2250 BF16, 4500 FP8 dense; HGX B300 = 36 PFLOPS FP8 dense / 8 GPUs).
+#       B200 and B300: 2250 BF16, 4500 FP8 dense; p6-b300.48xlarge has the FP8 and BF16 of p6-b200.48xlarge,
+#       its 1.5x is FP4 only, AWS P6 page https://aws.amazon.com/ec2/instance-types/p6/).
 # nvlink: per GPU total NVLink bandwidth / 2 (H100/H200 900 GB/s, B200/B300 1800 GB/s,
 #       A100 600 GB/s, H800 400 GB/s).
 # net: scale-out bandwidth per GPU = instance (node) network bandwidth / 8 GPUs.
@@ -81,7 +82,7 @@ HARDWARE = {
     "meta-h100-roce":   {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "deepseek-h800":    {"gpu": "H800", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 200.0, "net": 50.0,  "gpn": 8},
     # --- Rack-scale systems: one NVLink domain of 72 (or 36) GPUs. ---------------------------------
-    # Three sizes that are all "8" on an HGX node differ here, so each has its own field:
+    # Three sizes that are all "8" on an 8-GPU node differ here, so each has its own field:
     #   domain_gpus   GPUs one NVLink domain reaches (what "gpn" means to the formulas below)
     #   instance_gpus GPUs of the smallest launchable instance (p6e-gb200.36xlarge: 4)
     #   billing_gpus  GPUs bought as one unit (a Capacity Block buys whole UltraServers)
@@ -113,12 +114,11 @@ HARDWARE = {
     # +21% inference): arXiv 2610.41919. At equal listed peak, sustained tensor throughput follows the power headroom, see
     # TGP_EXPONENT. "tgp_ref_w" is the board power of the Blackwell part whose efficiency constant the system uses.
     # GB300: 1,400 W against GB200's 1,200 W (NVIDIA table above).
-    # HGX B300 (p6-b300, dgx-b300): 1,100 W against HGX B200's 1,000 W (mfu-model-5, joint refit, docs/CALCULATOR-HARDWARE.md 6a).
-    #   B200 1,000 W: NVIDIA HGX B200 datasheet, "Max Thermal Design Power, per individual GPU: configurable up to 1000 W"
-    #       https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf
-    #   B300 1,100 W: the B300 envelope measured in arXiv 2610.41919 (https://arxiv.org/abs/2610.41919) and the HGX B300 GPU bin
-    #       of OEM systems (Supermicro, "eight 1,100W TDP Blackwell GPUs", https://learn-more.supermicro.com/b300). No NVIDIA or
-    #       AWS page found gives the HGX B300 per-GPU TDP; AWS does not publish the p6-b300 power setting (assumed 1,100 W).
+    # B300 (p6-b300.48xlarge, and dgx-b300 for NVIDIA's published runs): 1,100 W against the B200's 1,000 W (mfu-model-5, joint
+    #   refit, docs/CALCULATOR-HARDWARE.md 6a). Hardware: AWS P6 page https://aws.amazon.com/ec2/instance-types/p6/ and instance table
+    #   https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (p6-b300.48xlarge: 8 x B300, 6400 Gbps).
+    #   Board power per GPU: arXiv 2610.41919 (https://arxiv.org/abs/2610.41919), "TDP per GPU" 1000 W (B200) and 1100 W (B300).
+    #   AWS and NVIDIA publish no B300 per-GPU power figure; AWS does not publish the p6-b300.48xlarge power setting (assumed 1,100 W).
     "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
                               "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
                               "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",),
@@ -211,7 +211,7 @@ HARDWARE = {
 
 
 def domain_gpus(hw):
-    """GPUs one NVLink domain reaches: 8 on an HGX node, 72 on a GB200 NVL72 UltraServer."""
+    """GPUs one NVLink domain reaches: 8 on an 8-GPU node, 72 on a GB200 NVL72 UltraServer."""
     return int(hw.get("domain_gpus") or hw["gpn"])
 
 
@@ -228,7 +228,7 @@ def billing_gpus(hw):
 # --- Rack-aware GPU counts (hardware whose NVLink domain is larger than 8 GPUs) -----------------
 # 72 is not a power of two. A job that wants EP 64 (or any power-of-two layout) on an UltraServer uses 64 of
 # its 72 GPUs, as NeMo's GB200 recipes do (64, 128 or 256 GPUs; NeMo 25.07 performance summary), and is still
-# billed for the whole UltraServer. HGX nodes (domain 8) are never touched by these helpers.
+# billed for the whole UltraServer. 8-GPU nodes (domain 8) are never touched by these helpers.
 
 def is_trainium(hw):
     """Hardware counted in chips with NeuronCores as ranks (hw["ranks_per_chip"])."""
@@ -253,14 +253,14 @@ def _largest_pow2_below(n, multiple_of):
 
 
 def rack_share(hw):
-    """GPUs of each domain a power-of-two layout uses: 64 of 72 (0 for HGX nodes)."""
+    """GPUs of each domain a power-of-two layout uses: 64 of 72 (0 for 8-GPU nodes)."""
     return _largest_pow2_below(domain_gpus(hw) + 1, instance_gpus(hw)) if is_rack_scale(hw) else 0
 
 
 def rack_hw(hw, n):
     """`hw` as seen by a job of n GPUs. On rack-scale hardware, n GPUs that do not fill whole domains (128 on
     72-GPU UltraServers) run as the largest power-of-two share of each domain that divides n (64 per UltraServer),
-    so a group of that size still sits on NVLink. Any other case, and every HGX node, returns `hw` itself."""
+    so a group of that size still sits on NVLink. Any other case, and every 8-GPU node, returns `hw` itself."""
     if not is_rack_scale(hw):
         return hw
     domain = domain_gpus(hw)
@@ -274,7 +274,7 @@ def rack_hw(hw, n):
 
 def rack_alternatives(hw, n):
     """GPU counts below n worth trying instead of n on rack-scale hardware: the largest power of two (a multiple of
-    the instance size) when n is not one, e.g. 64 for 72 and 128 for 144. Empty for HGX nodes."""
+    the instance size) when n is not one, e.g. 64 for 72 and 128 for 144. Empty for 8-GPU nodes."""
     if not is_rack_scale(hw) or n <= instance_gpus(hw):
         return []
     p = _largest_pow2_below(n, instance_gpus(hw))
@@ -282,7 +282,7 @@ def rack_alternatives(hw, n):
 
 
 def auto_gpu_counts(hw, gpus_per_node, limit):
-    """GPU counts the automatic search tries, smallest first. HGX nodes: gpus_per_node, doubling. Rack-scale:
+    """GPU counts the automatic search tries, smallest first. 8-GPU nodes: gpus_per_node, doubling. Rack-scale:
     steps of the instance size inside one domain (4, 8, 16, 32, 64), then whole domains (72, 144, 288, ...) and
     the power-of-two share of each (128, 256, ...)."""
     if is_trainium(hw):  # chips: doubling inside one domain, then whole domains (Trn2 UltraServer 64, Trn3 144 chips)
@@ -343,7 +343,7 @@ MOE_EXPERT_HALF_FFN_FAMILY = {"blackwell": 1664}
 # One constant, fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01 (validation_runs.fit_tgp_exponent), checked on the
 # other GB300 pairs. An exponent above 1 means the power ratio explains most of the gap and a small part (about 3 to 4 points
 # for GB300, 1,400 W against 1,200 W) comes from elsewhere, see docs/CALCULATOR-HARDWARE.md section 6.
-# mfu-model-5 applies the same term to HGX B300 (1,100 W against 1,000 W). The refit after that change gives 1.25 again (the GB300
+# mfu-model-5 applies the same term to the B300 (p6-b300.48xlarge, 1,100 W against 1,000 W). The refit after that change gives 1.25 again (the GB300
 # fit pairs are ratios, which the Blackwell constants do not move); the three B300 / B200 pairs stay a hold-out check of it.
 TGP_EXPONENT = 1.25
 

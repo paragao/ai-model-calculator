@@ -7,9 +7,9 @@ never replaced by a guess.
 
 All BF16 and FP8 figures are dense (no sparsity), per GPU. "Derived" means computed here from the cited totals.
 
-## 1. Three sizes that are all "8" on an HGX node
+## 1. Three sizes that are all "8" on an 8-GPU node
 
-| Field | Meaning | HGX node (p5, p6-b200, p6-b300) | GB200 `u-p6e-gb200x72` | GB200 `u-p6e-gb200x36` |
+| Field | Meaning | 8-GPU node (p5, p6-b200, p6-b300) | GB200 `u-p6e-gb200x72` | GB200 `u-p6e-gb200x36` |
 |---|---|---|---|---|
 | `domain_gpus` (`gpn`) | GPUs one NVLink domain reaches. TP, EP and CP groups up to this size stay on NVLink | 8 | 72 | 36 |
 | `instance_gpus` | GPUs of the smallest launchable instance | 8 | 4 (`p6e-gb200.36xlarge`) | 4 |
@@ -41,7 +41,7 @@ check this number.
 
 72 is not a power of two, so a power-of-two layout (EP 64, for example) does not divide 72 GPUs. NeMo's GB200
 recipes use 64, 128 or 256 GPUs, a part of each rack ([NeMo 25.07 performance summary](https://docs.nvidia.com/nemo-framework/user-guide/25.11/performance/archive/25.07-performance-summary.html)).
-HGX nodes (domain 8) are not touched by any of this.
+8-GPU nodes (domain 8) are not touched by any of this.
 
 | Rule | Where |
 |---|---|
@@ -103,7 +103,7 @@ domain boundary (`mfu_model._span_bw`, `estimate`):
 A group spread over both UltraServers is limited by the smaller of NVLink and the EFA of the ranks it has in each UltraServer
 (`min(NVLink, ranks per UltraServer x 100 GB/s x 0.8)`). With 72 ranks per UltraServer that is 5,760 GB/s of EFA against 684 GB/s of NVLink,
 so a DP group that uses all 72 GPUs of each UltraServer stays NVLink-limited, and only groups with few ranks per UltraServer
-(or the EP all-to-all, which is timed on the EFA directly) are EFA-limited. This is the same rule the model uses for HGX nodes.
+(or the EP all-to-all, which is timed on the EFA directly) are EFA-limited. This is the same rule the model uses for 8-GPU nodes.
 
 Example, Llama-3.1-70B BF16 on GB300 (with the board-power term of section 6), 2T tokens, calculator Lambda (plan search chooses TP/PP/ZeRO):
 
@@ -137,19 +137,20 @@ Candidate causes, with the numbers that rule them in or out (NVIDIA's [Blackwell
 
 The term is `eta_base = BASE_EFFICIENCY[family, precision] x (tgp_w / tgp_ref_w) ** TGP_EXPONENT` (`mfu_model.estimate`), a general term for any system
 that has a board power and the board power of the Blackwell part whose constant it uses: GB300 has 1,400 W and 1,200 W, and since mfu-model-5 the
-HGX B300 has 1,100 W and 1,000 W (section 6a). The one constant, `TGP_EXPONENT = 1.25`, is
+B300 (`p6-b300.48xlarge`) has 1,100 W and 1,000 W (section 6a). The one constant, `TGP_EXPONENT = 1.25`, is
 fitted on two pairs and checked on ten. An exponent above 1 says the power ratio (1.167) accounts for about 1.17 of the 1.21 gain, and about 3 to 4 points of the gap come
 from somewhere this data cannot separate (performance per watt, kernels tuned for sm_103). They are not hidden: they sit in the exponent.
 
 Before and after on the hold-out (ratio error GB300 / GB200): median 15.8% to 3.8%, worst 22.7% to 7.1% (`docs/CALCULATOR-MFU.md` section 7b).
 
-### 6a. HGX B300: the term is applied, with a joint refit (mfu-model-5)
+### 6a. B300 (p6-b300.48xlarge): the term is applied, with a joint refit (mfu-model-5)
 
-HGX B300 against HGX B200 at the same plan is 1.11, 1.12 and 1.13 times faster (Megatron-Bridge 26.04 and 26.04.01: DeepSeek-V3, GPT-OSS, Qwen3-30B-A3B), at the same
-listed dense peak (2,250 / 4,500 TFLOPS). The board power differs: B200 is configurable up to 1,000 W per GPU
-([NVIDIA HGX B200 datasheet](https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf)) and the B300 runs a 1,100 W envelope
-([arXiv 2610.41919](https://arxiv.org/abs/2610.41919); [Supermicro HGX B300](https://learn-more.supermicro.com/b300): "eight 1,100W TDP Blackwell GPUs").
-No NVIDIA or AWS page found gives the HGX B300 per-GPU TDP, and AWS does not publish the p6-b300 power setting: 1,100 W is assumed for `p6-b300.48xlarge`.
+The hardware is the AWS instances `p6-b200.48xlarge` (8 x B200) and `p6-b300.48xlarge` (8 x B300, 6400 Gbps)
+([AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/), [AWS instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html)). AWS gives the p6-b300.48xlarge 1.5x the GPU TFLOPS of
+p6-b200.48xlarge at FP4 only, so the dense BF16 and FP8 peaks are equal (2,250 / 4,500 TFLOPS). NVIDIA's published B300 against B200 runs at the same plan
+(Megatron-Bridge 26.04 and 26.04.01: DeepSeek-V3, GPT-OSS, Qwen3-30B-A3B) are 1.11, 1.12 and 1.13 times faster. The board power differs: "TDP per GPU"
+1,000 W for the B200 and 1,100 W for the B300 ([arXiv 2610.41919](https://arxiv.org/abs/2610.41919)). AWS and NVIDIA publish no B300 per-GPU power figure, and AWS does not
+publish the p6-b300.48xlarge power setting: 1,100 W is assumed for `p6-b300.48xlarge`.
 `p6-b300.48xlarge` and `dgx-b300` now carry `tgp_w` 1100 and `tgp_ref_w` 1000: a gain of 1.1 ^ 1.25 = 1.127 on the base efficiency.
 
 **The joint refit.** Adding the term alone would push the B300 rows that the Blackwell constants were fitted on 9 to 12 points up. What was refitted, in
