@@ -18,7 +18,7 @@ experts, and the EP all-to-all over EFA calibrated on our own runs; `docs/CALCUL
 | tokens/s = 0.40 x BF16 peak x GPUs / (6 x active params): time x GPUs constant, so the same cost at any GPU count | step time includes bubble and exposed communication, so bigger plans can cost more |
 | Bubble from a global batch of micro_batch x DP (0 or 1 micro-batches, so 100% bubbles) | global batch of 16M tokens (Llama 3 405B) unless given; bubble (PP-1)/(VP x m + PP-1) |
 | Plan = smallest TP x PP that fits; EP never searched | every TP / PP / EP plan that divides the GPUs, scored by estimated throughput; the fastest that fits wins |
-| B300 BF16 peak 3,375 TFLOPS | 2,250 (HGX B300: 36 PFLOPS FP8 dense / 8 GPUs; BF16 = B200) |
+| B300 BF16 peak 3,375 TFLOPS | 2,250 (p6-b300.48xlarge: the dense FP8 and BF16 of p6-b200.48xlarge, 1.5x only at FP4, [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/)) |
 | Expert optimizer state sharded over the full DP when EP = DP | sharded over DP / EP (Megatron expert-data-parallel group) |
 | FP8 used the BF16 peak | FP8 uses the FP8 dense peak and its own efficiency |
 
@@ -122,7 +122,7 @@ So memory and time describe the same schedule: a unit larger than the cap (GLM-5
 (Megatron FSDP) use k = 1.
 
 EP share off the NVLink domain (`ep_efa_share`): the EP group is EP x ETP consecutive GPUs (Megatron-Core: expert TP innermost).
-s = 0 when the group sits in one domain (8-GPU node on HGX; the whole UltraServer, 36 or 72 GPUs, on GB200 and GB300), s = 1 - domain /
+s = 0 when the group sits in one domain (8-GPU node of p5, p5en, p6-b200.48xlarge and p6-b300.48xlarge; the whole UltraServer, 36 or 72 GPUs, on GB200 and GB300), s = 1 - domain /
 group when it spans whole domains, and for a group that straddles a boundary the share of its worst rank (the step waits for it).
 mfu-model-5 used 1 - (node GPUs / ETP) / EP, the same for every power-of-two layout on 8-GPU nodes.
 
@@ -134,7 +134,7 @@ steady state (1F1B); its fill and drain is the bubble term.
 
 | Constant | Value | Source / how |
 |---|---|---|
-| Peak BF16 / FP8 dense TFLOPS | H100, H200, H800 989 / 1979; A100 312; B200, B300 2250 / 4500 | NVIDIA datasheets; HGX B300 36 PFLOPS FP8 dense / 8 |
+| Peak BF16 / FP8 dense TFLOPS | H100, H200, H800 989 / 1979; A100 312; B200, B300 2250 / 4500 | NVIDIA datasheets; B300: equal to B200 except FP4 ([AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/)) |
 | NVLink per direction, GB/s | H100/H200 450, B200/B300 900, A100 300, H800 200 | half of total NVLink bandwidth per GPU |
 | Network per GPU, GB/s | p5/p5e/p5en/p6-b200 50 (3200 Gbps EFA / 8), p6-b300 100 (6400 Gbps), p4d/p4de 6.25 (400 Gbps), GB200 100 (3200 Gbps per 4-GPU instance), GB300 100 (8 x 400 Gbps per 4-GPU server, paragao 2026-11-17); DGX H100/B200 50, DGX B300 100 (8 x 800 Gb/s ConnectX-8), DGX A100 25, Meta Llama 3 RoCE 50, DeepSeek H800 IB 50 | AWS instance pages; NVIDIA DGX datasheets; Llama 3 paper Sec. 3.3.1; DeepSeek-V3 paper Sec. 3.1 |
 | BASE_EFFICIENCY hopper/bf16, hopper/fp8, blackwell/bf16, blackwell/fp8, ampere/bf16 | 0.573, 0.45, 0.417, 0.417, 0.471 | fitted (geometric mean per cell) on the dense fit runs, with the board-power term in place (blackwell/bf16 was 0.443 in mfu-model-4) |
@@ -147,7 +147,7 @@ steady state (1F1B); its fill and drain is the bubble term.
 | OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.3 / 0.9 / 0.8 | assumptions, except EP: fitted with the MoE constants (grid 0 / 0.3 / 0.5 / 0.7 / 0.9); a plan may set `overlap_ep` (DualPipe 0.95) |
 | SMS_PER_GPU | H100 / H200 / H800 132, A100 108, B200 148, B300 160 | NVIDIA H100 and A100 whitepapers; [B200: 74 per die](https://chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut); [B300: up to 160](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) |
 | TGP_EXPONENT | 1.25 | fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01; applies to systems with `tgp_w` and `tgp_ref_w` (GB300: 1,400 W against 1,200 W; B300: 1,100 W against 1,000 W since mfu-model-5); section 7b |
-| tgp_w, tgp_ref_w (B300) | 1100, 1000 | B200 1,000 W: [NVIDIA HGX B200 datasheet](https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf); B300 1,100 W: [arXiv 2610.41919](https://arxiv.org/abs/2610.41919) and the [Supermicro HGX B300 page](https://learn-more.supermicro.com/b300); no NVIDIA or AWS page found gives the HGX B300 per-GPU TDP |
+| tgp_w, tgp_ref_w (B300) | 1100, 1000 | "TDP per GPU" 1,000 W (B200) and 1,100 W (B300): [arXiv 2610.41919](https://arxiv.org/abs/2610.41919); AWS and NVIDIA publish no B300 per-GPU power figure. Hardware: `p6-b200.48xlarge`, `p6-b300.48xlarge` ([AWS instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html)) |
 | COMM_SMS | 20 | DeepSeek-V3 paper Sec. 3.2.2 |
 | DEFAULT_TOKENS_PER_STEP | 16,777,216 (16M) | Llama 3 405B, Llama 3 paper Table 4 |
 | GOODPUT | 0.90 | Llama 3 paper Sec. 3.3.4 (> 90% effective training time) |
@@ -370,7 +370,7 @@ The absolute GB300 errors are larger than the ratio errors (for example -12.8% f
 errors the model already has on GB200 (-13.9% and -17.9% on the same rows): the plan, the dispatcher and the NeMo software release are not
 pinned. No GB300 row is in the 38-run set. Hold-out after mfu-model-5: median 3.8%, worst 7.8% (`gb300-vs-gb200-qwen3-30b`, +7.1% before).
 
-**HGX B300 against B200, same plan** (a hold-out check of the term on the B300; applied since mfu-model-5, exponent fitted on GB300 only):
+**B300 against B200, same plan** (NVIDIA's published runs; a hold-out check of the term on the B300; applied since mfu-model-5, exponent fitted on GB300 only):
 
 Without the term (mfu-model-4) the model predicts a ratio of 1.0:
 
@@ -409,7 +409,7 @@ the published MFU of the two runs is 23.4% and 32.2% (PaLM FLOPs, 190 TFLOPS per
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
-(<= 16), CP 1 (CP up to 8 only for S >= 32K), EP that divides the experts and GPUs / PP: powers of 2 on HGX nodes; on
+(<= 16), CP 1 (CP up to 8 only for S >= 32K), EP that divides the experts and GPUs / PP: powers of 2 on 8-GPU nodes; on
 GB200 and GB300 UltraServers also every multiple of 4 that fits one NVLink domain (16, 32, 36, 64, 72) and multiples of the domain
 (144), and only layouts whose EP x ETP groups tile the domains without straddling one (`ep_fits_domains`; 144 GPUs with EP 16 run as
 64 per UltraServer, through `_run_once`'s 64-of-72 count). A request may set `expert_tensor_parallel`.

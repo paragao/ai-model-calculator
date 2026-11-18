@@ -149,7 +149,7 @@ MAX_AUTO_GPUS = 4096
 
 
 def default_gpus_per_node(instance):
-    """GPUs billed as one node: 8 for an HGX instance, the whole UltraServer (72 or 36) for GB200."""
+    """GPUs billed as one node: 8 for an 8-GPU instance, the whole UltraServer (72 or 36) for GB200."""
     hw = mm.HARDWARE.get(instance)
     return mm.billing_gpus(hw) if hw else 8
 
@@ -171,7 +171,7 @@ def trainium_fields(mm_hw, chips, ranks, mode):
 
 
 def unit_fields(mm_hw, num_nodes):
-    """Result fields for hardware whose domain, instance and billing sizes differ (empty for HGX nodes)."""
+    """Result fields for hardware whose domain, instance and billing sizes differ (empty for 8-GPU nodes)."""
     if mm.billing_gpus(mm_hw) == mm.instance_gpus(mm_hw) == mm.domain_gpus(mm_hw):
         return {}
     if mm.is_trainium(mm_hw):

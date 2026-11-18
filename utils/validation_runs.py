@@ -402,7 +402,7 @@ GB300_PAIRS = [
 ]
 ALL_GB300_PAIRS = GB300_FIT_PAIRS + GB300_PAIRS_2604 + GB300_PAIRS
 
-# HGX B300 against HGX B200, same plan on both (NeMo 26.04 / 26.04.01): a hold-out check of the power term on the B300 (1,100 W
+# B300 against B200, same plan on both (NVIDIA's published DGX runs, NeMo 26.04 / 26.04.01): a hold-out check of the power term on the B300 (1,100 W
 # against 1,000 W, applied since mfu-model-5). Not used for any constant: TGP_EXPONENT is fitted on the GB300 fit pairs only.
 def _b300_pair(name, model, n, gbs, seq, b300, b200, prec="fp8", source=None):
     rows = []
@@ -996,7 +996,7 @@ if __name__ == "__main__":
     print(pairs_markdown(pair_rows))
     print(json.dumps(pair_groups(pair_rows), indent=1))
     b300_rows = evaluate_b300_pairs()
-    print("\nHGX B300 vs B200, same plan (hold-out of the power term)\n")
+    print("\nB300 vs B200, same plan (hold-out of the power term)\n")
     print(pairs_markdown(b300_rows))
     print(json.dumps(pair_summary(b300_rows), indent=1))
     print("\nEP all-to-all over EFA, step 1: kernel efficiency of our dispatch / combine micro-benchmarks\n")

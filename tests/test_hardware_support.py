@@ -238,7 +238,7 @@ class Gb200Reachable(unittest.TestCase):
         for key, domain in (("u-p6e-gb200x72", 72), ("u-p6e-gb200x36", 36)):
             hw = mm.HARDWARE[key]
             self.assertEqual((mm.domain_gpus(hw), mm.instance_gpus(hw), mm.billing_gpus(hw)), (domain, 4, domain))
-        hw = mm.HARDWARE["p6-b300.48xlarge"]  # an HGX node: all three are 8
+        hw = mm.HARDWARE["p6-b300.48xlarge"]  # an 8-GPU node: all three are 8
         self.assertEqual((mm.domain_gpus(hw), mm.instance_gpus(hw), mm.billing_gpus(hw)), (8, 8, 8))
 
     def test_default_gpus_per_node_comes_from_the_hardware(self):
@@ -270,7 +270,7 @@ class Gb200Reachable(unittest.TestCase):
         self.assertGreater(r["training_time"]["training_days"], 0)  # time is still estimated
         self.assertIn("Cost**: unknown", p9.format_estimate(r))
 
-    def test_hgx_hardware_keeps_a_price(self):
+    def test_8gpu_instances_keep_a_price(self):
         r = run("Llama-3.1-8B", hardware="B300", num_gpus=8, total_tokens_b=100)
         self.assertEqual(r["cost_estimate"]["cost_per_hour_usd"], 250.0)
         self.assertNotIn("price_known", r["cost_estimate"])
@@ -281,7 +281,7 @@ class Gb200Reachable(unittest.TestCase):
         nvlink = 900.0 * mm.LINK_EFFICIENCY["nvlink"] * 1e9
         self.assertEqual(mm._span_bw(gb200, 1, 72), nvlink)  # a 72-GPU group stays on NVLink
         self.assertEqual(mm._span_bw(gb200, 1, 9), nvlink)
-        self.assertLess(mm._span_bw(b200, 1, 16), nvlink)  # two HGX nodes: EFA-limited
+        self.assertLess(mm._span_bw(b200, 1, 16), nvlink)  # two 8-GPU nodes: EFA-limited
         # one rank per UltraServer: its single EFA link (100 GB/s x 0.8) carries the traffic
         self.assertEqual(mm._span_bw(gb200, 72, 2), 100.0 * mm.LINK_EFFICIENCY["net"] * 1e9)
 
@@ -342,7 +342,7 @@ class Gb200Reachable(unittest.TestCase):
         r = run("Llama-3.1-8B", hardware="GB200", num_gpus=128, total_tokens_b=100)
         self.assertEqual(r["parallelism"]["num_nodes"], 2)  # 128 GPUs: two UltraServers
 
-    def test_hgx_requests_have_no_rack_layout(self):
+    def test_8gpu_requests_have_no_rack_layout(self):
         r = run("Llama-3.1-8B", hardware="B300", num_gpus=72, total_tokens_b=100)
         self.assertNotIn("rack_layout", r)
         self.assertEqual(r["parallelism"]["total_gpus"], 72)
@@ -352,9 +352,9 @@ class Gb200Reachable(unittest.TestCase):
         self.assertEqual((gb["parallelism"]["total_gpus"], gb["parallelism"]["expert_parallel"]), (256, 64))
         self.assertTrue(gb["alltoall_communication"]["comm_type"].startswith("NVLink only"))
         self.assertEqual(gb["alltoall_communication"]["efa_share"], 0.0)
-        hgx = run("DeepSeek-V3", hardware="b200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
-        self.assertTrue(hgx["alltoall_communication"]["comm_type"].startswith("EFA: "))
-        self.assertGreater(hgx["alltoall_communication"]["efa_share"], 0.8)  # EP 64 x ETP 1 on 8-GPU nodes: 7/8 leaves the node
+        node8 = run("DeepSeek-V3", hardware="b200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
+        self.assertTrue(node8["alltoall_communication"]["comm_type"].startswith("EFA: "))
+        self.assertGreater(node8["alltoall_communication"]["efa_share"], 0.8)  # EP 64 x ETP 1 on 8-GPU nodes: 7/8 leaves the node
 
     def test_auto_search_steps_inside_the_domain_then_by_ultraserver(self):
         r = run("Llama-3.1-70B", hardware="GB200", total_tokens_b=2000, num_gpus="auto", target_days=60)
@@ -441,7 +441,7 @@ class Gb200Reachable(unittest.TestCase):
 class RackAwareCounts(unittest.TestCase):
     """Step 2: GPU counts in steps of 4 inside a 72-GPU domain, 64 of 72, billing by UltraServer."""
 
-    def test_auto_counts_for_hgx_are_unchanged_doubling(self):
+    def test_auto_counts_for_8gpu_nodes_are_unchanged_doubling(self):
         hw = mm.HARDWARE["p6-b300.48xlarge"]
         self.assertEqual(mm.auto_gpu_counts(hw, 8, 100), [8, 16, 32, 64])
         self.assertEqual(mm.auto_gpu_counts(hw, 4, 40), [4, 8, 16, 32])
@@ -460,7 +460,7 @@ class RackAwareCounts(unittest.TestCase):
         g = mm.HARDWARE["u-p6e-gb200x72"]
         got = {n: mm.rack_alternatives(g, n) for n in (4, 8, 64, 72, 100, 128, 144, 288, 576)}
         self.assertEqual(got, {4: [], 8: [], 64: [], 72: [64], 100: [64], 128: [], 144: [128], 288: [256], 576: [512]})
-        self.assertEqual(mm.rack_alternatives(mm.HARDWARE["p6-b300.48xlarge"], 72), [])  # an HGX node never changes
+        self.assertEqual(mm.rack_alternatives(mm.HARDWARE["p6-b300.48xlarge"], 72), [])  # an 8-GPU node never changes
 
     def test_128_gpus_run_as_64_per_ultraserver(self):
         g = mm.HARDWARE["u-p6e-gb200x72"]
@@ -606,7 +606,7 @@ class Gb300Hardware(unittest.TestCase):
         self.assertGreater(e["mfu"], 0.2)
         self.assertEqual(mm.auto_gpu_counts(g3, 72, 600)[-3:], [288, 512, 576])  # the search is no longer capped at 72
 
-    def test_hgx_and_gb200_networks_are_untouched(self):
+    def test_8gpu_and_gb200_networks_are_untouched(self):
         for key, hw in mm.HARDWARE.items():
             if "gb300" not in key:
                 self.assertIsNotNone(hw["net"], key)
@@ -787,7 +787,7 @@ class Gb300Validation(unittest.TestCase):
         keys = ("tp", "pp", "cp", "vp", "ep", "mbs", "gbs", "seq")
         self.assertEqual({k: p["gb300"]["plan"][k] for k in keys}, {k: p["gb200"]["plan"][k] for k in keys})
 
-    def test_b300_hgx_check_the_term_is_applied_and_right(self):
+    def test_b300_check_the_term_is_applied_and_right(self):
         off, on = vr.evaluate_b300_pairs(False), vr.evaluate_b300_pairs()
         self.assertEqual(len(off), 3)
         self.assertGreater(vr.pair_summary(off)["median_abs_error_pct"], 10)   # ratio predicted 1.0, published 1.11-1.13
@@ -840,7 +840,7 @@ class Gb300PowerTermInTheResult(unittest.TestCase):
 
 
 class B300PowerRefit(unittest.TestCase):
-    """mfu-model-5: the board-power term on HGX B300 (1,100 W against 1,000 W) with a joint refit of the Blackwell constants.
+    """mfu-model-5: the board-power term on the B300 (p6-b300.48xlarge, 1,100 W against 1,000 W) with a joint refit of the Blackwell constants.
     Every test here fails on main d6051e2 (no term on the B300, VP 1 on our B300 MoE rows, no Blackwell MoE half width)."""
 
     # Rows that move more than 2 points: mfu-model-4 error -> mfu-model-5 error (percent). docs/CALCULATOR-HARDWARE.md 6a.
@@ -865,7 +865,7 @@ class B300PowerRefit(unittest.TestCase):
             cls.pairs_before = vr.evaluate_pairs(vr.ALL_GB300_PAIRS)
 
     def test_b300_systems_carry_the_board_power_against_the_b200(self):
-        for key in ("p6-b300.48xlarge", "dgx-b300"):  # NVIDIA HGX B200 datasheet 1,000 W; B300 1,100 W (mfu_model.HARDWARE comment)
+        for key in ("p6-b300.48xlarge", "dgx-b300"):  # arXiv 2610.41919: TDP per GPU 1,000 W (B200), 1,100 W (B300)
             hw = mm.HARDWARE[key]
             self.assertEqual((hw["tgp_w"], hw["tgp_ref_w"], hw["fp8"], hw["bf16"]), (1100.0, 1000.0, 4500.0, 2250.0), key)
         for key in ("p6-b200.48xlarge", "dgx-b200"):
@@ -1099,13 +1099,13 @@ class EpGroupInsideTheNvlinkDomain(unittest.TestCase):
             self.assertTrue(mm.ep_fits_domains(hw, 128, 1, 1, 16, 256))
 
     def test_eps_that_fit_the_domain_are_tried_not_only_powers_of_two(self):
-        """Rule C: on x72 EP 16, 32, 64 and 72; on x36 16, 32 and 36; HGX keeps the powers of two."""
+        """Rule C: on x72 EP 16, 32, 64 and 72; on x36 16, 32 and 36; 8-GPU nodes keep the powers of two."""
         self.assertTrue({16, 32, 72, 144}.issubset(mm.ep_candidates(288, 72, 4)))
         self.assertNotIn(64, mm.ep_candidates(288, 72, 4))  # 64 does not divide 288
         self.assertTrue({16, 32, 64, 128, 256}.issubset(mm.ep_candidates(256, 72, 4)))
         self.assertNotIn(72, mm.ep_candidates(256, 72, 4))
         self.assertTrue({16, 32, 36}.issubset(mm.ep_candidates(288, 36, 4)))
-        self.assertEqual(mm.ep_candidates(288), [1, 2, 4, 8, 16, 32])  # HGX: powers of two, as before
+        self.assertEqual(mm.ep_candidates(288), [1, 2, 4, 8, 16, 32])  # 8-GPU nodes: powers of two, as before
         self.assertEqual(mm.ep_candidates(160), [1, 2, 4, 8, 16, 32])
 
     def test_auto_plan_keeps_ep_inside_the_domain(self):
@@ -1120,7 +1120,7 @@ class EpGroupInsideTheNvlinkDomain(unittest.TestCase):
         self.assertEqual((p["total_gpus"], p["expert_parallel"]), (72, 36))
         self.assertEqual(a2a["efa_share"], 0.0, a2a)
 
-    def test_hgx_power_of_two_layouts_are_unchanged(self):
+    def test_8_gpu_node_power_of_two_layouts_are_unchanged(self):
         """On 8-GPU nodes every power-of-two group either fits a node or spans whole nodes: the same share as mfu-model-5's
         1 - (GPUs per node / ETP) / EP."""
         hw = mm.HARDWARE["p5en.48xlarge"]
