@@ -31,13 +31,16 @@ Step-time model (per GPU, one optimizer step)
       t_x = bytes_x / (link_bandwidth x LINK_EFFICIENCY)
       ZeRO-3 / FSDP: exposed(DP) is summed per layer instead (_sharded_dp_time), because a
       layer's gather can only hide behind its neighbour's compute, not the whole step's.
+  EP (mfu-model-6): the share of the all-to-all off the NVLink domain is ep_efa_share (the EP x ETP group against the
+      8-GPU node or the 36 / 72-GPU UltraServer); on EFA systems it is timed per remote domain (efa_remote_copies) at
+      LINK_EFFICIENCY["ep_efa"], fitted on our own dispatch benchmarks and DeepEP training runs.
 Communication volumes are listed in each function below.
 """
 from __future__ import annotations
 
 import math
 
-MODEL_VERSION = "mfu-model-5"
+MODEL_VERSION = "mfu-model-6"
 
 GIB = 1.073741824  # 1 GiB/s in GB/s (the Neuron pages give NeuronLink in GiB/s on Trn2)
 CALIBRATION_TRN1 = ("calibrated on the 2 published Neuron Trn1 rows (Llama-3.1 8B and 70B, BF16, Neuron 2.24.0); there is no hold-out, "
@@ -65,14 +68,14 @@ UNKNOWNS_TRN3 = ("any measured Trn3 training throughput or MFU", "AWS instance t
 #       DGX H100 / DGX B200: 8 x 400 Gb/s ConnectX-7; DGX B300: 8 x 800 Gb/s ConnectX-8; DGX A100: 8 x 200 Gb/s HDR;
 #       Meta Llama 3 cluster: 400 Gbps RoCE per GPU; DeepSeek H800: 400 Gbps IB per GPU.
 HARDWARE = {
-    "p5.48xlarge":      {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
-    "p5e.48xlarge":     {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
-    "p5en.48xlarge":    {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
-    "p6-b200.48xlarge": {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
+    "p5.48xlarge":      {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8, "fabric": "efa"},
+    "p5e.48xlarge":     {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8, "fabric": "efa"},
+    "p5en.48xlarge":    {"gpu": "H200", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8, "fabric": "efa"},
+    "p6-b200.48xlarge": {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8, "fabric": "efa"},
     "p6-b300.48xlarge": {"gpu": "B300", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 100.0, "gpn": 8,
-                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0},
-    "p4d.24xlarge":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
-    "p4de.24xlarge":    {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8},
+                         "tgp_w": 1100.0, "tgp_ref_w": 1000.0, "fabric": "efa"},
+    "p4d.24xlarge":     {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8, "fabric": "efa"},
+    "p4de.24xlarge":    {"gpu": "A100", "family": "ampere",    "bf16": 312.0,  "fp8": 312.0,  "nvlink": 300.0, "net": 6.25,  "gpn": 8, "fabric": "efa"},
     # Non-AWS systems, used only by the validation set (published runs).
     "dgx-h100":         {"gpu": "H100", "family": "hopper",    "bf16": 989.0,  "fp8": 1979.0, "nvlink": 450.0, "net": 50.0,  "gpn": 8},
     "dgx-b200":         {"gpu": "B200", "family": "blackwell", "bf16": 2250.0, "fp8": 4500.0, "nvlink": 900.0, "net": 50.0,  "gpn": 8},
@@ -119,11 +122,26 @@ HARDWARE = {
     #   https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html (p6-b300.48xlarge: 8 x B300, 6400 Gbps).
     #   Board power per GPU: arXiv 2610.41919 (https://arxiv.org/abs/2610.41919), "TDP per GPU" 1000 W (B200) and 1100 W (B300).
     #   AWS and NVIDIA publish no B300 per-GPU power figure; AWS does not publish the p6-b300.48xlarge power setting (assumed 1,100 W).
-    "p6e-gb300-ultraserver": {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
-                              "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
-                              "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",),
-                              "unknowns": ("usable GPU memory (279 GB is used: 1.5 x GB200's 13.4 TB / 72, AWS gives only the 1.5x)",
-                                           "on-demand price", "instance type names and sizes")},
+    # Names (mfu-model-6): u-p6e-gb300x72 = 18 instances of 4 GPUs = 72 B300 GPUs in one NVLink domain, u-p6e-gb300x36 = 9 instances
+    #   of 4 = 36 GPUs, the same per-GPU specs (given by paragao, 2026-11-18, with https://aws.amazon.com/ec2/instance-types/p6/; the
+    #   name table of that page does not render in a plain fetch). The old label p6e-gb300-ultraserver is gone; gb300, p6e-gb300 and
+    #   gb300-nvl72 are aliases of u-p6e-gb300x72 (lambda_function.HARDWARE_ALIASES).
+    "u-p6e-gb300x72":   {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
+                         "fabric": "efa",
+                         "user_provided": ("EFA 100 GB/s per GPU, 18 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",
+                                           "names u-p6e-gb300x72 (72 GPUs) and u-p6e-gb300x36 (36 GPUs), 4 GPUs per instance (paragao, "
+                                           "2026-11-18, https://aws.amazon.com/ec2/instance-types/p6/)"),
+                         "unknowns": ("usable GPU memory (279 GB is used: 1.5 x GB200's 13.4 TB / 72, AWS gives only the 1.5x)",
+                                      "on-demand price")},
+    "u-p6e-gb300x36":   {"gpu": "GB300", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
+                         "gpn": 36, "domain_gpus": 36, "instance_gpus": 4, "billing_gpus": 36, "tgp_w": 1400.0, "tgp_ref_w": 1200.0,
+                         "fabric": "efa",
+                         "user_provided": ("EFA 100 GB/s per GPU, 9 servers of 4 GPUs with 8 x 400 Gbps EFA each (paragao, 2026-11-17)",
+                                           "names u-p6e-gb300x72 (72 GPUs) and u-p6e-gb300x36 (36 GPUs), 4 GPUs per instance (paragao, "
+                                           "2026-11-18, https://aws.amazon.com/ec2/instance-types/p6/)"),
+                         "unknowns": ("usable GPU memory (279 GB is used: 1.5 x GB200's 13.4 TB / 72, AWS gives only the 1.5x)",
+                                      "on-demand price")},
     # DGX GB300 NVL72 (validation only): 4 x ConnectX-8 800 Gb/s per 4-GPU compute tray = 100 GB/s per GPU
     #   https://www.nvidia.com/en-us/data-center/gb300-nvl72/ (800 Gb/s per GPU),
     #   NVIDIA DGX SuperPOD GB300 reference architecture (PDF), "The compute tray integrates four ConnectX-8 NICs ...
@@ -204,10 +222,15 @@ HARDWARE = {
     "dgx-gb200":        {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 50.0,
                          "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
     "u-p6e-gb200x72":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
-                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72},
+                         "gpn": 72, "domain_gpus": 72, "instance_gpus": 4, "billing_gpus": 72, "fabric": "efa"},
     "u-p6e-gb200x36":   {"gpu": "GB200", "family": "blackwell", "bf16": 2500.0, "fp8": 5000.0, "nvlink": 900.0, "net": 100.0,
-                         "gpn": 36, "domain_gpus": 36, "instance_gpus": 4, "billing_gpus": 36},
+                         "gpn": 36, "domain_gpus": 36, "instance_gpus": 4, "billing_gpus": 36, "fabric": "efa"},
 }
+# "fabric": "efa" marks the AWS GPU systems, whose scale-out network is EFA. DeepEP's internode kernels are written for IBGDA
+# (GPU-initiated RDMA over InfiniBand), which EFA does not provide; on EFA they run through the NVSHMEM host proxy or UCCL
+# (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes). The share of the EP all-to-all that leaves the NVLink domain on these systems is
+# timed with LINK_EFFICIENCY["ep_efa"] (fitted on our own p6-b300 runs, see EP_EFA_FIT). DGX and the published clusters (InfiniBand,
+# RoCE) keep LINK_EFFICIENCY["net"]. Trainium plans no EP.
 
 
 def domain_gpus(hw):
@@ -278,7 +301,15 @@ def rack_alternatives(hw, n):
     if not is_rack_scale(hw) or n <= instance_gpus(hw):
         return []
     p = _largest_pow2_below(n, instance_gpus(hw))
-    return [p] if p and p != n and (n & (n - 1)) else []
+    out = [p] if p and p != n and (n & (n - 1)) else []
+    # mfu-model-6: whole domains at the power-of-two share each (192 = 3 x 64 for 216), so EP groups of 16, 32 or 64 tile every
+    # UltraServer without straddling one (rule: a group must not cross a domain boundary).
+    d, share = domain_gpus(hw), rack_share(hw)
+    if n % d == 0 and n > d and share:
+        q = n // d * share
+        if q not in out and q != n:
+            out.append(q)
+    return out
 
 
 def auto_gpu_counts(hw, gpus_per_node, limit):
@@ -315,6 +346,114 @@ def auto_gpu_counts(hw, gpus_per_node, limit):
             n *= 2
     return sorted(counts)
 
+
+# --- Expert parallelism and the NVLink domain (mfu-model-6) ----------------------------------------
+# Expert traffic stays on NVLink only when the whole EP group (EP x expert TP GPUs) sits inside one NVLink domain: the 8-GPU node
+# of p5, p5en, p6-b200 and p6-b300, the whole UltraServer (36 or 72 GPUs) of u-p6e-gb200x36/x72 and u-p6e-gb300x36/x72, not their
+# 4-GPU instance. Several EP groups may share a domain (4 groups of EP 16 in 72 GPUs); a group must not straddle a domain boundary.
+# A group larger than the domain spans whole equal shares of several domains, and the part of its all-to-all that goes to other
+# domains crosses EFA. Megatron-Core order: expert TP innermost, then EP, so a group is g = EP x ETP consecutive GPUs.
+
+def _even_share(g, avail):
+    """Largest u <= avail that divides g (GPUs of one group in each domain it spans)."""
+    for u in range(min(g, avail), 0, -1):
+        if g % u == 0:
+            return u
+    return 1
+
+
+def ep_domain_layout(hw, num_gpus, ep, etp=1, n_experts=0):
+    """How EP groups of EP x ETP GPUs are laid out on `num_gpus` GPUs (bought) so that no group straddles an NVLink domain.
+
+    Returns domain_gpus, domains, group_gpus, groups, groups_per_domain, domains_per_group, gpus_per_domain (used), used_gpus,
+    idle_gpus, efa_share (share of each rank's all-to-all peers in other domains) and nvlink_only; or refused (a reason) when
+    EP does not divide the experts or the group needs more domains than the job has."""
+    ep, etp, n = max(1, int(ep)), max(1, int(etp or 1)), int(num_gpus)
+    d = domain_gpus(hw)
+    g = ep * etp
+    out = {"domain_gpus": d, "group_gpus": g, "ep": ep, "etp": etp, "num_gpus": n}
+    if n_experts and ep > 1 and n_experts % ep:
+        return {**out, "refused": f"EP {ep} does not divide the {n_experts} experts (EP must give each GPU whole experts)"}
+    domains = max(1, math.ceil(n / d))
+    avail = min(d, n // domains)  # equal GPUs in each domain
+    if g <= avail:
+        per, span = (avail // g) * g, 1
+    else:
+        per = _even_share(g, avail)
+        span = g // per
+    if span > domains:
+        return {**out, "domains": domains,
+                "refused": f"an EP group of {g} GPUs needs {span} domains of {per} GPUs; {n} GPUs give {domains}"}
+    used_domains = domains // span * span
+    used = used_domains * per
+    return {**out, "domains": domains, "groups": used // g, "groups_per_domain": per // g if span == 1 else 0,
+            "domains_per_group": span, "gpus_per_domain": per, "used_gpus": used, "idle_gpus": n - used,
+            "efa_share": 0.0 if span == 1 else 1 - per / g, "nvlink_only": span == 1, "refused": None}
+
+
+def ep_efa_share(hw, num_gpus, ep, etp=1):
+    """Share of a rank's EP all-to-all that leaves its NVLink domain, for `num_gpus` GPUs filled domain by domain (the worst rank
+    of the worst group: the step waits for it). A group that straddles a domain boundary counts its cross-domain part as EFA.
+    `hw` is the hardware as the job sees it (rack_hw: 64 per UltraServer when the job uses 64 of each 72)."""
+    g = max(1, int(ep)) * max(1, int(etp or 1))
+    d, n = int(hw["gpn"]), int(num_gpus)
+    if g <= 1:
+        return 0.0
+    if d % g == 0:
+        return 0.0
+    if g % d == 0:
+        return 1 - d / g
+    worst = 0.0
+    for start in range(0, n - g + 1, g):
+        end, pos = start + g, start
+        while pos < end:
+            nxt = min(end, (pos // d + 1) * d)
+            worst = max(worst, 1 - (nxt - pos) / g)
+            pos = nxt
+    return worst
+
+
+def efa_remote_copies(efa_share, picks):
+    """Expected copies of one token that cross EFA when the dispatcher de-duplicates per destination domain (DeepEP, UCCL-EP):
+    the distinct remote domains among `picks` expert choices spread evenly over k = 1 / (1 - efa_share) domains (k = 4 for an
+    EP 32 group on 8-GPU nodes). E[distinct] = k (1 - (1 - 1/k) ^ picks); by symmetry a share 1 - 1/k = efa_share of them is
+    remote. picks = top-k, or topk_group under group-limited routing (DeepSeek-V3: 4 of 8 groups)."""
+    if efa_share <= 0:
+        return 0.0
+    k = 1.0 / (1.0 - efa_share)
+    return k * (1.0 - (1.0 - 1.0 / k) ** picks) * efa_share
+
+
+def ep_candidates(n_experts, domain=8, instance=8):
+    """EP degrees the search tries; each divides the expert count. Powers of two up to 256 (as before mfu-model-6). On rack-scale
+    hardware (domain > 8) also every multiple of the instance size that fits one domain (x72: 12, 24, 36, 48, 72 ...; x36: 12, 36)
+    and every multiple of the domain (144 = 2 x 72), so a 288-expert model can run EP 72 with 4 experts per GPU. 8-GPU nodes (p5, p5en, p6-b200.48xlarge, p6-b300.48xlarge) keep the
+    powers of two only."""
+    if not n_experts:
+        return [1]
+    out = {e for e in (2, 4, 8, 16, 32, 64, 128, 256) if n_experts % e == 0}
+    if domain > 8:
+        out |= {e for e in range(instance, n_experts + 1, instance)
+                if n_experts % e == 0 and (e <= domain or e % domain == 0)}
+    return [1] + sorted(out)
+
+
+def default_etp(num_gpus, tp, pp, ep):
+    """Expert TP when the plan gives none (Megatron-Core layout N / PP = ETP x EP x expert-DP): TP when TP x EP divides the GPUs of
+    one pipeline stage, else 1 (as the NeMo DeepSeek-V3 / Mixtral recipes set it)."""
+    per_stage = int(num_gpus) // int(pp)
+    return int(tp) if per_stage % (int(tp) * int(ep)) == 0 else 1
+
+
+def ep_fits_domains(hw, num_gpus, tp, pp, ep, n_experts=0, etp=None):
+    """True when EP groups of this plan tile the job's NVLink domains with no group straddling a boundary and no GPU idle (the
+    search drops other plans; _run_once tries 64 of each 72 GPUs as its own count). Always True on 8-GPU nodes for powers of two."""
+    if int(ep) <= 1:
+        return True
+    seen = rack_hw(hw, num_gpus)
+    lay = ep_domain_layout({**seen, "domain_gpus": seen["gpn"]}, num_gpus, ep, etp or default_etp(num_gpus, tp, pp, ep), n_experts)
+    return not lay.get("refused") and lay["used_gpus"] == int(num_gpus)
+
 # --- Calibration (fitted by validation_runs.fit() on the FIT subset; see docs) ---------------
 # eta_base: fraction of dense peak reached by the per-GPU compute of the step, before bubble
 # and exposed communication. One value per GPU family and precision, never per model.
@@ -348,7 +487,16 @@ MOE_EXPERT_HALF_FFN_FAMILY = {"blackwell": 1664}
 TGP_EXPONENT = 1.25
 
 # --- Stated assumptions (not fitted) ---------------------------------------------------------
-LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80, "torus": 0.76, "switch": 0.76, "direct": 0.76}
+# EP all-to-all over EFA (mfu-model-6), two fitted factors (validation_runs.fit_ep_efa_kernel and fit_ep_efa_training):
+#   EP_EFA_KERNEL   share of the EFA line rate our DeepEP-class dispatch / combine kernels reach (benchmarks/ep-dispatch-combine-bf16,
+#                   fitted on the 4-node cells of p5 and p6-b300, checked on 2 and 8 nodes and p5en)
+#   EP_EFA_TRAINING share of that kernel rate a training step reaches (fitted on our Kimi-K2 16-node p6-b300 run, checked on the
+#                   32-node Kimi-K2 and DeepSeek-V3 runs)
+# The EFA bytes are those a per-domain de-duplicating dispatcher sends (efa_remote_copies), the convention of DeepEP's own test.
+EP_EFA_KERNEL = 0.705
+EP_EFA_TRAINING = 0.31
+LINK_EFFICIENCY = {"nvlink": 0.76, "net": 0.80, "torus": 0.76, "switch": 0.76, "direct": 0.76,
+                   "ep_efa": round(EP_EFA_KERNEL * EP_EFA_TRAINING, 3)}
 # torus, switch, direct (NeuronLink, NeuronSwitch, direct chip-to-chip links): assumption, no Neuron measurement exists; set equal to nvlink. Only the base efficiency of the Trainium
 #   families is fitted (validation_runs.fit_trainium1), not the link efficiencies.
 # nvlink 0.76: our DeepEP intranode dispatch 340 GB/s on p5en vs 450 GB/s per direction
@@ -396,6 +544,8 @@ VALIDATION_SUMMARY = {"runs": 38, "hold_out_runs": 23, "median_abs_error_pct": 6
                       "rack_scale_runs": 8, "rack_scale_median_abs_error_pct": 8.9, "rack_scale_max_abs_error_pct": 64.7,
                       "gb300_fit_pairs": 2, "gb300_pairs": 10, "gb300_pair_median_abs_error_pct": 3.8, "gb300_pair_max_abs_error_pct": 7.8,
                       "b300_pairs": 3, "b300_pair_median_abs_error_pct": 0.2, "b300_pair_max_abs_error_pct": 2.3,
+                      "ep_efa_kernel_cells": 6, "ep_efa_kernel_max_abs_error_pct": 21.9,
+                      "ep_efa_training_hold_out_runs": 3, "ep_efa_training_hold_out_max_abs_error_pct": 12.0,
                       "metric": "tokens/s per GPU or MFU vs published", "doc": "docs/CALCULATOR-MFU.md"}
 
 SOURCES = {
@@ -692,7 +842,7 @@ def estimate(shape, hw, plan, precision="bf16"):
     # Expert layout (Megatron-Core): N / PP = ETP x EP x expert-DP. Expert TP = TP when that
     # divides, else 1 (as the NeMo DeepSeek-V3 / Mixtral recipes set it).
     per_stage = n // pp
-    etp = int(plan.get("etp") or (tp if per_stage % (tp * ep) == 0 else 1))
+    etp = int(plan.get("etp") or default_etp(n, tp, pp, ep))
     if per_stage % (etp * ep):
         raise ValueError(f"EP {ep} x expert TP {etp} does not divide {per_stage} GPUs per pipeline stage")
     prec = "fp8" if str(precision).lower() == "fp8" else "bf16"
@@ -752,16 +902,26 @@ def estimate(shape, hw, plan, precision="bf16"):
     # EP all-to-all: per MoE layer per micro-batch, dispatch + combine forward and backward
     # (4 x), of the rank's tokens x top-k x hidden, (ep-1)/ep of it leaving the rank.
     t_ep = 0.0
+    off = 0.0
     if ep > 1 and shape["moe_layers"]:
         per_copy = 4 * (tokens_mb / tp) * d * ACT_BYTES * (ep - 1) / ep * moe_stage * m
-        on_node = max(1, hw["gpn"] // etp)
-        off = max(0.0, 1 - on_node / ep)
+        # Share of the all-to-all that leaves the NVLink domain (ep_efa_share): 0 when the whole EP x ETP group sits in one
+        # domain, 1 - domain / group when it spans whole domains, and the worst rank's share when a group straddles a boundary.
+        off = ep_efa_share(hw, n, ep, etp)
         # Group-limited routing (config n_group > 1, topk_group): a token reaches at most
         # topk_group groups, so at most that many copies cross the network.
         # Only a dispatcher that de-duplicates per node (DeepEP; plan dedup_by_group) uses it.
         grouped = shape["n_group"] > 1 and plan.get("dedup_by_group")
         remote = min(shape["topk"], shape["topk_group"]) if grouped else shape["topk"]
-        t_ep = max(per_copy * remote * off / _bw(hw, "net"), per_copy * shape["topk"] * (1 - off) / _bw(hw, "nvlink"))
+        if hw.get("fabric") == "efa" and off > 0:
+            # EFA (mfu-model-6): DeepEP-class dispatchers send a token once per destination domain and fan it out on NVLink there,
+            # so the EFA bytes are the expected number of distinct remote domains a token reaches (efa_remote_copies), timed at the
+            # EP-over-EFA efficiency fitted on our own p6-b300 training runs (EP_EFA_FIT, validation_runs.EP_EFA_RUNS).
+            efa_copies = efa_remote_copies(off, min(shape["topk"], shape["topk_group"]) if grouped else shape["topk"])
+            t_net = per_copy * efa_copies / (hw["net"] * LINK_EFFICIENCY["ep_efa"] * 1e9)
+        else:
+            t_net = per_copy * remote * off / _bw(hw, "net")
+        t_ep = max(t_net, per_copy * shape["topk"] * (1 - off) / _bw(hw, "nvlink"))
     # DP: reduce-scatter grads + all-gather params over the DP group, (g-1)/g of the local
     # shard each. Dense params: group DP x CP. Expert params: group DP x CP / EP, shard / EP.
     expert_p = shape["expert_total_b"] * 1e9
@@ -810,6 +970,9 @@ def estimate(shape, hw, plan, precision="bf16"):
         "recompute_flops_share": round(rec_share, 4),
         "comm_sm_share": round(sm_share, 4),
         "bubble_fraction": round(bubble, 4),
+        "ep_efa_share": round(off, 4),
+        "ep_link": ("none" if not (ep > 1 and shape["moe_layers"]) else "NVLink only" if off == 0 else
+                    f"{'EFA' if hw.get('fabric') == 'efa' else 'network'} {off:.0%} of the all-to-all"),
         "time_s": {"compute": t_compute, "bubble": t_pipe - t_compute, "tp_exposed": e_tp, "cp_exposed": e_cp,
                    "ep_exposed": e_ep, "dp_exposed": e_dp, "tp_total": t_tp, "cp_total": t_cp,
                    "ep_total": t_ep, "dp_total": t_dp, "step": t_step},
@@ -833,15 +996,20 @@ def mfu_factors(est):
     }
 
 
-def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096, tp_options=(1, 2, 4, 8)):
+def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096, tp_options=(1, 2, 4, 8), hw=None, etp=None):
     """Plans the search tries: TP in {1,2,4,8} (<= node), PP up to 16 (layer divisors and powers
-    of 2), CP 1 (CP > 1 only for sequences >= 32K), EP powers of 2 dividing the experts.
-    tp_options: Trainium plans TP in NeuronCores, up to 32 (Neuron recipes: Llama 3.1 TP 32)."""
+    of 2), CP 1 (CP > 1 only for sequences >= 32K), EP from ep_candidates (divisors of the experts).
+    tp_options: Trainium plans TP in NeuronCores, up to 32 (Neuron recipes: Llama 3.1 TP 32).
+    hw (GPU hardware): EP degrees that fit its NVLink domain are added (rack-scale), and plans whose EP groups would straddle a
+    domain boundary or leave GPUs idle are dropped (ep_fits_domains).
+    etp (expert TP given by the request): plans whose EP x ETP does not divide the GPUs of a stage are dropped, and each plan
+    carries it."""
     tps = [t for t in tp_options if t <= gpn and num_gpus % t == 0]
     divisors = {p for p in range(1, layers + 1) if layers % p == 0}
     pps = sorted({p for p in divisors | {1, 2, 4, 8, 16} if p <= min(16, layers)})
     cps = [1] + ([2, 4, 8] if seq >= 32768 else [])
-    eps = [1] + [e for e in (2, 4, 8, 16, 32, 64, 128, 256) if n_experts and n_experts % e == 0]
+    rack = hw is not None and is_rack_scale(hw)
+    eps = ep_candidates(n_experts, domain_gpus(hw) if rack else 8, instance_gpus(hw) if rack else 8)
     out = []
     for tp in tps:
         for pp in pps:
@@ -851,6 +1019,13 @@ def candidate_plans(num_gpus, layers, n_experts, gpn=8, seq=4096, tp_options=(1,
                 dp = num_gpus // (tp * pp * cp)
                 for ep in eps:
                     if ep > 1 and (num_gpus // pp) % ep:
+                        continue
+                    if ep > 1 and rack and not ep_fits_domains(hw, num_gpus, tp, pp, ep, n_experts, etp):
+                        continue
+                    if etp and ep > 1:
+                        if (num_gpus // pp) % (etp * ep):
+                            continue
+                        out.append({"tp": tp, "pp": pp, "cp": cp, "ep": ep, "dp": dp, "etp": etp})
                         continue
                     out.append({"tp": tp, "pp": pp, "cp": cp, "ep": ep, "dp": dp})
     return out

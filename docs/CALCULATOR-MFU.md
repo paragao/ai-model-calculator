@@ -6,8 +6,9 @@ the plan search, MFU, throughput, days and cost (`python3 ai_model_calculator.py
 memory phases (`utils/phase1_memory.py`, `utils/core_calculations.py`) still give the memory per GPU.
 
 This page lists every formula and constant of the model. The same files are used, line for line, by the
-portal calculator Lambda. Model version: `mfu-model-5` (B300 board-power term and joint refit; mfu-model-4 numbers are in
-`docs/CALCULATOR-HARDWARE.md` section 6a).
+portal calculator Lambda. Model version: `mfu-model-6` (EP group against the NVLink domain, EP degrees that divide the
+experts, and the EP all-to-all over EFA calibrated on our own runs; `docs/CALCULATOR-HARDWARE.md` sections 5b and 6b). mfu-model-5
+(B300 board-power term and joint refit) and mfu-model-4 numbers are in `docs/CALCULATOR-HARDWARE.md` section 6a.
 
 ## 1. What changed from the old calculator
 
@@ -95,8 +96,9 @@ Communication volumes per GPU per step (bytes; BF16 on the wire), time = bytes /
 |---|---|---|
 | TP (sequence parallel) | 8 (TP-1)/TP x MBS x S/CP x d x 2 x L/PP x m | NVLink if TP <= GPUs per node |
 | CP (ring attention) | 3 (CP-1) x MBS x S/CP x 2 KV d_qk x 2 x L_full/PP x m | group bandwidth (below) |
-| EP all-to-all | 4 x (MBS S/CP/TP) x top-k x d x 2 x (EP-1)/EP x MoE layers/PP x m; off-node share 1 - (node GPUs / ETP)/EP over the network, the rest over NVLink, the slower decides | NVLink and network |
-| EP with node de-duplication (plan `dedup_by_group`, DeepEP) | network copies = min(top-k, `topk_group`) when `n_group` > 1 | |
+| EP all-to-all | per copy: 4 x (MBS S/CP/TP) x d x 2 x (EP-1)/EP x MoE layers/PP x m. NVLink part: top-k x (1 - s) copies. Network part: s = `ep_efa_share`, the share of a rank's EP peers outside its NVLink domain (below); the slower part decides | NVLink and network |
+| Network part on InfiniBand / RoCE (DGX, published clusters) | top-k x s copies (min(top-k, `topk_group`) with plan `dedup_by_group` and `n_group` > 1), at `net` x LINK_EFFICIENCY net (mfu-model-5, unchanged) | network |
+| Network part on EFA (AWS, `fabric` efa; mfu-model-6) | `efa_remote_copies(s, p)` = k (1 - (1 - 1/k)^p) x s copies, k = 1 / (1 - s) domains, p = top-k (or `topk_group`): a DeepEP-class dispatcher sends a token once per remote domain. At `net` x LINK_EFFICIENCY ep_efa = EP_EFA_KERNEL x EP_EFA_TRAINING = 0.705 x 0.31 = 0.219 | EFA |
 | DP (distributed optimizer) | (g-1)/g x local params x (2 + 2), dense g = DP x CP, expert g = GPUs/PP/(ETP x EP), local = params / (TP x PP) (experts / (ETP x PP x EP)) | group bandwidth |
 | ZeRO-2 | grads reduce-scattered every micro-batch: t_DP / 2 x (1 + m) | |
 | ZeRO-3 = FSDP (plan `zero` 3 or `fsdp`) | per layer per micro-batch: params gathered before forward and again before backward, grads reduce-scattered after backward, 3 Psi per micro-batch ([ZeRO paper](https://arxiv.org/abs/1910.02054) sec. 7.2.2), so 1.5 x m x t_DP per step; exposed time per layer, see below | |
@@ -119,6 +121,11 @@ So memory and time describe the same schedule: a unit larger than the cap (GLM-5
 7.4B params per MoE layer) cannot prefetch, and every gather of it is exposed. The validation runs
 (Megatron FSDP) use k = 1.
 
+EP share off the NVLink domain (`ep_efa_share`): the EP group is EP x ETP consecutive GPUs (Megatron-Core: expert TP innermost).
+s = 0 when the group sits in one domain (8-GPU node of p5, p5en, p6-b200.48xlarge and p6-b300.48xlarge; the whole UltraServer, 36 or 72 GPUs, on GB200 and GB300), s = 1 - domain /
+group when it spans whole domains, and for a group that straddles a boundary the share of its worst rank (the step waits for it).
+mfu-model-5 used 1 - (node GPUs / ETP) / EP, the same for every power-of-two layout on 8-GPU nodes.
+
 Group bandwidth: inside one node NVLink; across nodes min(NVLink, r x NIC per GPU), r = GPUs of the
 group per node (= GPUs per node / stride). Each x LINK_EFFICIENCY. Pipeline send/recv is hidden in
 steady state (1F1B); its fill and drain is the bubble term.
@@ -134,6 +141,9 @@ steady state (1F1B); its fill and drain is the bubble term.
 | MOE_EXPERT_FACTOR, MOE_EXPERT_HALF_FFN | 0.78, 1024 | the mfu-model-4 fit (grid, least squares of log error, all 6 MoE fit runs), kept in mfu-model-5: `fit_moe_shared` run on `mfu_model_4()` |
 | MOE_EXPERT_HALF_FFN_FAMILY | blackwell 1664 (others use MOE_EXPERT_HALF_FFN) | fitted (grid of 64, least squares of log error) on the 2 Blackwell MoE fit runs with the shared constants held (`fit_blackwell_moe_half`); `docs/CALCULATOR-HARDWARE.md` 6a |
 | LINK_EFFICIENCY nvlink / net | 0.76 / 0.80 | nvlink: our DeepEP intranode 340 GB/s vs 450 (benchmarks/ep-dispatch-combine-bf16/p5en-2nodes); net: assumption |
+| EP_EFA_KERNEL | 0.705 | fitted: geometric mean of the kernel EFA efficiency of our 4-node DeepEP-class dispatch / combine cells (p5, p6-b300), checked on 2 and 8 nodes and p5en (`fit_ep_efa_kernel`; `docs/CALCULATOR-HARDWARE.md` 6b) |
+| EP_EFA_TRAINING | 0.31 | fitted: the share of the kernel rate that makes our Kimi-K2 16-node p6-b300 run match, checked on the 32-node Kimi-K2 and DeepSeek-V3 runs (`fit_ep_efa_training`) |
+| LINK_EFFICIENCY ep_efa | 0.219 = 0.705 x 0.31 | the EP all-to-all part that crosses EFA on AWS systems (`fabric` efa) |
 | OVERLAP tp / cp / ep / dp / fsdp | 0.5 / 0.9 / 0.3 / 0.9 / 0.8 | assumptions, except EP: fitted with the MoE constants (grid 0 / 0.3 / 0.5 / 0.7 / 0.9); a plan may set `overlap_ep` (DualPipe 0.95) |
 | SMS_PER_GPU | H100 / H200 / H800 132, A100 108, B200 148, B300 160 | NVIDIA H100 and A100 whitepapers; [B200: 74 per die](https://chipsandcheese.com/p/nvidias-b200-keeping-the-cuda-juggernaut); [B300: up to 160](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) |
 | TGP_EXPONENT | 1.25 | fitted on the two dense FP8 GB300 / GB200 pairs of NeMo 26.04.01; applies to systems with `tgp_w` and `tgp_ref_w` (GB300: 1,400 W against 1,200 W; B300: 1,100 W against 1,000 W since mfu-model-5); section 7b |
@@ -148,6 +158,8 @@ Qwen3-30B-A3B p5en; Megatron-Bridge DeepSeek-V3 on H100 (25.09) and B300, Qwen3-
 Qwen3-235B-A22B on H100 (26.04.01). Everything else (23 scored runs) is hold-out.
 Refit: `python3 validation_runs.py --fit`; the test fails if the constants differ from the fit. The fit order (mfu-model-5) is in
 `validation_runs.fit`: dense base cells, then the shared MoE constants (kept), then the Blackwell half width, then the exponent.
+The two EP-over-EFA factors (mfu-model-6) are fitted apart, on our own EFA measurements (`fit_ep_efa_kernel`, `fit_ep_efa_training`);
+no fit run of the 38 crosses EFA with EP, so no other constant moves.
 
 ## 7. Validation set: predicted vs published
 
@@ -204,8 +216,8 @@ TP, which spread EP over two nodes and hid most of the DeepSeek-V3 error behind 
 | mb2604-b200-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-b200 | fp8 | tokens_per_gpu | 3,776 tok/s/GPU | 5,220 tok/s/GPU | +38.2% | 19.4% | 12.0 / 8.7 | hold-out |
 | mb2604-b300-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-b300 | fp8 | tokens_per_gpu | 5,936 tok/s/GPU | 5,665 tok/s/GPU | -4.6% | 21.1% | 7.6 / 8.0 | hold-out |
 | mb2604-h100-qwen3-235b | Qwen3-235B-A22B | 256 | dgx-h100 | fp8 | tokens_per_gpu | 1,712 tok/s/GPU | 1,613 tok/s/GPU | -5.8% | 13.6% | 26.4 / 28.0 | fit |
-| repo-kimi-k2-b300-32n | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,094 tok/s/GPU | 1,383 tok/s/GPU | +26.3% | 13.6% | 41.3 / 32.7 | hold-out, layout unverified |
-| repo-dsv3-b300-32n | DeepSeek-V3 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,067 tok/s/GPU | 1,386 tok/s/GPU | +29.9% | 17.9% | 42.4 / 32.6 | hold-out, layout unverified |
+| repo-kimi-k2-b300-32n | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,094 tok/s/GPU | 1,196 tok/s/GPU | +9.3% | 11.7% | 41.3 / 37.8 | hold-out, layout unverified |
+| repo-dsv3-b300-32n | DeepSeek-V3 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,067 tok/s/GPU | 1,179 tok/s/GPU | +10.5% | 15.2% | 42.4 / 38.3 | hold-out, layout unverified |
 
 | Set | Runs | Median abs error | Max abs error |
 |---|---|---|---|
@@ -215,8 +227,9 @@ TP, which spread EP over two nodes and hid most of the DeepSeek-V3 error behind 
 | First set (29 runs, without the 2 superseded) | 27 | 5.7% | 17.8% |
 | First set, hold-out | 16 | 7.3% | 17.8% |
 | New MoE runs (mfu-model-3) | 11 | 7.7% | 38.2% |
-| New MoE runs, hold-out | 7 | 26.3% | 38.2% |
+| New MoE runs, hold-out | 7 | 9.3% | 38.2% |
 | Superseded (not scored) | 2 | 79.8% | 113.0% |
+| mfu-model-5 (before the EP-over-EFA calibration), all scored | 38 | 6.0% | 38.2% |
 | mfu-model-4 (before the B300 refit), all scored | 38 | 6.1% | 58.9% |
 | mfu-model-1 on the first 29 runs | 29 | 5.6% | 31.0% |
 | Old calculator (fixed 40% MFU), first 29 runs | 29 | 38.0% | 143.6% |
@@ -245,9 +258,10 @@ Runs above 15%, and why:
   (`plan["dispatcher"]`) but not modelled.
 - `mb2604-b200-dsv3` -36% (-31% in mfu-model-4): DeepEP with all-to-all overlap (`moe_a2a_overlap`) hides more than the default
   EP overlap of 0.3; how much each dispatcher hides is not modelled. The Blackwell MoE half width lowers it 5 more points.
-- `repo-dsv3-b300-32n` +30% and `repo-kimi-k2-b300-32n` +26% (+19% each in mfu-model-4): DeepEP over EFA, EP 32 over 4 nodes,
-  TP 8, a dispatcher A/B layout. VP is 2, not the 1 of their config.yaml (the bench sets it; it lowers the bubble and adds about
-  17 points). The measured all-to-all over EFA takes seconds a step where the model has 0.5 to 1.0 s (`docs/CALCULATOR-HARDWARE.md` 6b).
+- `repo-dsv3-b300-32n` +10.5% and `repo-kimi-k2-b300-32n` +9.3% (+29.9% and +26.3% in mfu-model-5, +19% each in mfu-model-4):
+  DeepEP over EFA, EP 32 over 4 nodes, TP 8, a dispatcher A/B layout. mfu-model-6 times the EFA part of the all-to-all with the
+  efficiency calibrated on our own dispatch micro-benchmarks and the Kimi-K2 16-node run (`docs/CALCULATOR-HARDWARE.md` 6b); both
+  rows are hold-out for it.
 - `repo-qwen3-30b-a3b-bf16-p5en` -15%, `mb2509-h100-dsv3` +12%: fit runs;
   one expert-efficiency curve for 768- to 2,048-wide experts on Hopper.
 - `deepseek-v3-paper` is -2.5% (+31% in mfu-model-1): 20 of 132 SMs run the all-to-all and RMSNorm / MLA
@@ -395,7 +409,10 @@ the published MFU of the two runs is 23.4% and 32.2% (PaLM FLOPs, 190 TFLOPS per
 ## 8. Plan search (`phase9_mfu_estimate.py`)
 
 `candidate_plans`: TP in {1, 2, 4, 8} (<= GPUs per node), PP in the layer divisors plus {1, 2, 4, 8, 16}
-(<= 16), CP 1 (CP up to 8 only for S >= 32K), EP in powers of 2 that divide the experts and GPUs / PP.
+(<= 16), CP 1 (CP up to 8 only for S >= 32K), EP that divides the experts and GPUs / PP: powers of 2 on 8-GPU nodes; on
+GB200 and GB300 UltraServers also every multiple of 4 that fits one NVLink domain (16, 32, 36, 64, 72) and multiples of the domain
+(144), and only layouts whose EP x ETP groups tile the domains without straddling one (`ep_fits_domains`; 144 GPUs with EP 16 run as
+64 per UltraServer, through `_run_once`'s 64-of-72 count). A request may set `expert_tensor_parallel`.
 Fixed TP/PP/EP from the request restrict the list. All candidates are ranked by estimated tokens/s;
 every one that fits in memory (phase-1 memory with that TP/PP/EP) is
 scored with every ZeRO stage that fits (1, 2 and 3) and each of its viable micro batches; the fastest

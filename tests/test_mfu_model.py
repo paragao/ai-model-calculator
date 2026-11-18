@@ -30,10 +30,8 @@ EXPLAINED_OUTLIERS = {
     # DeepEP with moe_a2a_overlap hides more all-to-all than the default EP overlap (0.3); -30.8% in mfu-model-4, -35.6% since the
     # Blackwell MoE half width (mfu-model-5) lowers every Blackwell MoE estimate
     "mb2604-b200-dsv3": 40.0,
-    # Our p6-b300 dispatcher A/B runs (TP 8, EP 32 over 4 nodes of EFA, VP 2): the measured all-to-all over EFA costs several
-    # seconds a step, the model 0.5 to 1.0 s (docs/CALCULATOR-HARDWARE.md section 6b). +26.3% and +29.9% in mfu-model-5.
-    "repo-kimi-k2-b300-32n": 35.0,
-    "repo-dsv3-b300-32n": 35.0,
+    # (Our p6-b300 dispatcher A/B runs were here at 35%: +26.3% and +29.9% in mfu-model-5. The calibrated EP-over-EFA term of
+    # mfu-model-6 brings them to +9.3% and +10.5%, so they are back under the 30% bar and EpOverEfaCalibration holds them to 15%.)
 }
 
 
@@ -305,7 +303,9 @@ class ReferenceModels(unittest.TestCase):
     def test_glm_expert_parallel_plan(self):
         t = self.run_it("glm", num_gpus=256, tensor_parallel=2, pipeline_parallel=8,
                         expert_parallel=8)["training_time"]
-        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3036, 655762))
+        # mfu-model-5: (0.3036, 655762). EP 8 x ETP 2 = 16 GPUs spans 2 nodes: the EFA half of the all-to-all is now one copy per
+        # remote node (DeepEP de-duplicates, efa_remote_copies) at the calibrated EP-over-EFA efficiency (mfu-model-6)
+        self.assertEqual((t["mfu"], t["tokens_per_second"]), (0.3097, 668806))
 
 
 class RecomputeAndCommSMs(unittest.TestCase):
