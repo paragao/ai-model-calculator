@@ -55,35 +55,38 @@ def summary_row(r):
             c["total_cost_usd"], r["fits_in_memory"]]
 
 
-PIN_MM = {  # key: hardware|model|precision -> [mfu, tokens/s/GPU]
+# key: hardware|model|precision -> [mfu, tokens/s/GPU]. mfu-model-6 re-pinned the DeepSeek-V3 rows of the AWS (EFA) instances only:
+# EP 32 x ETP 1 spans 4 nodes, and the 3/4 of its all-to-all that crosses EFA is now timed at the calibrated EP-over-EFA efficiency
+# (mfu_model.EP_EFA_KERNEL x EP_EFA_TRAINING, docs/CALCULATOR-HARDWARE.md section 6b). Dense rows and every DGX row are unchanged.
+PIN_MM = {
     "p5.48xlarge|Llama-3-70B|bf16": [0.5421, 1113.7],
     "p5.48xlarge|Llama-3-70B|fp8": [0.4213, 1731.9],
-    "p5.48xlarge|DeepSeek-V3|bf16": [0.2775, 943.7],
-    "p5.48xlarge|DeepSeek-V3|fp8": [0.1997, 1358.9],
+    "p5.48xlarge|DeepSeek-V3|bf16": [0.224, 761.6],  # mfu-model-5 [0.2775, 943.7]: EP over EFA (mfu-model-6)
+    "p5.48xlarge|DeepSeek-V3|fp8": [0.1486, 1011.0],  # mfu-model-5 [0.1997, 1358.9]: EP over EFA (mfu-model-6)
     "p5e.48xlarge|Llama-3-70B|bf16": [0.5421, 1113.7],
     "p5e.48xlarge|Llama-3-70B|fp8": [0.4213, 1731.9],
-    "p5e.48xlarge|DeepSeek-V3|bf16": [0.2775, 943.7],
-    "p5e.48xlarge|DeepSeek-V3|fp8": [0.1997, 1358.9],
+    "p5e.48xlarge|DeepSeek-V3|bf16": [0.224, 761.6],  # mfu-model-5 [0.2775, 943.7]: EP over EFA (mfu-model-6)
+    "p5e.48xlarge|DeepSeek-V3|fp8": [0.1486, 1011.0],  # mfu-model-5 [0.1997, 1358.9]: EP over EFA (mfu-model-6)
     "p5en.48xlarge|Llama-3-70B|bf16": [0.5421, 1113.7],
     "p5en.48xlarge|Llama-3-70B|fp8": [0.4213, 1731.9],
-    "p5en.48xlarge|DeepSeek-V3|bf16": [0.2775, 943.7],
-    "p5en.48xlarge|DeepSeek-V3|fp8": [0.1997, 1358.9],
+    "p5en.48xlarge|DeepSeek-V3|bf16": [0.224, 761.6],  # mfu-model-5 [0.2775, 943.7]: EP over EFA (mfu-model-6)
+    "p5en.48xlarge|DeepSeek-V3|fp8": [0.1486, 1011.0],  # mfu-model-5 [0.1997, 1358.9]: EP over EFA (mfu-model-6)
     "p6-b200.48xlarge|Llama-3-70B|bf16": [0.3954, 1847.7],
     "p6-b200.48xlarge|Llama-3-70B|fp8": [0.389, 3636.1],
-    "p6-b200.48xlarge|DeepSeek-V3|bf16": [0.1697, 1312.6],
-    "p6-b200.48xlarge|DeepSeek-V3|fp8": [0.1388, 2148.1],
+    "p6-b200.48xlarge|DeepSeek-V3|bf16": [0.1273, 985.1],  # mfu-model-5 [0.1697, 1312.6]: EP over EFA (mfu-model-6)
+    "p6-b200.48xlarge|DeepSeek-V3|fp8": [0.0899, 1391.2],  # mfu-model-5 [0.1388, 2148.1]: EP over EFA (mfu-model-6)
     "p6-b300.48xlarge|Llama-3-70B|bf16": [0.445, 2079.8],
     "p6-b300.48xlarge|Llama-3-70B|fp8": [0.4375, 4089.3],
-    "p6-b300.48xlarge|DeepSeek-V3|bf16": [0.2138, 1654.1],
-    "p6-b300.48xlarge|DeepSeek-V3|fp8": [0.1876, 2902.0],
+    "p6-b300.48xlarge|DeepSeek-V3|bf16": [0.1768, 1367.6],  # mfu-model-5 [0.2138, 1654.1]: EP over EFA (mfu-model-6)
+    "p6-b300.48xlarge|DeepSeek-V3|fp8": [0.1372, 2122.2],  # mfu-model-5 [0.1876, 2902.0]: EP over EFA (mfu-model-6)
     "p4d.24xlarge|Llama-3-70B|bf16": [0.4497, 291.4],
     "p4d.24xlarge|Llama-3-70B|fp8": [0.4497, 291.4],
-    "p4d.24xlarge|DeepSeek-V3|bf16": [0.1891, 202.9],
-    "p4d.24xlarge|DeepSeek-V3|fp8": [0.1891, 202.9],
+    "p4d.24xlarge|DeepSeek-V3|bf16": [0.134, 143.8],  # mfu-model-5 [0.1891, 202.9]: EP over EFA (mfu-model-6)
+    "p4d.24xlarge|DeepSeek-V3|fp8": [0.134, 143.8],  # mfu-model-5 [0.1891, 202.9]: EP over EFA (mfu-model-6)
     "p4de.24xlarge|Llama-3-70B|bf16": [0.4497, 291.4],
     "p4de.24xlarge|Llama-3-70B|fp8": [0.4497, 291.4],
-    "p4de.24xlarge|DeepSeek-V3|bf16": [0.1891, 202.9],
-    "p4de.24xlarge|DeepSeek-V3|fp8": [0.1891, 202.9],
+    "p4de.24xlarge|DeepSeek-V3|bf16": [0.134, 143.8],  # mfu-model-5 [0.1891, 202.9]: EP over EFA (mfu-model-6)
+    "p4de.24xlarge|DeepSeek-V3|fp8": [0.134, 143.8],  # mfu-model-5 [0.1891, 202.9]: EP over EFA (mfu-model-6)
     "dgx-h100|Llama-3-70B|bf16": [0.5421, 1113.7],
     "dgx-h100|Llama-3-70B|fp8": [0.4213, 1731.9],
     "dgx-h100|DeepSeek-V3|bf16": [0.2775, 943.7],
@@ -347,9 +350,11 @@ class Gb200Reachable(unittest.TestCase):
     def test_ep_64_on_256_gpus_is_allowed_and_all_to_all_stays_on_nvlink(self):
         gb = run("DeepSeek-V3", hardware="gb200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
         self.assertEqual((gb["parallelism"]["total_gpus"], gb["parallelism"]["expert_parallel"]), (256, 64))
-        self.assertEqual(gb["alltoall_communication"]["comm_type"], "intra-node (NVLink)")
+        self.assertTrue(gb["alltoall_communication"]["comm_type"].startswith("NVLink only"))
+        self.assertEqual(gb["alltoall_communication"]["efa_share"], 0.0)
         hgx = run("DeepSeek-V3", hardware="b200", total_tokens_b=2000, num_gpus=256, expert_parallel=64)
-        self.assertEqual(hgx["alltoall_communication"]["comm_type"], "inter-node (EFA)")
+        self.assertTrue(hgx["alltoall_communication"]["comm_type"].startswith("EFA: "))
+        self.assertGreater(hgx["alltoall_communication"]["efa_share"], 0.8)  # EP 64 x ETP 1 on 8-GPU nodes: 7/8 leaves the node
 
     def test_auto_search_steps_inside_the_domain_then_by_ultraserver(self):
         r = run("Llama-3.1-70B", hardware="GB200", total_tokens_b=2000, num_gpus="auto", target_days=60)
@@ -365,10 +370,17 @@ class Gb200Reachable(unittest.TestCase):
     # ---- GB300 (step 5) ----
 
     def test_gb300_names_map_to_the_ultraserver_and_no_instance_name_is_invented(self):
-        for given in ("GB300", "gb300", "p6e-gb300", "NVIDIA GB300", "gb300-nvl72", "p6e-gb300-ultraserver", "GB300s"):
-            self.assertEqual(p9.normalise_hardware(given), "p6e-gb300-ultraserver", given)
-        self.assertEqual(p9.GPU_OF_INSTANCE["p6e-gb300-ultraserver"], "GB300 279GB")
-        for bad in ("p6e-gb300.36xlarge", "u-p6e-gb300x72", "gb300x72"):
+        """u-p6e-gb300x72 and u-p6e-gb300x36 (paragao, 2026-11-18, AWS P6 page); the old aliases land on x72."""
+        for given in ("GB300", "gb300", "p6e-gb300", "NVIDIA GB300", "gb300-nvl72", "u-p6e-gb300x72", "GB300s", "gb300x72",
+                      "p6e-gb300-ultraserver"):
+            self.assertEqual(p9.normalise_hardware(given), "u-p6e-gb300x72", given)
+        for given in ("u-p6e-gb300x36", "gb300x36", "gb300-nvl36"):
+            self.assertEqual(p9.normalise_hardware(given), "u-p6e-gb300x36", given)
+        self.assertEqual(p9.GPU_OF_INSTANCE["u-p6e-gb300x72"], "GB300 279GB")
+        self.assertEqual(p9.GPU_OF_INSTANCE["u-p6e-gb300x36"], "GB300 279GB")
+        self.assertNotIn("p6e-gb300-ultraserver", p9.GPU_OF_INSTANCE)  # never a canonical name or an output
+        self.assertNotIn("p6e-gb300-ultraserver", mm.HARDWARE)
+        for bad in ("p6e-gb300.36xlarge", "u-p6e-gb300x18", "gb300x144"):
             with self.assertRaises(ValueError, msg=bad):
                 p9.normalise_hardware(bad)
 
@@ -549,7 +561,7 @@ class Gb300Hardware(unittest.TestCase):
     """Step 5: GB300 with the numbers AWS and NVIDIA publish, and the ones they do not left unknown."""
 
     def test_specs_are_gb200_class_compute_with_the_published_uplift_only_in_memory(self):
-        g3, g2 = mm.HARDWARE["p6e-gb300-ultraserver"], mm.HARDWARE["u-p6e-gb200x72"]
+        g3, g2 = mm.HARDWARE["u-p6e-gb300x72"], mm.HARDWARE["u-p6e-gb200x72"]
         # NVIDIA GB300 NVL72: 360 PF BF16 and 720 PF FP8 with sparsity for 72 GPUs = 2500 / 5000 dense per GPU, as GB200;
         # AWS: the 1.5x uplift is FP4 only. NVLink 130 TB/s / 72 = 1.8 TB/s per GPU.
         for key in ("bf16", "fp8", "nvlink", "family", "domain_gpus", "billing_gpus"):
@@ -559,21 +571,27 @@ class Gb300Hardware(unittest.TestCase):
         self.assertEqual(mm.SMS_PER_GPU["GB300"], 160)
 
     def test_unknowns_stay_unknown(self):
-        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        g3 = mm.HARDWARE["u-p6e-gb300x72"]
         self.assertEqual(g3["net"], 100.0)  # given by paragao, 2026-11-17: 18 servers x 8 x 400 Gbps / 72 GPUs
         text = " ".join(g3["unknowns"]).lower()
-        for word in ("price", "instance type names", "memory"):
+        for word in ("price", "memory"):
             self.assertIn(word, text)
         self.assertNotIn("efa", text)  # no longer unknown
+        self.assertNotIn("instance type names", text)  # given by paragao, 2026-11-18
         self.assertIn("paragao, 2026-11-17", " ".join(g3["user_provided"]))
+        self.assertIn("paragao, 2026-11-18", " ".join(g3["user_provided"]))
         names = [k for k in mm.HARDWARE if "gb300" in k]
-        self.assertEqual(sorted(names), ["dgx-gb300", "p6e-gb300-ultraserver"])  # no invented AWS instance names
+        self.assertEqual(sorted(names), ["dgx-gb300", "u-p6e-gb300x36", "u-p6e-gb300x72"])
+        x36 = mm.HARDWARE["u-p6e-gb300x36"]
+        for key in ("gpu", "family", "bf16", "fp8", "nvlink", "net", "instance_gpus", "tgp_w", "tgp_ref_w", "unknowns"):
+            self.assertEqual(x36[key], g3[key], key)  # same per-GPU specs as x72
+        self.assertEqual((x36["gpn"], x36["domain_gpus"], x36["billing_gpus"]), (36, 36, 36))  # 9 instances of 4 GPUs
         self.assertEqual(mm.HARDWARE["dgx-gb300"]["net"], 100.0)  # NVIDIA's own DGX: 800 Gb/s ConnectX-8 per GPU
         for key, hw in mm.HARDWARE.items():
             self.assertIsNotNone(hw["net"], key)
 
     def test_a_group_inside_one_domain_needs_no_network_number(self):
-        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        g3 = mm.HARDWARE["u-p6e-gb300x72"]
         shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
         e = mm.estimate(shape, g3, dict(num_gpus=72, tp=2, pp=4, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=144), "bf16")
         self.assertGreater(e["mfu"], 0.2)
@@ -582,7 +600,7 @@ class Gb300Hardware(unittest.TestCase):
         self.assertGreater(e["time_s"]["ep_total"], 0)  # all-to-all over NVLink only
 
     def test_scales_out_by_whole_ultraservers(self):
-        g3 = mm.HARDWARE["p6e-gb300-ultraserver"]
+        g3 = mm.HARDWARE["u-p6e-gb300x72"]
         shape = mm.model_shape(vr.ARCH["Llama-3-70B"])
         e = mm.estimate(shape, g3, dict(num_gpus=144, tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, gbs=288), "bf16")
         self.assertGreater(e["mfu"], 0.2)
@@ -599,7 +617,7 @@ class NvlinkInsideDomainEfaBetween(unittest.TestCase):
     """GB200 x72 and GB300: inside one 72-GPU NVLink domain no EFA is used; EFA carries only traffic between UltraServers.
     "EFA time" is measured by making the EFA 10^8 times slower and seeing which times move."""
 
-    HARDWARE = ("u-p6e-gb200x72", "p6e-gb300-ultraserver")
+    HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb300x72")
     MOE288 = {**vr.ARCH["DeepSeek-V3"], "n_routed_experts": 288, "n_group": 1, "topk_group": 1}  # 288 experts, as GLM-5.3-Flash
     DENSE = dict(tp=2, pp=1, cp=1, vp=1, ep=1, mbs=1, seq=4096, zero=3)  # TP on NVLink, ZeRO-3 gathers across the whole DP group
 
@@ -680,7 +698,7 @@ class NvlinkInsideDomainEfaBetween(unittest.TestCase):
         for n in (72, 144):
             for shape, plan in ((dense, self.DENSE), (moe, self.moe_plan(n))):
                 a = self.times(mm.HARDWARE["u-p6e-gb200x72"], shape, n, **plan)
-                b = self.times(mm.HARDWARE["p6e-gb300-ultraserver"], shape, n, **plan)
+                b = self.times(mm.HARDWARE["u-p6e-gb300x72"], shape, n, **plan)
                 for k in ("tp_total", "cp_total", "ep_total", "dp_total"):  # same links; the compute differs by the power term
                     self.assertEqual(a[k], b[k], (n, plan, k))
 
@@ -739,7 +757,7 @@ class Gb300Validation(unittest.TestCase):
 
     def test_the_term_is_board_power_on_gb300_and_b300(self):
         powered = [k for k, hw in mm.HARDWARE.items() if hw.get("tgp_ref_w")]
-        self.assertEqual(sorted(powered), ["dgx-b300", "dgx-gb300", "p6-b300.48xlarge", "p6e-gb300-ultraserver"])
+        self.assertEqual(sorted(powered), ["dgx-b300", "dgx-gb300", "p6-b300.48xlarge", "u-p6e-gb300x36", "u-p6e-gb300x72"])
         gb300 = [k for k in powered if "gb300" in k]
         for k in gb300:  # NVIDIA Blackwell Ultra table: up to 1,400 W against up to 1,200 W at the same 5 PF dense FP8
             self.assertEqual((mm.HARDWARE[k]["tgp_w"], mm.HARDWARE[k]["tgp_ref_w"]), (1400.0, 1200.0))
@@ -836,8 +854,11 @@ class B300PowerRefit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.after = {r["id"]: r for r in vr.evaluate()}
-        cls.rack_after = {r["id"]: r for r in vr.evaluate(vr.RACK_RUNS)}
+        # "after" is mfu-model-5: the shipped model with the EP over EFA term of mfu-model-5 (mfu-model-6 changed only that term;
+        # class EpOverEfaCalibration tests it).
+        with vr.mfu_model_5_ep():
+            cls.after = {r["id"]: r for r in vr.evaluate()}
+            cls.rack_after = {r["id"]: r for r in vr.evaluate(vr.RACK_RUNS)}
         with getattr(vr, "mfu_model_4", contextlib.nullcontext)():  # (nullcontext on main, so each test fails on its own)
             cls.before = {r["id"]: r for r in vr.evaluate()}
             cls.rack_before = {r["id"]: r for r in vr.evaluate(vr.RACK_RUNS)}
@@ -854,7 +875,7 @@ class B300PowerRefit(unittest.TestCase):
         b = mm.estimate(shape, mm.HARDWARE["p6-b300.48xlarge"], LLAMA70B_PLAN, "bf16")
         self.assertEqual(b["tgp_gain"], round(1.1 ** 1.25, 4))
         self.assertAlmostEqual(b["tokens_per_second"] / a["tokens_per_second"], 1.1 ** 1.25, delta=0.015)  # B300's 2x EFA adds a little
-        self.assertEqual(mm.MODEL_VERSION, "mfu-model-5")
+        self.assertEqual(mm.MODEL_VERSION, "mfu-model-6")
 
     def test_b300_vs_b200_published_ratios_within_5_percent(self):
         rows = vr.evaluate_b300_pairs()
@@ -946,9 +967,258 @@ class B300PowerRefit(unittest.TestCase):
             r = json.loads(json.dumps(by[rid]))
             r["plan"].update(vp=1, a2a_overlap=False, overlap_ep=0.0,
                              recompute=["core_attn", "mla_up_proj", "mlp", "moe", "layernorm"])  # overlap off: full recompute, VPP 1
-            t = vr.predict(r)[1]["time_s"]
+            with vr.mfu_model_5_ep():  # the mfu-model-5 term; mfu-model-6 calibrates it (EpOverEfaCalibration)
+                t = vr.predict(r)[1]["time_s"]
             self.assertLess(t["ep_total"], (alltoall - deepep) / 3, rid)
             self.assertLess(t["step"], deepep - 1.5, rid)
+
+
+def call(**ev):
+    """The portal Lambda's request shape on run_estimate: (status, body), 400 when the result is an error."""
+    from utils.architecture_loader import variant_from_architecture
+    cfg = {k: v for k, v in ev.items() if k not in ("model_name", "architecture", "model_params_b", "params_total_b", "total_tokens")}
+    cfg["total_tokens_b"] = ev.get("total_tokens", 1e12) / 1e9
+    v = variant_from_architecture(ev["architecture"], ev.get("model_name") or "moe", params_total_b=ev.get("params_total_b"))
+    with redirect_stdout(io.StringIO()):
+        r = p9.run_estimate(cfg, v)
+    return (400, r) if "error" in r else (200, r)
+
+def _moe(n_experts):
+    """Qwen3-30B-A3B with another expert count: a MoE that fits every layout below."""
+    return {**vr.ARCH["Qwen3-30B-A3B"], "num_experts": n_experts}
+
+
+class EpGroupInsideTheNvlinkDomain(unittest.TestCase):
+    """mfu-model-6, paragao's rules of 2026-11-18. Expert traffic stays on NVLink only when the whole EP group (EP x expert TP GPUs)
+    sits in one NVLink domain: the 8-GPU node of p5en, the whole UltraServer (72 or 36 GPUs) of GB200 and GB300. Groups may share a
+    domain, never straddle one; EP must divide the experts. One test per row of the scenario table; each row is checked three ways:
+    the layout (ep_domain_layout), the step-time model (estimate's ep_efa_share) and the Lambda (GPUs used, EP, EFA share).
+    Every test fails on the MR 42 head fcc79ea (no layout function, no EFA share, no x36 GB300, EP 72 never tried, 144 GPUs with EP 16
+    kept as 144 with the straddling group on NVLink)."""
+
+    X72 = ("u-p6e-gb200x72", "u-p6e-gb300x72")
+    X36 = ("u-p6e-gb200x36", "u-p6e-gb300x36")
+
+    def check(self, hw_key, experts, bought, ep, etp, used, share):
+        hw = mm.HARDWARE[hw_key]
+        lay = mm.ep_domain_layout(hw, bought, ep, etp, experts)
+        self.assertIsNone(lay["refused"], lay)
+        self.assertEqual((lay["used_gpus"], lay["idle_gpus"]), (used, bought - used), (hw_key, ep, lay))
+        self.assertAlmostEqual(lay["efa_share"], share, places=6, msg=(hw_key, ep))
+        self.assertEqual(lay["nvlink_only"], share == 0, (hw_key, ep))
+        e = mm.estimate(mm.model_shape(_moe(experts)), hw, dict(num_gpus=used, tp=1, pp=1, ep=ep, etp=etp, mbs=1, seq=4096), "bf16")
+        self.assertAlmostEqual(e["ep_efa_share"], share, places=4, msg=(hw_key, ep))
+        self.assertEqual(e["ep_link"] == "NVLink only", share == 0, (hw_key, ep, e["ep_link"]))
+        ev = dict(model_name="moe", architecture=_moe(experts), hardware=hw_key, num_gpus=bought, expert_parallel=ep,
+                  total_tokens=1e12)
+        if etp > 1:
+            ev["expert_tensor_parallel"] = etp
+        status, body = call(**ev)
+        self.assertEqual(status, 200, body)
+        p, a2a = body["parallelism"], body["alltoall_communication"]
+        self.assertEqual((p["total_gpus"], p["expert_parallel"], p["expert_tensor_parallel"]), (used, ep, etp), (hw_key, ep))
+        self.assertAlmostEqual(a2a["efa_share"], share, places=4, msg=(hw_key, ep))
+        self.assertEqual(a2a["comm_type"].startswith("NVLink only"), share == 0, a2a)
+        if used != bought:
+            self.assertEqual((body["rack_layout"]["used_gpus"], body["rack_layout"]["idle_gpus"]), (used, bought - used))
+        return body
+
+    def refused(self, hw_key, experts, bought, ep, why):
+        lay = mm.ep_domain_layout(mm.HARDWARE[hw_key], bought, ep, 1, experts)
+        self.assertIn(why, lay["refused"] or "", lay)
+        status, body = call(model_name="moe", architecture=_moe(experts), hardware=hw_key, num_gpus=bought, expert_parallel=ep,
+                            total_tokens=1e12)
+        self.assertEqual(status, 400, body)
+        self.assertIn(why, body["error"])
+
+    # --- 128 experts on 4 p5en (32 GPUs), domain = the 8-GPU node ---
+    def test_p5en_128_experts_ep8_nvlink_only(self):
+        self.check("p5en.48xlarge", 128, 32, 8, 1, 32, 0.0)
+
+    def test_p5en_128_experts_ep16_efa_half(self):
+        self.check("p5en.48xlarge", 128, 32, 16, 1, 32, 1 / 2)
+
+    def test_p5en_128_experts_ep32_efa_three_quarters(self):
+        self.check("p5en.48xlarge", 128, 32, 32, 1, 32, 3 / 4)
+
+    def test_p5en_128_experts_ep8_expert_tp2_efa_half(self):
+        self.check("p5en.48xlarge", 128, 32, 8, 2, 32, 1 / 2)  # the group is EP x ETP = 16 GPUs: two nodes
+
+    # --- 256 experts on 2 x72 (144 GPUs bought): 64 GPUs used per UltraServer ---
+    def test_x72_256_experts_ep16_nvlink_only_64_per_ultraserver(self):
+        for k in self.X72:
+            self.check(k, 256, 144, 16, 1, 128, 0.0)
+
+    def test_x72_256_experts_ep32_nvlink_only_64_per_ultraserver(self):
+        for k in self.X72:
+            self.check(k, 256, 144, 32, 1, 128, 0.0)
+
+    def test_x72_256_experts_ep64_nvlink_only_64_per_ultraserver(self):
+        for k in self.X72:
+            self.check(k, 256, 144, 64, 1, 128, 0.0)
+
+    def test_x72_256_experts_ep72_refused_not_whole_experts(self):
+        for k in self.X72:
+            self.refused(k, 256, 144, 72, "EP 72 does not divide the 256 experts")
+
+    def test_x72_256_experts_ep128_efa_half(self):
+        for k in self.X72:
+            self.check(k, 256, 144, 128, 1, 128, 1 / 2)
+
+    # --- 288 experts ---
+    def test_x72_288_experts_ep72_nvlink_only_all_72_used(self):
+        for k in self.X72:
+            self.check(k, 288, 72, 72, 1, 72, 0.0)  # 4 experts per GPU
+
+    def test_two_x72_288_experts_ep144_efa_half(self):
+        for k in self.X72:
+            self.check(k, 288, 144, 144, 1, 144, 1 / 2)
+
+    def test_x36_288_experts_ep36_nvlink_only(self):
+        for k in self.X36:
+            self.check(k, 288, 36, 36, 1, 36, 0.0)
+
+    # --- 256 experts on 1 x36: 4 GPUs idle ---
+    def test_x36_256_experts_ep32_nvlink_only_4_idle(self):
+        for k in self.X36:
+            self.check(k, 256, 36, 32, 1, 32, 0.0)
+
+    def test_x36_256_experts_ep16_nvlink_only_4_idle(self):
+        for k in self.X36:
+            self.check(k, 256, 36, 16, 1, 32, 0.0)
+
+    # --- the rules behind the table ---
+    def test_a_straddling_group_counts_its_cross_domain_part_as_efa(self):
+        """Rule B: 144 GPUs used with EP 16 is 9 groups, one across the boundary. estimate() counts it as EFA (its worst rank has
+        half of its peers in the other UltraServer); the search never builds it (it uses 64 per UltraServer instead)."""
+        for k in self.X72:
+            hw = mm.HARDWARE[k]
+            self.assertAlmostEqual(mm.ep_efa_share(hw, 144, 16), 0.5)
+            self.assertEqual(mm.ep_efa_share(mm.rack_hw(hw, 128), 128, 16), 0.0)
+            self.assertFalse(mm.ep_fits_domains(hw, 144, 1, 1, 16, 256))
+            self.assertTrue(mm.ep_fits_domains(hw, 128, 1, 1, 16, 256))
+
+    def test_eps_that_fit_the_domain_are_tried_not_only_powers_of_two(self):
+        """Rule C: on x72 EP 16, 32, 64 and 72; on x36 16, 32 and 36; HGX keeps the powers of two."""
+        self.assertTrue({16, 32, 72, 144}.issubset(mm.ep_candidates(288, 72, 4)))
+        self.assertNotIn(64, mm.ep_candidates(288, 72, 4))  # 64 does not divide 288
+        self.assertTrue({16, 32, 64, 128, 256}.issubset(mm.ep_candidates(256, 72, 4)))
+        self.assertNotIn(72, mm.ep_candidates(256, 72, 4))
+        self.assertTrue({16, 32, 36}.issubset(mm.ep_candidates(288, 36, 4)))
+        self.assertEqual(mm.ep_candidates(288), [1, 2, 4, 8, 16, 32])  # HGX: powers of two, as before
+        self.assertEqual(mm.ep_candidates(160), [1, 2, 4, 8, 16, 32])
+
+    def test_auto_plan_keeps_ep_inside_the_domain(self):
+        """Rules C and D: with EP free, a DeepSeek-V3-sized model with 288 experts on one GB300 x72 picks an EP that is not a power
+        of two (36: 8 experts per GPU, two groups in the UltraServer) and keeps its all-to-all on NVLink."""
+        arch = {**vr.ARCH["DeepSeek-V3"], "n_routed_experts": 288, "n_group": 1, "topk_group": 1}
+        status, body = call(model_name="moe", architecture=arch, model_params_b=760, params_total_b=760, hardware="u-p6e-gb300x72",
+                            num_gpus=72, total_tokens=1e12)
+        self.assertEqual(status, 200, body)
+        p, a2a = body["parallelism"], body["alltoall_communication"]
+        self.assertTrue(body["fits_in_memory"])
+        self.assertEqual((p["total_gpus"], p["expert_parallel"]), (72, 36))
+        self.assertEqual(a2a["efa_share"], 0.0, a2a)
+
+    def test_hgx_power_of_two_layouts_are_unchanged(self):
+        """On 8-GPU nodes every power-of-two group either fits a node or spans whole nodes: the same share as mfu-model-5's
+        1 - (GPUs per node / ETP) / EP."""
+        hw = mm.HARDWARE["p5en.48xlarge"]
+        for ep in (2, 4, 8, 16, 32, 64):
+            for etp in (1, 2, 4, 8):
+                old = max(0.0, 1 - max(1, 8 // etp) / ep)
+                self.assertAlmostEqual(mm.ep_efa_share(hw, 512, ep, etp), old, msg=(ep, etp))
+
+
+class EpOverEfaCalibration(unittest.TestCase):
+    """mfu-model-6, rule E: the EP all-to-all over EFA, calibrated on our own measurements and checked on others.
+    Kernel: DeepEP-class dispatch / combine micro-benchmarks, fit on the 4-node cells, hold-out 2 and 8 nodes and p5en.
+    Training: our DeepEP-over-EFA p6-b300 pre-training runs, fit on Kimi-K2 16 nodes, hold-out the two scored 32-node rows of RUNS
+    (+26.3% and +29.9% in mfu-model-5) and the Kimi-K2 32-node UCCL run. Fails on the MR 42 head (no calibration, rows at 26-30%)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kernel = {r["id"]: r for r in vr.evaluate_ep_kernel()}
+        cls.train = {r["id"]: r for r in vr.evaluate(vr.EP_EFA_RUNS)}
+        with vr.mfu_model_5_ep():
+            cls.train_before = {r["id"]: r for r in vr.evaluate(vr.EP_EFA_RUNS)}
+            cls.runs_before = {r["id"]: r for r in vr.evaluate()}
+        cls.runs_after = {r["id"]: r for r in vr.evaluate()}
+
+    def test_constants_are_the_fits(self):
+        self.assertEqual(vr.fit_ep_efa_kernel(), mm.EP_EFA_KERNEL)
+        self.assertEqual(vr.fit_ep_efa_training(), mm.EP_EFA_TRAINING)
+        self.assertEqual((mm.EP_EFA_KERNEL, mm.EP_EFA_TRAINING), (0.705, 0.31))
+        self.assertEqual(mm.LINK_EFFICIENCY["ep_efa"], round(0.705 * 0.31, 3))
+
+    def test_kernel_cells_fit_and_hold_out(self):
+        fit = [r for r in self.kernel.values() if r["fit"]]
+        self.assertEqual(sorted(r["id"] for r in fit), ["b300-4n", "p5-4n"])
+        for r in self.kernel.values():  # every cell within 25% of the fitted kernel efficiency (worst: B300 2 nodes, NVSHMEM)
+            self.assertLessEqual(abs(r["error_pct"]), 25.0, r)
+            self.assertLess(r["efficiency"], 1.0, r)  # a kernel never beats the line rate once its local copies are removed
+        self.assertEqual({k: r["error_pct"] for k, r in self.kernel.items()},
+                         {"p5-4n": 4.8, "b300-4n": -4.6, "p5en-2n": 4.9, "p5-8n": 2.3, "b300-2n": 21.9, "b300-8n": -12.6})
+
+    def test_training_fit_and_hold_out(self):
+        self.assertEqual([k for k, r in self.train.items() if r["fit"]], ["repo-kimi-k2-b300-16n"])
+        self.assertLessEqual(abs(self.train["repo-kimi-k2-b300-16n"]["error_pct"]), 0.5)
+        for r in vr.ep_efa_scored(list(self.train.values())):  # rule E: within 15%
+            self.assertLessEqual(abs(r["error_pct"]), 15.0, r)
+        self.assertEqual({k: r["error_pct"] for k, r in self.train.items()},
+                         {"repo-kimi-k2-b300-16n": 0.1, "repo-kimi-k2-b300-32n": 9.3, "repo-dsv3-b300-32n": 10.5,
+                          "repo-kimi-k2-b300-32n-uccl": 12.0})
+
+    def test_the_two_rows_were_26_and_30_percent_high(self):
+        self.assertEqual((self.train_before["repo-kimi-k2-b300-32n"]["error_pct"], self.train_before["repo-dsv3-b300-32n"]["error_pct"]),
+                         (26.3, 29.9))
+
+    def test_the_training_share_is_below_every_kernel_cell(self):
+        """A training step reaches about a third of the kernel rate: smaller dispatches (2,048 tokens per rank against 4,096),
+        SMs shared with the GEMMs, the host proxy and the slowest of 32 ranks. It is not a property of one kernel cell."""
+        self.assertLess(mm.LINK_EFFICIENCY["ep_efa"], min(r["efficiency"] for r in self.kernel.values()) / 2)
+
+    def test_only_our_two_rows_move_and_the_38_run_summary_holds(self):
+        moved = {k: (self.runs_before[k]["error_pct"], r["error_pct"]) for k, r in self.runs_after.items()
+                 if r["error_pct"] != self.runs_before[k]["error_pct"]}
+        self.assertEqual(moved, {"repo-kimi-k2-b300-32n": (26.3, 9.3), "repo-dsv3-b300-32n": (29.9, 10.5)})
+        s = vr.summary(list(self.runs_after.values()))
+        self.assertEqual((s["all"]["runs"], s["all"]["median_abs_error_pct"], s["all"]["max_abs_error_pct"]), (38, 6.0, 38.2))
+
+    def test_efa_term_only_on_aws_efa_systems(self):
+        efa = sorted(k for k, hw in mm.HARDWARE.items() if hw.get("fabric") == "efa")
+        self.assertEqual(efa, sorted(["p5.48xlarge", "p5e.48xlarge", "p5en.48xlarge", "p6-b200.48xlarge", "p6-b300.48xlarge",
+                                      "p4d.24xlarge", "p4de.24xlarge", "u-p6e-gb200x72", "u-p6e-gb200x36", "u-p6e-gb300x72",
+                                      "u-p6e-gb300x36"]))
+        shape = mm.model_shape(vr.ARCH["DeepSeek-V3"])
+        for dgx in ("dgx-h100", "dgx-b200", "dgx-b300"):  # InfiniBand rows: the mfu-model-5 term, unchanged
+            a = mm.estimate(shape, mm.HARDWARE[dgx], DSV3_PLAN, "fp8")["time_s"]["ep_total"]
+            with vr.mfu_model_5_ep():
+                b = mm.estimate(shape, mm.HARDWARE[dgx], DSV3_PLAN, "fp8")["time_s"]["ep_total"]
+            self.assertEqual(a, b, dgx)
+
+    def test_nvlink_only_plans_do_not_move(self):
+        """An EP group inside one domain has no EFA part: mfu-model-5 and mfu-model-6 agree exactly."""
+        shape = mm.model_shape(vr.ARCH["DeepSeek-V3"])
+        for hw, plan in (("p5en.48xlarge", dict(DSV3_PLAN, ep=8)), ("u-p6e-gb300x72", dict(DSV3_PLAN, num_gpus=128, pp=2, ep=64))):
+            a = mm.estimate(shape, mm.HARDWARE[hw], plan, "bf16")
+            with vr.mfu_model_5_ep():
+                b = mm.estimate(shape, mm.HARDWARE[hw], plan, "bf16")
+            self.assertEqual((a["ep_efa_share"], a["mfu"]), (0.0, b["mfu"]), hw)
+
+    def test_pinned_summary_is_current(self):
+        v = mm.VALIDATION_SUMMARY
+        hold = vr.ep_efa_scored(list(self.train.values()))
+        self.assertEqual((v["ep_efa_kernel_cells"], v["ep_efa_kernel_max_abs_error_pct"]),
+                         (len(self.kernel), max(abs(r["error_pct"]) for r in self.kernel.values())))
+        self.assertEqual((v["ep_efa_training_hold_out_runs"], v["ep_efa_training_hold_out_max_abs_error_pct"]),
+                         (len(hold), max(abs(r["error_pct"]) for r in hold)))
+
+    def test_remote_copies_of_a_deduplicating_dispatcher(self):
+        self.assertEqual(mm.efa_remote_copies(0.0, 8), 0.0)
+        self.assertAlmostEqual(mm.efa_remote_copies(0.5, 8), 2 * (1 - 0.5 ** 8) * 0.5)      # 2 domains: about 1 copy
+        self.assertAlmostEqual(mm.efa_remote_copies(0.75, 8), 4 * (1 - 0.75 ** 8) * 0.75)   # 4 domains: 2.7 copies, not 6
+        self.assertLess(mm.efa_remote_copies(0.75, 4), mm.efa_remote_copies(0.75, 8))      # group-limited routing sends fewer
 
 
 if __name__ == "__main__":

@@ -427,10 +427,141 @@ B300_PAIRS = [
 B300_KEYS = ("p6-b300.48xlarge", "dgx-b300")
 
 
+# --- EP all-to-all over EFA (mfu-model-6): mfu_model.LINK_EFFICIENCY["ep_efa"] = EP_EFA_KERNEL x EP_EFA_TRAINING -------------
+# Step 1, the kernel: our DeepEP-class dispatch / combine micro-benchmarks (repo benchmarks/ep-dispatch-combine-bf16), high-throughput
+# kernels, BF16, 4,096 tokens x 7,168 hidden, top-8, 256 experts, the best DeepEP-class transport (NVSHMEM or UCCL) of each cell.
+# DeepEP's test_internode counts "RDMA" bytes once per (token, destination node) INCLUDING the token's own node
+# (https://github.com/deepseek-ai/DeepEP/blob/e0eaaf94/tests/test_internode.py, num_rdma_token_sent); by symmetry 1 - 1/nodes of
+# them cross EFA. Kernel EFA efficiency = harmonic mean of dispatch and combine x (1 - 1/nodes) / EFA GB/s per GPU.
+# Fit: the 4-node cells (EP 32, the EP group of our training runs). Hold-out: 2 and 8 nodes, and p5en.
+EP_BENCH = REPO + "ep-dispatch-combine-bf16/"
+EP_DISPATCH_RUNS = [  # (id, hardware, nodes, best dispatch GB/s, best combine GB/s, transport, fit, source)
+    ("p5-4n", "p5.48xlarge", 4, 43.7, 46.1, "NVSHMEM", True, EP_BENCH + "p5-8nodes"),
+    ("b300-4n", "p6-b300.48xlarge", 4, 102.1, 95.3, "UCCL", True, EP_BENCH + "p6-b300-8nodes"),
+    ("p5en-2n", "p5en.48xlarge", 2, 71.73, 63.27, "NVSHMEM", False, EP_BENCH + "p5en-2nodes"),
+    ("p5-8n", "p5.48xlarge", 8, 39.6, 39.2, "NVSHMEM", False, EP_BENCH + "p5-8nodes"),
+    ("b300-2n", "p6-b300.48xlarge", 2, 126.6, 106.4, "NVSHMEM", False, EP_BENCH + "p6-b300-8nodes"),
+    ("b300-8n", "p6-b300.48xlarge", 8, 93.9, 90.5, "UCCL", False, EP_BENCH + "p6-b300-8nodes"),
+]
+
+
+def ep_kernel_efficiency(row):
+    _, hw, nodes, disp, comb = row[:5]
+    return 2 / (1 / disp + 1 / comb) * (1 - 1 / nodes) / mm.HARDWARE[hw]["net"]
+
+
+def fit_ep_efa_kernel(rows=EP_DISPATCH_RUNS):
+    """EP_EFA_KERNEL: geometric mean of the kernel EFA efficiency of the fit cells."""
+    fit = [ep_kernel_efficiency(r) for r in rows if r[6]]
+    return round(math.exp(statistics.mean(math.log(x) for x in fit)), 3)
+
+
+def evaluate_ep_kernel(rows=EP_DISPATCH_RUNS):
+    out = []
+    for r in rows:
+        e = ep_kernel_efficiency(r)
+        out.append({"id": r[0], "hardware": r[1], "nodes": r[2], "dispatch_gb_s": r[3], "combine_gb_s": r[4], "transport": r[5],
+                    "efficiency": round(e, 3), "error_pct": round((mm.EP_EFA_KERNEL / e - 1) * 100, 1), "fit": r[6], "source": r[7]})
+    return out
+
+
+# Step 2, inside a training step: our DeepEP-over-EFA pre-training runs on p6-b300 (Megatron-Bridge 0.4.2, BF16, TP 8, EP 32 over
+# 4 nodes, expert TP 1, micro batch 4, global batch 256, overlap on: VP 2 and no recompute, as the bench sets them). The share of the
+# kernel rate a training step reaches (smaller dispatches of 2,048 tokens, SMs shared with the GEMMs, the host proxy, waiting for
+# the slowest of 32 ranks) is fitted on the 16-node run and checked on the 32-node runs (two of them are scored rows of RUNS).
+K2_RESULTS = AWSOME_MB + "kimi-k2/benchmarks/RESULTS.md"
+DSV3_RESULTS = AWSOME_MB + "dsv3/benchmarks/RESULTS.md"
+EP_EFA_RUNS = [
+    _run("repo-kimi-k2-b300-16n", "Kimi-K2", "p6-b300.48xlarge", "bf16", 128, 256, 4, 4096, tp=8, pp=4, vp=2, ep=32, etp=1,
+         dispatcher="deepep", a2a_overlap=True, metric="tokens_per_gpu", value=round(256 * 4096 / 6.420 / 128, 1), fit=True,
+         source=REPO + "pretrain-kimi-k2-moe-bf16/p6-b300-16nodes (uccl-mb4-overlap-on, 6.420 s/step)",
+         layout="pinned: " + K2_RESULTS + " (appendix: TP8 / PP4 / EP32, GBS 256 held fixed, mb 4, overlap on)",
+         note="config.yaml says PP 8, VP 1 and GBS 128; RESULTS.md says PP4 and GBS 256, which the logged 261.3 TFLOPS/GPU "
+              "at 6.42 s confirm (128 sequences would be 131 TFLOPS/GPU)"),
+    [r for r in RUNS if r["id"] == "repo-kimi-k2-b300-32n"][0],
+    [r for r in RUNS if r["id"] == "repo-dsv3-b300-32n"][0],
+    _run("repo-kimi-k2-b300-32n-uccl", "Kimi-K2", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, vp=2, ep=32, etp=1,
+         dispatcher="deepep", a2a_overlap=True, metric="tokens_per_gpu", value=round(256 * 4096 / 3.834 / 256, 1),
+         source=REPO + "pretrain-kimi-k2-moe-bf16/p6-b300-32nodes (uccl-mb4-overlap-on, 3.834 s/step)",
+         layout="pinned: " + K2_RESULTS + " (headline table, DeepEP+UCCL column)"),
+]
+# Shown, not scored: the overlap-off cells run full recompute ("recompute_granularity full", bench_kimi_k2_pretrain.py), which the
+# module list of mfu_model cannot express (the attention projections are not a module), and the micro batch 1 cells, whose expert
+# GEMMs of 512 tokens per rank are slower than the model's micro-batch-free compute term. Both are listed in
+# docs/CALCULATOR-HARDWARE.md section 6b with their errors.
+EP_EFA_SHOWN = [
+    _run("repo-kimi-k2-b300-32n-ovloff", "Kimi-K2", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, ep=32, etp=1,
+         dispatcher="deepep", a2a_overlap=False, overlap_ep=0.0, recompute=["mlp", "moe", "core_attn", "mla_up_proj", "layernorm"],
+         metric="tokens_per_gpu", value=round(256 * 4096 / 6.041 / 256, 1), source=K2_RESULTS + " (uccl mb4 overlap off, 6.041 s)",
+         layout="unverified: full recompute approximated by the module list"),
+    _run("repo-kimi-k2-b300-16n-ovloff", "Kimi-K2", "p6-b300.48xlarge", "bf16", 128, 256, 4, 4096, tp=8, pp=4, ep=32, etp=1,
+         dispatcher="deepep", a2a_overlap=False, overlap_ep=0.0, recompute=["mlp", "moe", "core_attn", "mla_up_proj", "layernorm"],
+         metric="tokens_per_gpu", value=round(256 * 4096 / 9.852 / 128, 1), source=K2_RESULTS + " (16-node uccl mb4 overlap off, 9.852 s)",
+         layout="unverified: full recompute approximated by the module list"),
+    _run("repo-dsv3-b300-32n-ovloff", "DeepSeek-V3", "p6-b300.48xlarge", "bf16", 256, 256, 4, 4096, tp=8, pp=8, ep=32, etp=1,
+         dedup_by_group=True, dispatcher="deepep", a2a_overlap=False, overlap_ep=0.0,
+         recompute=["mlp", "moe", "core_attn", "mla_up_proj", "layernorm"],
+         metric="tokens_per_gpu", value=round(256 * 4096 / 6.263 / 256, 1), source=DSV3_RESULTS + " (uccl mb4 overlap off, 6.263 s)",
+         layout="unverified: the recompute of the overlap-off recipe is not recorded; full recompute assumed"),
+]
+
+
+def ep_kernel_markdown(rows):
+    out = ["| Cell | Hardware | Nodes | Transport | Dispatch GB/s | Combine GB/s | Kernel EFA efficiency | Fitted constant vs cell | Set |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for x in rows:
+        out.append(f"| {x['id']} | {x['hardware']} | {x['nodes']} | {x['transport']} | {x['dispatch_gb_s']} | {x['combine_gb_s']} | "
+                   f"{x['efficiency']:.3f} | {x['error_pct']:+.1f}% | {'fit' if x['fit'] else 'hold-out'} |")
+    return "\n".join(out)
+
+
+def fit_ep_efa_training(runs=EP_EFA_RUNS):
+    """EP_EFA_TRAINING: the share of EP_EFA_KERNEL that makes the fit run(s) match (geometric mean of the per-run solutions)."""
+    saved = mm.LINK_EFFICIENCY["ep_efa"]
+    shapes, sols = {}, []
+    try:
+        for r in runs:
+            if not r["fit"]:
+                continue
+
+            def f(x, r=r):
+                mm.LINK_EFFICIENCY["ep_efa"] = x * mm.EP_EFA_KERNEL
+                return predict(r, shapes)[0]
+            sols.append(_solve(f, r["reported"], lo=0.01, hi=1.5))
+    finally:
+        mm.LINK_EFFICIENCY["ep_efa"] = saved
+    return round(math.exp(statistics.mean(math.log(v) for v in sols)), 3)
+
+
+def ep_efa_scored(rows):
+    """Rows of evaluate(EP_EFA_RUNS) that are hold-out (the fit row is excluded)."""
+    return [x for x in rows if not x["fit"]]
+
+
+@contextlib.contextmanager
+def mfu_model_5_ep():
+    """The EP over EFA term as mfu-model-5 had it, for before / after tables: every copy of a token (top-k) at the share of peers
+    off the node, at LINK_EFFICIENCY["net"] (0.80), with no per-domain de-duplication."""
+    saved = (mm.LINK_EFFICIENCY["ep_efa"], mm.efa_remote_copies)
+    mm.LINK_EFFICIENCY["ep_efa"] = mm.LINK_EFFICIENCY["net"]
+    mm.efa_remote_copies = lambda share, picks: share * picks
+    try:
+        yield
+    finally:
+        mm.LINK_EFFICIENCY["ep_efa"], mm.efa_remote_copies = saved
+
+
 @contextlib.contextmanager
 def mfu_model_4():
     """The model as it was before the B300 refit (mfu-model-4), for before / after tables: no power term on the B300, Blackwell
-    BF16 base efficiency 0.443, the shared MoE half width on Blackwell, and VP 1 on our two p6-b300 MoE rows."""
+    BF16 base efficiency 0.443, the shared MoE half width on Blackwell, and VP 1 on our two p6-b300 MoE rows; and the EP over EFA
+    term of mfu-model-5 (mfu_model_5_ep), which mfu-model-4 had too."""
+    with mfu_model_5_ep(), _mfu_model_4_b300():
+        yield
+
+
+@contextlib.contextmanager
+def _mfu_model_4_b300():
     saved_hw = {k: {f: mm.HARDWARE[k].get(f) for f in ("tgp_w", "tgp_ref_w")} for k in B300_KEYS}
     saved_base, saved_half = mm.BASE_EFFICIENCY[("blackwell", "bf16")], dict(mm.MOE_EXPERT_HALF_FFN_FAMILY)
     rows = [r for r in RUNS if r["id"] in VP2_CORRECTED]
@@ -868,3 +999,9 @@ if __name__ == "__main__":
     print("\nHGX B300 vs B200, same plan (hold-out of the power term)\n")
     print(pairs_markdown(b300_rows))
     print(json.dumps(pair_summary(b300_rows), indent=1))
+    print("\nEP all-to-all over EFA, step 1: kernel efficiency of our dispatch / combine micro-benchmarks\n")
+    print(ep_kernel_markdown(evaluate_ep_kernel()))
+    print("\nEP all-to-all over EFA, step 2: our DeepEP-over-EFA training runs (fit: Kimi-K2 16 nodes)\n")
+    print(markdown(evaluate(EP_EFA_RUNS)))
+    print("\nShown, not scored (overlap off: full recompute, not expressible as a module list)\n")
+    print(markdown(evaluate(EP_EFA_SHOWN)))

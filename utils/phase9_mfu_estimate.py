@@ -53,16 +53,19 @@ HARDWARE_ALIASES = {
     "trn3-gen1.ultraserver": "trn3-gen1-ultraserver",
     "trn3-gen2-ultraserver": "trn3-gen2-ultraserver", "trn3-gen2": "trn3-gen2-ultraserver", "trn3gen2": "trn3-gen2-ultraserver",
     "trn3-gen2.ultraserver": "trn3-gen2-ultraserver",
-    # GB300: AWS has published no instance type names. The calculator's own label is the UltraServer (72 GPUs).
-    "p6e-gb300-ultraserver": "p6e-gb300-ultraserver", "gb300": "p6e-gb300-ultraserver", "p6e-gb300": "p6e-gb300-ultraserver",
-    "gb300-nvl72": "p6e-gb300-ultraserver", "gb300-ultraserver": "p6e-gb300-ultraserver",
+    # GB300 UltraServers: u-p6e-gb300x72 (18 instances of 4 GPUs) and u-p6e-gb300x36 (9 of 4), names given by paragao (2026-11-18) with
+    # https://aws.amazon.com/ec2/instance-types/p6/. With no size given the 72-GPU UltraServer is meant, as for GB200.
+    "u-p6e-gb300x72": "u-p6e-gb300x72", "gb300": "u-p6e-gb300x72", "p6e-gb300": "u-p6e-gb300x72",
+    "gb300-nvl72": "u-p6e-gb300x72", "gb300x72": "u-p6e-gb300x72", "gb300-ultraserver": "u-p6e-gb300x72",
+    "p6e-gb300-ultraserver": "u-p6e-gb300x72",
+    "u-p6e-gb300x36": "u-p6e-gb300x36", "gb300x36": "u-p6e-gb300x36", "gb300-nvl36": "u-p6e-gb300x36",
 }
 GPU_OF_INSTANCE = {
     "p5.48xlarge": "H100 80GB", "p5e.48xlarge": "H200 141GB", "p5en.48xlarge": "H200 141GB",
     "p6-b200.48xlarge": "B200 180GB", "p6-b300.48xlarge": "B300 268GB",
     "p4d.24xlarge": "A100 40GB", "p4de.24xlarge": "A100 80GB",
     "u-p6e-gb200x72": "GB200 185GB", "u-p6e-gb200x36": "GB200 185GB",
-    "p6e-gb300-ultraserver": "GB300 279GB",
+    "u-p6e-gb300x72": "GB300 279GB", "u-p6e-gb300x36": "GB300 279GB",
     "trn1.32xlarge": "Trainium1 32GiB (16 chips)", "trn1n.32xlarge": "Trainium1 32GiB (16 chips)",
     "trn2.48xlarge": "Trainium2 96GiB (16 chips)", "trn2-ultraserver": "Trainium2 96GiB (64 chips, UltraServer)",
     "trn3-gen1-ultraserver": "Trainium3 144GiB (64 chips, Gen1 UltraServer)", "trn3-gen2-ultraserver": "Trainium3 144GiB (144 chips, Gen2 UltraServer)",
@@ -125,7 +128,8 @@ INSTANCE_SPECS = {
     "u-p6e-gb200x36": {"mem_gb": 185, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
     # GB300 UltraServer: 279 GB per GPU is derived (AWS: 1.5x the GPU memory of P6e-GB200, 13.4 TB x 1.5 / 72); AWS gives no
     # per-GPU figure. EFA 100 GB/s per GPU x 72 = 7,200 GB/s per UltraServer (paragao, 2026-11-17; see mfu_model.HARDWARE).
-    "p6e-gb300-ultraserver": {"mem_gb": 279, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    "u-p6e-gb300x72": {"mem_gb": 279, "inter_node_bw_gb": 7200, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
+    "u-p6e-gb300x36": {"mem_gb": 279, "inter_node_bw_gb": 3600, "intra_node_bw_gbps": 1800, "peak_tflops_bf16": 2500},
 }
 # On-demand USD per instance-hour (an estimate, not a quote).
 INSTANCE_COST_PER_HOUR = {
@@ -137,7 +141,7 @@ INSTANCE_COST_PER_HOUR = {
 }
 # No public on-demand price: GB200 UltraServers are sold through EC2 Capacity Blocks for ML and the price is set at
 # purchase (https://aws.amazon.com/ec2/capacityblocks/pricing/). The estimate shows no cost; it never invents one.
-PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "p6e-gb300-ultraserver", "trn2.48xlarge", "trn2-ultraserver",
+PRICE_UNKNOWN_HARDWARE = ("u-p6e-gb200x72", "u-p6e-gb200x36", "u-p6e-gb300x72", "u-p6e-gb300x36", "trn2.48xlarge", "trn2-ultraserver",
                           "trn3-gen1-ultraserver", "trn3-gen2-ultraserver")
 PRICE_UNKNOWN_NOTE = ("Price unknown: this hardware is sold through EC2 Capacity Blocks for ML and AWS publishes no "
                       "on-demand price, so no cost is estimated. GPU count, time and billed units are still given.")
@@ -316,6 +320,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     pp = int(config.get("pipeline_parallel", 1) or 1)
     ep = int(config.get("expert_parallel", 1) or 1)
     vp = int(config.get("virtual_pipeline_parallel", 1) or 1)
+    etp_given = int(config.get("expert_tensor_parallel") or 0) or None  # expert TP; default: TP when TP x EP fits a stage, else 1
     sequence_length = int(config.get("sequence_length", 4096))
     micro_batch_size = config.get("micro_batch_size", 1)
     total_tokens_b = float(config.get("total_tokens_b", 100))
@@ -385,6 +390,8 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         zero = zero or (max(1, p1["best_zero"]) if p1 else 1)
         plan = {"num_gpus": num_gpus, "tp": c["tp"], "pp": c["pp"], "cp": 1, "vp": vp, "ep": c["ep"],
                 "mbs": mbs, "seq": sequence_length, "gbs": config.get("global_batch_size"), "zero": zero}
+        if c.get("etp"):
+            plan["etp"] = c["etp"]
         if zero >= 3 and p1:
             plan["zero3_prefetch"] = p1["zero3_prefetch"]
         return mm.estimate(shape, mm_hw, plan, precision)
@@ -397,12 +404,22 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
     # Trainium plans DP, TP (NeuronCores, up to 32), PP and ZeRO-1 only: EP and CP are experimental in the Neuron SDK (2.31 MoE collectives).
     cands = [c for c in mm.candidate_plans(num_gpus, variant["layers"], 0 if trn else n_experts,
                                            mm_hw["gpn"] if trn else gpus_per_node, sequence_length,
-                                           tp_options=(1, 2, 4, 8, 16, 32) if trn else (1, 2, 4, 8))
+                                           tp_options=(1, 2, 4, 8, 16, 32) if trn else (1, 2, 4, 8), hw=None if trn else mm_hw,
+                                           etp=None if trn else etp_given)
              if all(c[k] == v for k, v in fixed.items())]
     if not cands:
+        why = ""
+        if fixed.get("ep") and n_experts and not trn:
+            lay = mm.ep_domain_layout(mm_hw, num_gpus, fixed["ep"], etp_given or 1, n_experts)
+            if lay.get("refused"):
+                why = f" EP {fixed['ep']}: {lay['refused']}."
+            elif lay["used_gpus"] != num_gpus:
+                why = (f" EP {fixed['ep']} groups do not tile {num_gpus} GPUs in {mm.domain_gpus(mm_hw)}-GPU NVLink domains without "
+                       f"crossing one; {lay['used_gpus']} GPUs ({lay['gpus_per_domain']} per domain) would.")
         return {"error": f"No valid plan with {', '.join(f'{k.upper()}={v}' for k, v in fixed.items())} on "
                          f"{num_gpus} GPUs: TP x PP must divide the GPU count, TP <= GPUs per node, EP must "
-                         "divide the experts and the GPUs per pipeline stage."}
+                         "divide the experts and the GPUs per pipeline stage, and an EP group must not straddle an NVLink domain."
+                         + why}
     ranked = sorted(cands, key=lambda c: -plan_estimate(c, None, 1)["tokens_per_second"])
     # Plans that fit memory to score. Until mfu-model-2 the default was 6 of a ZeRO-1, MBS-1 pre-ranking;
     # with ZeRO-3 timed honestly those are often the slow ones, so the default now scores all of them.
@@ -496,6 +513,7 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
             "pipeline_parallel": pp,
             "data_parallel": dp,
             "expert_parallel": ep,
+            "expert_tensor_parallel": est["plan"]["etp"] if ep > 1 else 1,
             "auto_selected": auto_selected,
             "zero_stage": p1["best_zero"],
             "micro_batch_size": chosen_mbs,
@@ -606,8 +624,11 @@ def _estimate_training(config, variant, pc, ac, core, phase1_mod):
         result["alltoall_communication"] = {
             "a2a_per_step_ms": round(t["ep_total"] * 1e3, 2),
             "a2a_exposed_ms": round(t["ep_exposed"] * 1e3, 2),
-            "comm_type": ("intra-node (NVLink)" if ep * est["plan"]["etp"] <= gpus_per_node
-                          else "inter-node (EFA)"),
+            "comm_type": ("NVLink only (the EP group sits in one NVLink domain)" if est["ep_efa_share"] == 0
+                          else f"EFA: {est['ep_efa_share']:.0%} of the all-to-all leaves the NVLink domain"),
+            "ep_group_gpus": ep * est["plan"]["etp"],
+            "nvlink_domain_gpus": mm.domain_gpus(mm_hw),
+            "efa_share": est["ep_efa_share"],
         }
     return result
 

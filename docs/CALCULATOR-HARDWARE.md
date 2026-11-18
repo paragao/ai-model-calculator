@@ -9,10 +9,10 @@ All BF16 and FP8 figures are dense (no sparsity), per GPU. "Derived" means compu
 
 ## 1. Three sizes that are all "8" on an HGX node
 
-| Field | Meaning | HGX node (p5, p6-b200, p6-b300) | GB200 `u-p6e-gb200x72` | GB200 `u-p6e-gb200x36` |
+| Field | Meaning | HGX node (p5, p6-b200, p6-b300) | `u-p6e-gb200x72`, `u-p6e-gb300x72` | `u-p6e-gb200x36`, `u-p6e-gb300x36` |
 |---|---|---|---|---|
 | `domain_gpus` (`gpn`) | GPUs one NVLink domain reaches. TP, EP and CP groups up to this size stay on NVLink | 8 | 72 | 36 |
-| `instance_gpus` | GPUs of the smallest launchable instance | 8 | 4 (`p6e-gb200.36xlarge`) | 4 |
+| `instance_gpus` | GPUs of the smallest launchable instance | 8 | 4 (`p6e-gb200.36xlarge`; 18 instances) | 4 (9 instances) |
 | `billing_gpus` | GPUs bought as one unit (a Capacity Block buys whole UltraServers) | 8 | 72 | 36 |
 
 The calculator sizes the UltraServer. A request for `p6e-gb200.36xlarge` or `GB200` means the 72-GPU
@@ -46,7 +46,7 @@ HGX nodes (domain 8) are not touched by any of this.
 | Rule | Where |
 |---|---|
 | Automatic GPU counts: 4, 8, 16, 32, 64 (steps of `instance_gpus` inside one domain), then 72, 128, 144, 256, 288, ... (whole domains, and 64 per domain) | `mfu_model.auto_gpu_counts` |
-| A request for n GPUs that is not a power of two is also tried as the largest power of two below it (72 -> 64, 144 -> 128). The faster plan that fits wins. The result has `rack_layout` with the GPUs requested, used and idle, and what was considered | Lambda `_run_once`, phase 9 `estimate_training` |
+| A request for n GPUs that is not a power of two is also tried as the largest power of two below it (72 -> 64, 144 -> 128) and, for whole domains, as 64 per domain (216 -> 192; mfu-model-6). The faster plan that fits wins. The result has `rack_layout` with the GPUs requested, used and idle, and what was considered | Lambda `_run_once`, phase 9 `estimate_training` |
 | n GPUs that do not fill whole domains (128 on 72-GPU UltraServers) run as 64 per UltraServer, so an EP, TP or CP group of up to 64 stays on NVLink | `mfu_model.rack_hw`, called by `estimate` |
 | Billing is whole UltraServers: `ceil(requested GPUs / billing_gpus)`, so 64 of 72 bills 1, 128 bills 2. The idle GPUs are billed | `num_nodes`, `hardware.billed_units` |
 | TP stays in {1, 2, 4, 8}. NeMo's GB200 runs use TP 1-2 and spend the domain on EP and PP | `mfu_model.candidate_plans` (unchanged) |
@@ -72,8 +72,13 @@ The AWS GB200 EFA figure (100 GB/s per GPU) is not checked by these rows: they u
 AWS has published little for P6e-GB300 ([GA announcement](https://aws.amazon.com/about-aws/whats-new/2025/12/amazon-ec2-p6e-gb300-ultraservers-nvidia-gb300-nvl72-generally-available):
 "contact your AWS sales representative"). What is published is used. paragao gave the network layout on 2026-11-17
 (below, marked "paragao"). What nobody has published stays unknown, is listed in the result (`hardware.unknowns`) and is
-never filled in by a guess; what paragao gave is listed in `hardware.user_provided`. The calculator's label is
-`p6e-gb300-ultraserver`, not an AWS instance type: AWS has published no GB300 instance names.
+never filled in by a guess; what paragao gave is listed in `hardware.user_provided`.
+
+**Names (mfu-model-6).** `u-p6e-gb300x72` (72 B300 GPUs = 18 instances of 4) and `u-p6e-gb300x36` (36 GPUs = 9 instances of 4), the same
+per-GPU specs, as given by paragao on 2026-11-18 with the [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/) (its name table does not
+render in a plain fetch, so the names are cited as given by paragao plus that page). They follow the GB200 pattern (`u-p6e-gb200x72`, `x36`).
+The calculator's own label `p6e-gb300-ultraserver` is gone as a name: the aliases `gb300`, `p6e-gb300`, `gb300-nvl72` (and the old label) map
+to `u-p6e-gb300x72`; `gb300x36` and `gb300-nvl36` map to `u-p6e-gb300x36`. Every result, report and agent text says `u-p6e-gb300x72` or `x36`.
 
 | Field | Value | Source |
 |---|---|---|
@@ -83,7 +88,7 @@ never filled in by a guess; what paragao gave is listed in `hardware.user_provid
 | GPU memory | **279 GB per GPU is derived**: AWS says 1.5x the GPU memory of P6e-GB200 (13.4 TB), so 20.1 TB / 72. NVIDIA lists 20 TB per rack and 288 GB raw per GPU in partner datasheets. AWS gives no usable per-GPU figure | [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/), [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/) |
 | SMs per GPU | 160 (the B300 die) | `mfu_model.SMS_PER_GPU` |
 | EFA bandwidth per GPU | **100 GB/s, given by paragao, 2026-11-17** (not an AWS publication): one UltraServer is 72 B300 GPUs in one NVLink domain, made of 18 servers of 4 GPUs (+ 2 Grace CPUs each), every server with 8 EFA adapters at 400 Gbps = 3200 Gbps = 800 Gbps per GPU = 100 GB/s per GPU, the same per-GPU figure as GB200. EFA carries only traffic **between** UltraServers; inside the 72-GPU domain everything is NVLink. `p6e-gb300` is not in the [AWS instance table](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html) | paragao, 2026-11-17 |
-| Instance types and sizes | **Unknown** as AWS instance names. 4 GPUs per server is from paragao, 2026-11-17 (and the NVL72 compute tray, below), used for the GPU-count steps | [NVIDIA DGX SuperPOD GB300 reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf), paragao, 2026-11-17 |
+| UltraServer names and sizes | `u-p6e-gb300x72` (18 x 4 GPUs) and `u-p6e-gb300x36` (9 x 4 GPUs); no longer in `hardware.unknowns`. 4 GPUs per server is also the NVL72 compute tray | paragao, 2026-11-18, [AWS P6 page](https://aws.amazon.com/ec2/instance-types/p6/); [NVIDIA DGX SuperPOD GB300 reference architecture](https://www.hostcomponents.com/wp-content/uploads/2026/03/dgx-spod-gb300-ra.pdf) |
 | On-demand price | **Unknown.** No cost line | none |
 
 Validation: twelve GB300 / GB200 pairs of NeMo / Megatron-Bridge results (`docs/CALCULATOR-MFU.md` section 7b). GB300 runs faster than GB200 at the same listed peak;
@@ -109,15 +114,51 @@ Example, Llama-3.1-70B BF16 on GB300 (with the board-power term of section 6), 2
 
 | GPUs | UltraServers | Plan | MFU | tokens/s | tokens/s per GPU | Days |
 |---|---|---|---|---|---|---|
-| 72 | 1 | TP 1, PP 4, DP 18, ZeRO-1 | 53.0% | 212,271 | 2,948 | 121.2 |
-| 144 | 2 | TP 1, PP 1, DP 144, ZeRO-2 | 52.9% | 423,621 | 2,942 | 60.7 |
+| 72 | 1 | TP 1, PP 4, DP 18, ZeRO-1 | 49.9% | 199,814 | 2,775 | 128.7 |
+| 144 | 2 | TP 1, PP 1, DP 144, ZeRO-2 | 49.8% | 399,116 | 2,771 | 64.4 |
 
-Example, mfu_model, DeepSeek-V3 shape with 288 experts, FP8, EP = number of GPUs, GB300:
+Example, mfu_model, DeepSeek-V3 shape with 288 experts, FP8, EP = number of GPUs, `u-p6e-gb300x72` (mfu-model-6; the 144-GPU all-to-all
+was 1,352.8 ms in mfu-model-5):
 
 | GPUs | EP all-to-all per step | Step | MFU |
 |---|---|---|---|
-| 72 | 314.2 ms (NVLink) | 1.546 s | 30.8% |
-| 144 | 1,352.8 ms (half over EFA) | 2.273 s | 21.0% |
+| 72 | 314.2 ms (NVLink only) | 1.708 s | 27.9% |
+| 144 | 1,230.7 ms (half of the peers in the other UltraServer: EFA) | 2.349 s | 20.3% |
+
+### 5b. The EP group and the NVLink domain (mfu-model-6)
+
+paragao's rules of 2026-11-18, as the model applies them (`mfu_model.ep_domain_layout`, `ep_efa_share`, `ep_candidates`, `ep_fits_domains`):
+
+| Rule | What the code does |
+|---|---|
+| A. NVLink only when the whole EP group sits in one domain | The group is EP x expert TP consecutive GPUs. Domain = the 8-GPU instance for p5, p5en, p6-b200, p6-b300; the whole UltraServer (36 or 72 GPUs) for u-p6e-gb200x36/x72 and u-p6e-gb300x36/x72, not the 4-GPU instance. A group larger than the domain spans equal shares of whole domains and sends `ep_efa_share` = 1 - share / group of its all-to-all over EFA |
+| B. Groups share a domain, never straddle one | 4 groups of EP 16 fill 64 of 72 GPUs. On 144 GPUs EP 16 would give 9 groups, one across the boundary: the search drops that layout and runs 64 per UltraServer (128 used, 16 idle and billed, `rack_layout`); `estimate` given 144 GPUs counts the straddling group's cross-domain part as EFA (worst rank: 1/2) |
+| C. EP divides the experts; not only powers of two | `ep_candidates`: on rack-scale hardware every multiple of 4 that divides the experts and fits a domain (x72: 16, 32, 36, 64, 72 ...; x36: 16, 32, 36), and multiples of the domain (144). 288 experts on x72: EP 72 = 4 experts per GPU. 256 experts cannot use EP 72 (refused with the reason). HGX keeps the powers of two |
+| D. Prefer plans that keep EP inside the domain | Layouts that straddle are not built; among the rest the fastest plan wins, and EP over EFA now costs what our runs measured (6b) |
+| expert TP | a request may set `expert_tensor_parallel`; otherwise ETP = TP when TP x EP divides a pipeline stage, else 1 (Megatron-Core default, as before). The result shows it (`parallelism.expert_tensor_parallel`) and `alltoall_communication` gives the group size, the domain size and the EFA share |
+
+Scenario tests (`test_hardware_support.EpGroupInsideTheNvlinkDomain`, one test per row, each checked in the layout, in `estimate` and in the
+Lambda; the x72 and x36 rows run on both GB200 and GB300; every test fails on the MR 42 and PR 37 heads, portal `fcc79ea` and GitHub `273fbfc`):
+
+| Experts | Hardware, GPUs bought | EP (expert TP) | Expected | GPUs used | Test |
+|---|---|---|---|---|---|
+| 128 | 4 x p5en, 32 | 8 | NVLink only | 32 | `test_p5en_128_experts_ep8_nvlink_only` |
+| 128 | 4 x p5en, 32 | 16 | EFA 1/2 | 32 | `test_p5en_128_experts_ep16_efa_half` |
+| 128 | 4 x p5en, 32 | 32 | EFA 3/4 | 32 | `test_p5en_128_experts_ep32_efa_three_quarters` |
+| 128 | 4 x p5en, 32 | 8 (2) | EFA 1/2 | 32 | `test_p5en_128_experts_ep8_expert_tp2_efa_half` |
+| 256 | 2 x x72, 144 | 16 | NVLink only | 128 (64 per UltraServer) | `test_x72_256_experts_ep16_nvlink_only_64_per_ultraserver` |
+| 256 | 2 x x72, 144 | 32 | NVLink only | 128 | `test_x72_256_experts_ep32_nvlink_only_64_per_ultraserver` |
+| 256 | 2 x x72, 144 | 64 | NVLink only | 128 | `test_x72_256_experts_ep64_nvlink_only_64_per_ultraserver` |
+| 256 | 2 x x72, 144 | 72 | refused: 72 does not divide 256 | | `test_x72_256_experts_ep72_refused_not_whole_experts` |
+| 256 | 2 x x72, 144 | 128 | EFA 1/2 | 128 | `test_x72_256_experts_ep128_efa_half` |
+| 288 | 1 x x72, 72 | 72 | NVLink only | 72 | `test_x72_288_experts_ep72_nvlink_only_all_72_used` |
+| 288 | 2 x x72, 144 | 144 | EFA 1/2 | 144 | `test_two_x72_288_experts_ep144_efa_half` |
+| 288 | 1 x x36, 36 | 36 | NVLink only | 36 | `test_x36_288_experts_ep36_nvlink_only` |
+| 256 | 1 x x36, 36 | 32 | NVLink only, 4 idle | 32 | `test_x36_256_experts_ep32_nvlink_only_4_idle` |
+| 256 | 1 x x36, 36 | 16 | NVLink only, 4 idle | 32 | `test_x36_256_experts_ep16_nvlink_only_4_idle` |
+
+On 8-GPU nodes every power-of-two group either fits a node or spans whole nodes, so the share equals mfu-model-5's 1 - (8 / ETP) / EP
+(`test_hgx_power_of_two_layouts_are_unchanged`): no HGX plan changes from rule A to C. Only rule E (the EFA cost, 6b) moves HGX numbers.
 
 ## 6. Why GB300 is faster than GB200 at the same peak
 
@@ -241,12 +282,130 @@ p5en: identical (no Hopper constant changed). B200: 15% to 18% fewer tokens/s fo
 (GB300 already had its power term). Param2 on B200 with a 30-day target now needs 512 GPUs instead of 256. These are the moves the B300 and B200 MoE rows asked for;
 dense answers on B300 rise (Llama 3 70B BF16 at 128 GPUs: +6%).
 
-### 6b. Our p6-b300 MoE rows: why the model is high
+### 6b. EP all-to-all over EFA: calibrated on our runs (mfu-model-6)
 
-The two rows are DeepEP dispatcher A/B runs, not tuned training runs: TP 8, PP 8, EP 32, DP 4 on 32 p6-b300, BF16, micro batch 4, global batch 256, mock data with
-forced load balancing ([DeepSeek-V3 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/dsv3/benchmarks/RESULTS.md),
-[Kimi-K2 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/kimi-k2/benchmarks/RESULTS.md); the repo pages say
-"Data sourced from awsome-distributed-ai"). What was checked against the published B300 / B200 pairs:
+Our two p6-b300 MoE rows (Kimi-K2 and DeepSeek-V3, TP 8, PP 8, VP 2, EP 32 over 4 nodes, DeepEP over EFA) were +26.3% and +29.9% in
+mfu-model-5: the model's whole EP time was 0.5 s (DeepSeek-V3) and 1.0 s (Kimi-K2) a step, while swapping only the dispatcher moves the
+measured step by 3.5 s and 3.3 s (history below). mfu-model-6 calibrates the part of the all-to-all that crosses EFA, in two steps, each
+fitted on part of our own measurements and checked on the rest.
+
+**Bytes.** A DeepEP-class dispatcher (DeepEP over NVSHMEM, UCCL-EP) sends a token once to each remote node that holds one of its experts and
+fans it out over NVLink there. So the EFA copies per token are the expected distinct remote domains, `efa_remote_copies` = k (1 - (1 - 1/k)^p) x s
+(k = 1 / (1 - s) domains, p = top-k, or `topk_group` with group-limited routing): 2.7 copies for EP 32 over 4 nodes with top-8, not the 6 that
+mfu-model-5 counted. This is also the byte count of DeepEP's own test, which the kernel step reads.
+
+**Step 1, the kernel: EP_EFA_KERNEL = 0.705.** Our dispatch / combine micro-benchmarks (`benchmarks/ep-dispatch-combine-bf16`, BF16, 4,096
+tokens x 7,168, top-8, 256 experts, high-throughput kernels, the best DeepEP-class transport of each cell). DeepEP's `test_internode` counts
+"RDMA" bytes once per (token, destination node) including the token's own node
+([tests/test_internode.py](https://github.com/deepseek-ai/DeepEP/blob/e0eaaf94/tests/test_internode.py), `num_rdma_token_sent`), so by symmetry
+1 - 1/nodes of them cross EFA. Kernel EFA efficiency = harmonic mean of dispatch and combine x (1 - 1/nodes) / EFA GB/s per GPU. Fit: the
+4-node cells (EP 32, the EP group of the training runs); hold-out: 2 and 8 nodes and p5en.
+
+| Cell | Hardware | Nodes | Transport | Dispatch GB/s | Combine GB/s | Kernel EFA efficiency | Fitted constant vs cell | Set |
+|---|---|---|---|---|---|---|---|---|
+| p5-4n | p5.48xlarge | 4 | NVSHMEM | 43.7 | 46.1 | 0.673 | +4.8% | fit |
+| b300-4n | p6-b300.48xlarge | 4 | UCCL | 102.1 | 95.3 | 0.739 | -4.6% | fit |
+| p5en-2n | p5en.48xlarge | 2 | NVSHMEM | 71.73 | 63.27 | 0.672 | +4.9% | hold-out |
+| p5-8n | p5.48xlarge | 8 | NVSHMEM | 39.6 | 39.2 | 0.689 | +2.3% | hold-out |
+| b300-2n | p6-b300.48xlarge | 2 | NVSHMEM | 126.6 | 106.4 | 0.578 | +21.9% | hold-out |
+| b300-8n | p6-b300.48xlarge | 8 | UCCL | 93.9 | 90.5 | 0.806 | -12.6% | hold-out |
+
+The kernels reach 58% to 81% of the EFA line rate, close to the 0.80 that mfu-model-5 assumed. The kernel alone does not explain the gap.
+
+**Step 2, inside a training step: EP_EFA_TRAINING = 0.31.** Our DeepEP-over-EFA pre-training runs on p6-b300 (Megatron-Bridge 0.4.2, BF16,
+TP 8, EP 32 over 4 nodes, expert TP 1, micro batch 4, global batch 256, overlap on: VP 2 and no recompute, as the bench sets them;
+[Kimi-K2 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/kimi-k2/benchmarks/RESULTS.md), [DeepSeek-V3 results](https://github.com/awslabs/awsome-distributed-ai/blob/main/examples/training/megatron-bridge/dsv3/benchmarks/RESULTS.md)). Fit: Kimi-K2 on 16 nodes (TP 8 / PP 4 / EP 32, 6.420 s; it is
+not in the 38-run set). Hold-out: the two scored 32-node rows and the Kimi-K2 32-node UCCL run. LINK_EFFICIENCY ep_efa = 0.705 x 0.31 = 0.219.
+
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| repo-kimi-k2-b300-16n | Kimi-K2 | 128 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,276 tok/s/GPU | 1,277 tok/s/GPU | +0.1% | 12.5% | 70.9 / 70.8 | fit |
+| repo-kimi-k2-b300-32n | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,094 tok/s/GPU | 1,196 tok/s/GPU | +9.3% | 11.7% | 41.3 / 37.8 | hold-out, layout unverified |
+| repo-dsv3-b300-32n | DeepSeek-V3 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,067 tok/s/GPU | 1,179 tok/s/GPU | +10.5% | 15.2% | 42.4 / 38.3 | hold-out, layout unverified |
+| repo-kimi-k2-b300-32n-uccl | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 1,068 tok/s/GPU | 1,196 tok/s/GPU | +12.0% | 11.7% | 42.3 / 37.8 | hold-out |
+
+The 16-node page's `config.yaml` says PP 8, VP 1 and global batch 128; the awsome-distributed-ai results page says PP 4 and global batch
+256, and the logged 261.3 TFLOPS/GPU at 6.42 s is only consistent with 256 (128 sequences would be 131 TFLOPS/GPU), so the results page is used.
+A training step reaches about a third of the kernel rate. What our data shows, not separated further: each dispatch carries 2,048 tokens per
+rank (4,096 in the benchmark; the results pages show DeepEP paying a fixed cost per dispatch, NCCL wins at micro batch 1), the overlapped
+dispatcher shares SMs with the GEMMs, the EFA path goes through the NVSHMEM host proxy or the UCCL proxy (no IBGDA on EFA), and the step waits for
+the slowest of 32 ranks. The constant is fitted on p6-b300 and assumed for every EFA system (p5, p5en, p6-b200, GB200, GB300): no other EFA
+training run with EP over the network exists in the repo.
+
+Shown, not scored: the overlap-off cells run full recompute (`recompute_granularity full` in the Kimi-K2 bench), which a module list cannot
+express (the attention projections are not a module), and the overlap-off DeepSeek-V3 recipe's recompute is not recorded. The micro batch 1
+cells are left out: their 512-token expert GEMMs run far below the model's micro-batch-free compute term.
+
+| Run | Model | GPUs | Hardware | Prec | Metric | Reported | Predicted | Error | Predicted MFU | Days per 1T tokens, reported / predicted | Set |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| repo-kimi-k2-b300-32n-ovloff | Kimi-K2 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 678 tok/s/GPU | 889 tok/s/GPU | +31.2% | 8.7% | 66.7 / 50.8 | hold-out, layout unverified |
+| repo-kimi-k2-b300-16n-ovloff | Kimi-K2 | 128 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 832 tok/s/GPU | 993 tok/s/GPU | +19.5% | 9.8% | 108.7 / 91.0 | hold-out, layout unverified |
+| repo-dsv3-b300-32n-ovloff | DeepSeek-V3 | 256 | p6-b300.48xlarge | bf16 | tokens_per_gpu | 654 tok/s/GPU | 894 tok/s/GPU | +36.6% | 11.6% | 69.1 / 50.6 | hold-out, layout unverified |
+
+Before and after (error against measured):
+
+| Run | Set | mfu-model-5 | mfu-model-6 |
+|---|---|---|---|
+| repo-kimi-k2-b300-16n | fit | +16.9% | +0.1% |
+| repo-kimi-k2-b300-32n | hold-out | +26.3% | +9.3% |
+| repo-dsv3-b300-32n | hold-out | +29.9% | +10.5% |
+| repo-kimi-k2-b300-32n-uccl | hold-out | +29.4% | +12.0% |
+| repo-kimi-k2-b300-32n-ovloff | shown, not scored | +53.1% | +31.2% |
+| repo-kimi-k2-b300-16n-ovloff | shown, not scored | +42.2% | +19.5% |
+| repo-dsv3-b300-32n-ovloff | shown, not scored | +63.0% | +36.6% |
+
+**What moves.** Only plans whose EP group leaves the NVLink domain on an EFA system. In the 38-run set: the two rows above (+26.3% to +9.3%,
++29.9% to +10.5%); the 38-run summary stays 6.0% median, 38.2% worst (hold-out 7.4%). No DGX, InfiniBand or RoCE row moves (they keep the
+mfu-model-5 term), no dense number moves, and no GB300 / GB200 or B300 / B200 pair moves. The pinned estimates that move are the DeepSeek-V3
+plan of `test_hardware_support.PIN_MM` (EP 32, ETP 1, 256 GPUs: 3/4 of the all-to-all over EFA) on the AWS instances:
+
+| Pin (DeepSeek-V3, EP 32 over 4 nodes) | mfu-model-5 MFU, tok/s/GPU | mfu-model-6 MFU, tok/s/GPU | change |
+|---|---|---|---|
+| p5, p5e, p5en BF16 | 0.2775, 943.7 | 0.224, 761.6 | -19.3% |
+| p5, p5e, p5en FP8 | 0.1997, 1,358.9 | 0.1486, 1,011.0 | -25.6% |
+| p6-b200 BF16 | 0.1697, 1,312.6 | 0.1273, 985.1 | -25.0% |
+| p6-b200 FP8 | 0.1388, 2,148.1 | 0.0899, 1,391.2 | -35.2% |
+| p6-b300 BF16 | 0.2138, 1,654.1 | 0.1768, 1,367.6 | -17.3% |
+| p6-b300 FP8 | 0.1876, 2,902.0 | 0.1372, 2,122.2 | -26.9% |
+| p4d, p4de (BF16 = FP8) | 0.1891, 202.9 | 0.134, 143.8 | -29.1% |
+
+The same plan on `dgx-h100`, `dgx-b200` and `dgx-b300` (InfiniBand) is unchanged. The GLM-5.3-Flash pin with a fixed TP 2 / PP 8 / EP 8 on 256
+p5en (`SameAsGitHubCalculator.test_glm_expert_parallel_plan`; ETP 2, so the EP group is 16 GPUs on 2 nodes) moves the other way, 0.3036 to
+0.3097 MFU and 655,762 to 668,806 tokens/s (+2.0%): with two domains a token crosses EFA about once, not 4 times.
+
+**Live answers** (Lambda, 20T tokens, sequence 4096, BF16; auto, a fixed GPU count, and a 30-day target), mfu-model-5 (MR 42 head `fcc79ea`, PR 37 head `273fbfc`) to
+mfu-model-6. None moves: every plan the search picks for GLM-5.3-Flash and Param2 keeps its EP group inside the NVLink domain (p5en auto:
+TP 4 x EP 4 with ETP 1 on 16 GPUs; GB200 30 days: EP 32 inside 64-GPU shares), and the search found nothing faster with the new EP degrees.
+
+| Case | GPUs | TP/PP/DP/EP | MFU before | MFU after | tok/s before | tok/s after | days before | days after | cost USD before | cost USD after | change |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| glm-p5en-auto | 16 | 4/4/1/4 | 0.3661 | 0.3661 | 49,419 | 49,419 | 5204.4 | 5204.4 | 34,973,707 | 34,973,707 | same |
+| glm-p5en-64 | 64 | 2/16/2/1 | 0.3949 | 0.3949 | 213,197 | 213,197 | 1206.4 | 1206.4 | 32,427,986 | 32,427,986 | same |
+| glm-p5en-30d | 4096 | 8/16/32/1 | 0.3254 | 0.3254 | 11,245,265 | 11,245,265 | 22.9 | 22.9 | 39,347,149 | 39,347,149 | same |
+| glm-b300-auto | 8 | 4/2/1/4 | 0.2705 | 0.2705 | 41,528 | 41,528 | 6193.4 | 6193.4 | 37,160,441 | 37,160,441 | same |
+| glm-b300-64 | 64 | 1/16/4/1 | 0.289 | 0.289 | 354,935 | 354,935 | 724.6 | 724.6 | 34,782,907 | 34,782,907 | same |
+| glm-b300-30d | 2048 | 1/1/2048/8 | 0.2725 | 0.2725 | 10,712,152 | 10,712,152 | 24.0 | 24.0 | 36,879,770 | 36,879,770 | same |
+| glm-gb200x72-auto | 8 | 8/1/1/8 | 0.2286 | 0.2286 | 39,006 | 39,006 | 6593.8 | 6593.8 | unknown | unknown | same |
+| glm-gb200x72-72 | 72 | 2/9/4/1 | 0.2552 | 0.2552 | 391,858 | 391,858 | 656.4 | 656.4 | unknown | unknown | same |
+| glm-gb200x72-30d | 2048 | 1/1/2048/32 | 0.2438 | 0.2438 | 10,645,568 | 10,645,568 | 24.2 | 24.2 | unknown | unknown | same |
+| glm-gb300x72-auto | 8 | 4/2/1/4 | 0.2868 | 0.2868 | 48,922 | 48,922 | 5257.4 | 5257.4 | unknown | unknown | same |
+| glm-gb300x72-72 | 72 | 1/9/8/1 | 0.3106 | 0.3106 | 476,913 | 476,913 | 539.3 | 539.3 | unknown | unknown | same |
+| glm-gb300x72-30d | 2048 | 1/1/2048/16 | 0.2928 | 0.2928 | 12,788,502 | 12,788,502 | 20.1 | 20.1 | unknown | unknown | same |
+| param2-p5en-auto | 8 | 1/2/4/1 | 0.3869 | 0.3869 | 175,504 | 175,504 | 1465.5 | 1465.5 | 4,924,073 | 4,924,073 | same |
+| param2-p5en-64 | 64 | 1/1/64/1 | 0.3866 | 0.3866 | 1,403,038 | 1,403,038 | 183.3 | 183.3 | 4,927,578 | 4,927,578 | same |
+| param2-p5en-30d | 512 | 1/1/512/1 | 0.3818 | 0.3818 | 11,085,193 | 11,085,193 | 23.2 | 23.2 | 4,989,416 | 4,989,416 | same |
+| param2-b300-auto | 8 | 1/1/8/1 | 0.2783 | 0.2783 | 287,234 | 287,234 | 895.4 | 895.4 | 5,372,651 | 5,372,651 | same |
+| param2-b300-64 | 64 | 1/1/64/1 | 0.278 | 0.278 | 2,294,903 | 2,294,903 | 112.1 | 112.1 | 5,379,608 | 5,379,608 | same |
+| param2-b300-30d | 256 | 1/1/256/1 | 0.2768 | 0.2768 | 9,139,412 | 9,139,412 | 28.1 | 28.1 | 5,403,270 | 5,403,270 | same |
+| param2-gb200x72-auto | 4 | 1/2/2/1 | 0.247 | 0.247 | 141,601 | 141,601 | 1816.4 | 1816.4 | unknown | unknown | same |
+| param2-gb200x72-72 | 72 | 1/1/72/1 | 0.2467 | 0.2467 | 2,546,300 | 2,546,300 | 101.0 | 101.0 | unknown | unknown | same |
+| param2-gb200x72-30d | 256 | 1/1/256/1 | 0.2458 | 0.2458 | 9,018,405 | 9,018,405 | 28.5 | 28.5 | unknown | unknown | same |
+| param2-gb300x72-auto | 4 | 1/1/4/1 | 0.2996 | 0.2996 | 171,766 | 171,766 | 1497.4 | 1497.4 | unknown | unknown | same |
+| param2-gb300x72-72 | 72 | 1/1/72/1 | 0.2991 | 0.2991 | 3,086,419 | 3,086,419 | 83.3 | 83.3 | unknown | unknown | same |
+| param2-gb300x72-30d | 256 | 1/1/256/1 | 0.2977 | 0.2977 | 10,922,396 | 10,922,396 | 23.5 | 23.5 | unknown | unknown | same |
+
+**History: why mfu-model-5 was high on these rows** (kept from MR 42). The two rows are DeepEP dispatcher A/B runs, not tuned training runs.
+What was checked against the published B300 / B200 pairs:
 
 | Item | Our rows | Published B300 / B200 pairs | Finding |
 |---|---|---|---|
@@ -264,7 +423,7 @@ The cause is the all-to-all over EFA. The same bench with overlap off, changing 
 9.77 to 6.26 s) and 3.3 s (Kimi-K2: 9.30 to 6.04 s), so the EP all-to-all costs seconds a step on this layout. The model's whole EP time is 0.5 s (DeepSeek-V3) and 1.0 s
 (Kimi-K2), and its overlap-off step is 2.4 s and 2.1 s shorter than the measured DeepEP step (`test_our_b300_moe_rows_are_high_because_of_the_efa_all_to_all`). The
 published B300 / B200 pairs keep EP inside one NVLink node, so the power term and the Blackwell constants are tested where the EFA does not matter, and the EP-over-EFA
-gap shows only on our rows. Fixing it means a measured EFA all-to-all efficiency for DeepEP, which also moves p5en MoE answers (EP across nodes): not part of this change.
+gap shows only on our rows. MR 42 left the fix out; mfu-model-6 makes it (the calibration above), and it moves p5en MoE answers only where EP crosses nodes.
 The portal repo's `benchmarks/pretrain-*-moe-bf16/p6-b300-32nodes/config.yaml` files are left as they are; the mislabels above are listed for a separate fix.
 S3 `repos/benchmarks/` is the CI copy of that folder (portal `docs/CI.md`) and was not read: this host has no access to the portal account.
 
